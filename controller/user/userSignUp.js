@@ -5,7 +5,7 @@ const { STORE_PLAIN_PASSWORD } = require('../../config/accessControlConfig');
 
 async function userSignUpController (req,res) {
     try {
-        const { email, password, name, role, referredBy } = req.body
+        const { email, password, name, referredBy } = req.body
 
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,8 +22,10 @@ async function userSignUpController (req,res) {
         if(!name){
             throw new Error("Please provide name")
         }
-        // Default to customer role if not provided (MVP: customer-only)
-        const userRole = role ? role.toLowerCase() : 'customer';
+        // Public sign-up (the website's "Create account") makes a blog-only 'member':
+        // no portal screens, not a client. The caller never chooses the role — portal
+        // roles (customer, admin, ...) are granted by an admin through /api/addRole.
+        const userRole = 'member';
 
         // Password validation
         if (password.length < 6) {
@@ -43,24 +45,14 @@ async function userSignUpController (req,res) {
         let existingUser = await userModel.findOne({ email: normalizedEmail });
 
         if (existingUser) {
-            // Check if role already exists in roles array
-            if (existingUser.roles.includes(userRole)) {
-                throw new Error("User with this role already exists.");
-            } else {
-                // Add new role to roles array
-                existingUser.roles.push(userRole);
-                await existingUser.save();
-
-                return res.status(200).json({
-                    data: existingUser,
-                    success: true,
-                    error: false,
-                    message: "Role added to existing user successfully!"
-                });
-            }
+            // Sign up never grants a role to an existing account — that was the
+            // other half of the same hole (email already registered + a role in
+            // the body used to add it with no password check). An account that
+            // already exists should sign in instead.
+            throw new Error("An account with this email already exists. Please sign in.");
         }
 
-        // If user does not exist, create new user with roles array (default: customer)
+        // If user does not exist, create new user with roles array (blog-only member)
         const payload = {
             email: normalizedEmail,
             name,
@@ -90,7 +82,7 @@ async function userSignUpController (req,res) {
         }
 
         res.status(201).json({
-            data: saveUser,
+            data: { ...saveUser.toObject(), password: undefined, plainPassword: undefined },
             success: true,
             error: false,
             message: "User Created Successfully!"

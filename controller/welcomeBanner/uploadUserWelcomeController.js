@@ -4,7 +4,7 @@ const UserWelcome = require("../../models/userWelcomeModal")
 async function uploadUserWelcomeController(req, res) {
     try {
         const sessionUserId = req.userId
-        if(!uploadPermission(sessionUserId)){
+        if(!(await uploadPermission(sessionUserId))){
             throw new Error("Permission denied")
         }
 

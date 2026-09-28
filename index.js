@@ -17,13 +17,23 @@ const { getAllowedOrigins } = require('./config/allowedOrigins');
 
 const app = express()
 const server = http.createServer(app)
-fileCleanupScheduler.scheduleCleanup();
-scheduleAutoRenewal();
-scheduleServicePlanRenewals();
-scheduleChessCleanup();
 
-console.log('File cleanup scheduler initialized');
-console.log('Auto-renewal scheduler initialized');
+// These crons write and delete real data (renewals charge wallets, file cleanup
+// deletes Drive files). They must run only where that is intended — production —
+// not on a developer's machine or a clone/staging run against a shared database.
+// Default OFF: a missing or unset ENABLE_CRONS never starts them by accident.
+// Render production sets ENABLE_CRONS=true in its own environment variables.
+const cronsEnabled = process.env.ENABLE_CRONS === 'true';
+if (cronsEnabled) {
+  fileCleanupScheduler.scheduleCleanup();
+  scheduleAutoRenewal();
+  scheduleServicePlanRenewals();
+  scheduleChessCleanup();
+  console.log('File cleanup scheduler initialized');
+  console.log('Auto-renewal scheduler initialized');
+} else {
+  console.log('Crons disabled (ENABLE_CRONS is not "true") — skipping cleanup/renewal/chess-cleanup schedulers.');
+}
 
 const allowedOrigins = getAllowedOrigins();
 
@@ -71,19 +81,22 @@ app.head('/ping', (req, res) => {
 const PORT = process.env.PORT || 8080;
 const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 
-// 2️⃣ Cron Job: Har 5 minutes me `/ping` API call karega
-cron.schedule("*/5 * * * *", async () => {
-  try {
-    if (KEEP_ALIVE_URL) {
-      await axios.head(KEEP_ALIVE_URL);
-      console.log(` ✅ Keep-alive request sent to ${KEEP_ALIVE_URL}`);
-    } else {
-      console.warn("⚠️ KEEP_ALIVE_URL is not set in .env file");
+// Keep-alive only matters for a real deployment that can go idle (e.g. Render free
+// tier). It does not write any data, but there is no reason to run it locally.
+if (cronsEnabled) {
+  cron.schedule("*/5 * * * *", async () => {
+    try {
+      if (KEEP_ALIVE_URL) {
+        await axios.head(KEEP_ALIVE_URL);
+        console.log(` ✅ Keep-alive request sent to ${KEEP_ALIVE_URL}`);
+      } else {
+        console.warn("⚠️ KEEP_ALIVE_URL is not set in .env file");
+      }
+    } catch (error) {
+      console.error("❌ Keep-alive request failed:", error.message);
     }
-  } catch (error) {
-    console.error("❌ Keep-alive request failed:", error.message);
-  }
-});
+  });
+}
 
 async function startServer() {
   try {

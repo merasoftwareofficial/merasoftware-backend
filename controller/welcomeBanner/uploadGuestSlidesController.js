@@ -4,7 +4,7 @@ const GuestSlides = require("../../models/guestSlidesModal")
 async function uploadGuestSlidesController(req, res) {
     try {
         const sessionUserId = req.userId
-        if(!uploadPermission(sessionUserId)){
+        if(!(await uploadPermission(sessionUserId))){
             throw new Error("Permission denied")
         }
 

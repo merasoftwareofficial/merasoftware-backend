@@ -3,7 +3,7 @@ const productModel = require("../../models/productModel");
 
 async function hideProductController(req, res) {
     try {
-        if (!uploadProductPermission(req.userId)) {
+        if (!(await uploadProductPermission(req.userId))) {
             throw new Error("Permission denied");
         }
 

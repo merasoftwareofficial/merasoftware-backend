@@ -6,7 +6,7 @@ async function deleteGuestSlidesController(req, res) {
         const sessionUserId = req.userId
         const { id } = req.params
 
-        if(!uploadPermission(sessionUserId)){
+        if(!(await uploadPermission(sessionUserId))){
             throw new Error("Permission denied")
         }
 

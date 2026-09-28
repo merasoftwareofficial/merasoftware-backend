@@ -6,7 +6,7 @@ async function UploadAdController(req,res){
         const sessionUserId = req.userId
         
         // Permission check for admin
-        if(!uploadAdPermission(sessionUserId)){
+        if(!(await uploadAdPermission(sessionUserId))){
             throw new Error("Permission denied")
         }
 

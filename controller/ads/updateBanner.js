@@ -4,7 +4,7 @@ const bannerModel = require("../../models/bannerModel")
 async function updateBannerController(req, res) {
     try {
         // Check permission
-        if (!uploadProductPermission(req.userId)) {
+        if (!(await uploadProductPermission(req.userId))) {
             throw new Error("Permission denied")
         }
 

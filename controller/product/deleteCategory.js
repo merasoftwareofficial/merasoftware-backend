@@ -6,7 +6,7 @@ async function DeleteCategoryController(req, res) {
         const sessionUserId = req.userId;
         
         // Check permission
-        if (!uploadProductPermission(sessionUserId)) {
+        if (!(await uploadProductPermission(sessionUserId))) {
             throw new Error("Permission denied");
         }
 

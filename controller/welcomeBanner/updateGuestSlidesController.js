@@ -6,7 +6,7 @@ async function updateGuestSlidesController(req, res) {
         const sessionUserId = req.userId
         const slideId = req.params.id
 
-        if(!uploadPermission(sessionUserId)){
+        if(!(await uploadPermission(sessionUserId))){
             throw new Error("Permission denied")
         }
 

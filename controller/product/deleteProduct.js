@@ -5,7 +5,7 @@ const orderModel = require("../../models/orderProductModel")
 async function deleteProductController(req, res) {
     try {
         // Check permission
-        if (!uploadProductPermission(req.userId)) {
+        if (!(await uploadProductPermission(req.userId))) {
             throw new Error("Permission denied")
         }
 

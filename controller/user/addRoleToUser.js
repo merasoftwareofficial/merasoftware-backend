@@ -1,7 +1,18 @@
 const userModel = require("../../models/userModel");
+const uploadProductPermission = require("../../helpers/permission");
 
 async function addRoleToUserController(req, res) {
   try {
+    // Admin-only: this is how every portal role is granted. Checked against the
+    // database, not the token's role, which a role switch can change.
+    if (!(await uploadProductPermission(req.userId))) {
+      return res.status(403).json({
+        success: false,
+        error: true,
+        message: "Permission denied",
+      });
+    }
+
     const { userId, role } = req.body;
 
     if (!userId) {
@@ -30,7 +41,7 @@ async function addRoleToUserController(req, res) {
       success: true,
       error: false,
       message: "Role added to user successfully",
-      data: user,
+      data: { ...user.toObject(), password: undefined, plainPassword: undefined },
     });
   } catch (err) {
     res.status(400).json({

@@ -1,8 +1,7 @@
 const orderProductModel = require("../../models/orderProductModel");
 const productModel = require("../../models/productModel");
 const categoryBasePriceModel = require("../../models/categoryBasePriceModel");
-const { sendPurchaseConfirmationEmail, sendMonthlyLimitedPlanActivationEmail, generateInvoicePdf, sendAdminPurchaseConfirmationEmail, sendAdminUPIPendingNotification } = require("../../helpers/emailService");
-const { createPurchaseNotification } = require("../../helpers/notificationService");
+const { sendAdminUPIPendingNotification } = require("../../helpers/emailService");
 const { initializeProjectTimeline } = require("../../helpers/projectNodeService");
 // SSOT: shared invoice builder — same helper used by the admin/customer custom-project
 // and approval flows, so every project order carries one unpaid invoice.
@@ -12,27 +11,17 @@ const DEFAULT_STARTING_NODE_TITLE = "Project Started";
 
 const createOrder = async (req, res) => {
   try {
-    const { 
-      productId, 
-      quantity, 
-      price, 
-      couponApplied, 
-      discountAmount,
-      originalPrice,
+    // Only choices come from the body. Every amount (price, discount, installments) is
+    // re-derived from productModel below, and no order is ever marked paid here — money
+    // moves only when an admin approves the pending transaction.
+    const {
+      productId,
       isPartialPayment,
-      installmentNumber,
-      installmentAmount,
-      totalAmount,
-      remainingAmount,
-      remainingPayments,
-      selectedFeatures, // Add this to receive selected features
-      paymentMethod = 'wallet',
-      // Add parameter to track UPI payment status
-      upiPaymentStatus,
-      orderVisibility = 'pending-approval' // Default to pending-approval
+      selectedFeatures,
     } = req.body;
-    
+
     const userId = req.userId;
+    const quantity = 1;
 
     // Fetch product details
     const product = await productModel.findById(productId);
@@ -53,132 +42,105 @@ console.log('Product category from DB:', product.category);
     const isWebsiteUpdate = product.category === 'website_updates';
     const isYearlyRenewablePlan = product.isMonthlyRenewablePlan || false;
 
-    // Create the base order data
+    // Feature lines priced from productModel; a quantity from the body is clamped to >= 1
+    // so a negative/zero count cannot lower the total.
+    let featureItems = [];
+    if (Array.isArray(selectedFeatures) && selectedFeatures.length > 0) {
+      const featureIds = selectedFeatures.map(feature =>
+        typeof feature === 'object' ? feature.id : feature
+      );
+
+      const features = await productModel.find({ _id: { $in: featureIds } });
+
+      featureItems = features.map(feature => {
+        const selectedFeature = selectedFeatures.find(f =>
+          (typeof f === 'object' && f.id === feature._id.toString()) ||
+          f === feature._id.toString()
+        );
+
+        const requestedQuantity = selectedFeature && typeof selectedFeature === 'object'
+          ? Math.floor(Number(selectedFeature.quantity))
+          : 1;
+        const featureQuantity = Number.isFinite(requestedQuantity) && requestedQuantity >= 1 ? requestedQuantity : 1;
+
+        const isAddNewPage = feature.serviceName.toLowerCase().includes('add new page');
+
+        // "Add New Page" charges only for pages beyond the ones the product includes
+        const additionalQuantity = isAddNewPage
+          ? Math.max(0, featureQuantity - (product.totalPages || 0))
+          : 0;
+
+        const featurePrice = isAddNewPage
+          ? feature.sellingPrice * additionalQuantity
+          : feature.sellingPrice * featureQuantity;
+
+        return {
+          id: feature._id.toString(),
+          name: feature.serviceName,
+          type: 'feature',
+          quantity: featureQuantity,
+          originalPrice: feature.sellingPrice,
+          finalPrice: featurePrice,
+          additionalQuantity: additionalQuantity
+        };
+      });
+    }
+
+    const orderTotal = Number(product.sellingPrice || 0) +
+      featureItems.reduce((sum, item) => sum + Number(item.finalPrice || 0), 0);
+
+    // Same 30/30/40 split the checkout page shows; the last installment absorbs rounding.
+    const installmentAmounts = isPartialPayment
+      ? (() => {
+          const first = Math.round(orderTotal * 0.3);
+          const second = Math.round(orderTotal * 0.3);
+          return [first, second, orderTotal - first - second];
+        })()
+      : null;
+
+    // Amount due now: the first installment for a partial order, else the full total.
+    const price = isPartialPayment ? installmentAmounts[0] : orderTotal;
+
     let orderData = {
       userId,
       productId,
       quantity,
-      price, // This is the final price after discount on the total
-      originalPrice: originalPrice || (price + (discountAmount || 0)), // Original price before discount
+      price,
+      originalPrice: orderTotal,
       isWebsiteProject: isWebsiteService,
       isActive: isWebsiteUpdate,
       orderVisibility: 'pending-approval',
-      // Initialize orderItems array with main product (no individual discounts)
-      orderItems: [{
-        id: productId,
-        name: product.serviceName,
-        type: 'main',
-        quantity: quantity,
-        originalPrice: product.sellingPrice,
-        finalPrice: product.sellingPrice // No individual discount
-      }]
+      paymentComplete: false,
+      orderItems: [
+        {
+          id: productId,
+          name: product.serviceName,
+          type: 'main',
+          quantity: quantity,
+          originalPrice: product.sellingPrice,
+          finalPrice: product.sellingPrice
+        },
+        ...featureItems
+      ]
     };
 
-    // *** ADD THIS LINE TO INCLUDE REFERREDBY FIELD ***
-    // orderData.referredBy = req.body.referredBy;
-
-    // Add coupon information if available
-    if (couponApplied) {
-      orderData.couponApplied = couponApplied;
-      orderData.discountAmount = discountAmount || 0;
-      orderData.originalPrice = originalPrice;
-    }
-
-    // Add partial payment tracking if applicable
     if (isPartialPayment) {
       orderData.isPartialPayment = true;
-      orderData.currentInstallment = installmentNumber || 1;
-      orderData.totalAmount = totalAmount;
-      
-      // CRITICAL CHANGE: Only consider payment complete if wallet payment
-      const isPaidByWallet = paymentMethod === 'wallet';
-      
-      // For wallet payments, mark as paid; for QR/UPI, mark as pending
-      if (isPaidByWallet) {
-        orderData.paidAmount = price; // Mark as paid for wallet payments
-        console.log("Wallet payment - marking first installment as paid");
-      } else {
-        orderData.paidAmount = 0; // Don't mark as paid for QR payments until approved
-        console.log("QR/UPI payment - marking first installment as pending");
-      }
-      
-      orderData.remainingAmount = totalAmount - (isPaidByWallet ? price : 0);
-      
-      // Create installments array
-      const installments = [];
-      
-      // Log received data for debugging
-      console.log("Creating partial payment order with data:", {
-        installmentAmount,
-        price,
-        totalAmount,
-        paymentMethod,
-        isPaidByWallet
-      });
-      
-      // First installment - CRITICAL CHANGE: Set paid status based on payment method
-      installments.push({
-        installmentNumber: 1,
-        percentage: 30,
-        amount: installmentAmount || price,
-        // CRITICAL CHANGE: Only mark as paid if wallet payment
-        paid: isPaidByWallet,
-        // For QR/UPI payments, set payment status to pending-approval
-        paymentStatus: isPaidByWallet ? 'none' : (upiPaymentStatus || 'pending-approval'),
-        // Only set paid date if actually paid
-        paidDate: isPaidByWallet ? new Date() : null
-      });
-      
-      // Add remaining installments if provided
-      if (remainingPayments && remainingPayments.length > 0) {
-        remainingPayments.forEach(payment => {
-          // Validate payment object to prevent errors
-          if (!payment.amount) {
-            console.error('Invalid payment object missing amount:', payment);
-            return;
-          }
-          
-          installments.push({
-            installmentNumber: payment.installmentNumber,
-            percentage: payment.percentage,
-            amount: payment.amount,
-            paid: false,
-            paymentStatus: 'none',
-            // Set due date (30 days from now for installment 2, 60 days for installment 3)
-            dueDate: new Date(Date.now() + ((payment.installmentNumber - 1) * 30 * 24 * 60 * 60 * 1000))
-          });
-        });
-      } else {
-        // Create default remaining installments if none provided
-        const secondInstallmentAmount = Math.round(totalAmount * 0.3);
-        const thirdInstallmentAmount = totalAmount - price - secondInstallmentAmount;
-        
-        // Second installment (30%)
-        installments.push({
-          installmentNumber: 2,
-          percentage: 30,
-          amount: secondInstallmentAmount,
-          paid: false,
-          paymentStatus: 'none',
-          dueDate: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000))
-        });
-        
-        // Third installment (40%)
-        installments.push({
-          installmentNumber: 3,
-          percentage: 40,
-          amount: thirdInstallmentAmount,
-          paid: false,
-          paymentStatus: 'none',
-          dueDate: new Date(Date.now() + (60 * 24 * 60 * 60 * 1000))
-        });
-      }
-      
-      orderData.installments = installments;
-      orderData.paymentComplete = false;
-    } else {
-      // For full payment
-      orderData.paymentComplete = paymentMethod === 'wallet';
+      orderData.currentInstallment = 1;
+      orderData.totalAmount = orderTotal;
+      orderData.paidAmount = 0;
+      orderData.remainingAmount = orderTotal;
+
+      const percentages = [30, 30, 40];
+      orderData.installments = installmentAmounts.map((amount, index) => ({
+        installmentNumber: index + 1,
+        percentage: percentages[index],
+        amount,
+        paid: false,
+        paymentStatus: index === 0 ? 'pending-approval' : 'none',
+        paidDate: null,
+        ...(index > 0 ? { dueDate: new Date(Date.now() + (index * 30 * 24 * 60 * 60 * 1000)) } : {})
+      }));
     }
 
     if (isWebsiteService) {
@@ -254,72 +216,6 @@ console.log('Product category from DB:', product.category);
       }
     }
 
-    // Process additional features if provided
-    if (selectedFeatures && selectedFeatures.length > 0) {
-      // Fetch all feature details in a single query
-      const featureIds = selectedFeatures.map(feature => 
-        typeof feature === 'object' ? feature.id : feature
-      );
-      
-      const features = await productModel.find({ _id: { $in: featureIds } });
-      
-      // Map features to orderItems
-      const featureItems = features.map(feature => {
-        // Find matching selected feature data
-        const selectedFeature = selectedFeatures.find(f => 
-          (typeof f === 'object' && f.id === feature._id.toString()) || 
-          f === feature._id.toString()
-        );
-        
-        // Get quantity (default to 1 if not specified)
-        const featureQuantity = (selectedFeature && typeof selectedFeature === 'object' && selectedFeature.quantity) 
-          ? selectedFeature.quantity 
-          : 1;
-        
-        // Check if this is an "Add New Page" feature
-        const isAddNewPage = feature.serviceName.toLowerCase().includes('add new page');
-        
-        // Calculate additionalQuantity for "Add New Page" features
-        const additionalQuantity = isAddNewPage 
-          ? Math.max(0, featureQuantity - product.totalPages) 
-          : 0;
-        
-        // Calculate price based on quantity
-        let originalFeaturePrice;
-        
-        if (isAddNewPage) {
-          // For "Add New Page", only charge for additional pages beyond included pages
-          originalFeaturePrice = feature.sellingPrice * additionalQuantity;
-        } else {
-          // For regular features, charge per quantity
-          originalFeaturePrice = feature.sellingPrice * featureQuantity;
-        }
-        
-        // Calculate final price (with discount)
-        let finalPrice = originalFeaturePrice;
-        
-        // If coupon discount and total price available, apply proportional discount
-        if (couponApplied && discountAmount > 0 && orderData.originalPrice > 0) {
-          const proportion = originalFeaturePrice / orderData.originalPrice;
-          const featureDiscount = Math.round(discountAmount * proportion);
-          finalPrice = Math.max(0, originalFeaturePrice - featureDiscount);
-        }
-        
-        return {
-          id: feature._id.toString(),
-          name: feature.serviceName,
-          type: 'feature',
-          quantity: featureQuantity,
-          originalPrice: feature.sellingPrice,
-          finalPrice: finalPrice,
-          additionalQuantity: additionalQuantity
-        };
-      });
-      
-      // Add features to orderItems
-      orderData.orderItems = [...orderData.orderItems, ...featureItems];
-    }
-
     const order = new orderProductModel(orderData);
 
     if (isWebsiteService) {
@@ -377,49 +273,12 @@ console.log('Product category from DB:', product.category);
       .populate('userId', 'name email')
       .populate('productId', 'serviceName category totalPages validityPeriod updateCount isWebsiteUpdate isMonthlyLimitedPlan monthlyUpdateLimit monthlyRenewalPrice');
 
-    // ===== SEND EMAIL AND CREATE NOTIFICATION FOR WALLET PAYMENTS ONLY =====
-    // Only send confirmation for wallet payments, since UPI payments need verification
-    if (paymentMethod === 'wallet') {
-      try {
-        const paymentDetails = {
-          method: 'Wallet',
-          transactionId: `ORDER-${order._id}`,
-          date: new Date()
-        };
-        
-        // Generate invoice PDF
-        const invoiceBuffer = await generateInvoicePdf(populatedOrder, paymentDetails);
-        paymentDetails.invoiceBuffer = invoiceBuffer;
-        
-        // Send appropriate email based on plan type
-        if (populatedOrder.productId?.isMonthlyLimitedPlan) {
-            // Send special activation email for Monthly Limited Plan
-            await sendMonthlyLimitedPlanActivationEmail(populatedOrder, paymentDetails);
-        } else {
-            // Send standard purchase confirmation email
-            await sendPurchaseConfirmationEmail(populatedOrder, paymentDetails);
-        }
-
-        // Send admin purchase confirmation email
-        await sendAdminPurchaseConfirmationEmail(populatedOrder, paymentDetails);
-
-        // Create in-app notification
-        await createPurchaseNotification(populatedOrder);
-
-        console.log('Purchase confirmation email and notification sent for order:', order._id);
-      } catch (emailError) {
-        console.error('Error sending purchase confirmation:', emailError);
-        // Continue execution even if notification fails
-      }
-    } else {
-      // UPI payment - notify admin to approve pending order
-      try {
-        await sendAdminUPIPendingNotification(populatedOrder);
-        console.log('Admin pending approval notification sent for UPI order:', order._id);
-      } catch (emailError) {
-        console.error('Error sending admin pending notification:', emailError);
-        // Continue execution even if notification fails
-      }
+    // Every order here is pending until an admin approves its payment, so only the admin is notified.
+    try {
+      await sendAdminUPIPendingNotification(populatedOrder);
+      console.log('Admin pending approval notification sent for order:', order._id);
+    } catch (emailError) {
+      console.error('Error sending admin pending notification:', emailError);
     }
 
     res.status(201).json({

@@ -12,6 +12,8 @@ const getAllowedOrigins = () => [
   process.env.ADMIN_PORTAL_URL,
   process.env.PARTNER_PORTAL_URL,
   'http://localhost:3000',
+  // Local portal frontend; the website runs on 3000 (src/docs/login.md).
+  'http://localhost:3001',
 ]
   .filter(Boolean)
   .map((origin) => origin.replace(/\/$/, ''));

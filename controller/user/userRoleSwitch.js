@@ -47,8 +47,14 @@ async function userRoleSwitchController(req, res) {
       httpOnly: true,
       secure: true,
       sameSite: 'None',
+      path: '/',
       maxAge: 365 * 24 * 60 * 60 * 1000,
     };
+
+    // Same cookie shape as userSignIn/userLogout, so logout clears this exact cookie.
+    if (process.env.COOKIE_DOMAIN) {
+      tokenOption.domain = process.env.COOKIE_DOMAIN;
+    }
 
     // Set new token cookie
     res.cookie("token", token, tokenOption);

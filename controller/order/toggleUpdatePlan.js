@@ -4,7 +4,7 @@ const Category = require('../../models/categoryModel');
 
 const toggleUpdatePlan = async (req, res) => {
     try {
-      const { userId } = req.userId;
+      const userId = req.userId;
       const { orderId } = req.body;
   
       // Find the order and verify it's a website update plan
@@ -19,11 +19,13 @@ const toggleUpdatePlan = async (req, res) => {
   
       // If activating this plan, deactivate all other update plans first
       if (!order.isActive) {
+        // productId is a ref, so the category must be resolved to product ids first.
+        const updatePlanProductIds = await Product.find({ category: 'website_updates' }).distinct('_id');
         await Order.updateMany(
           {
             userId,
             _id: { $ne: orderId },
-            'productId.category': 'website_updates',
+            productId: { $in: updatePlanProductIds },
             isActive: true
           },
           { isActive: false }

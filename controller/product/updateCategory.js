@@ -4,7 +4,7 @@ const categoryModel = require("../../models/categoryModel")
 async function updateCategoryController(req, res) {
     try {
         // Check permission
-        if (!uploadProductPermission(req.userId)) {
+        if (!(await uploadProductPermission(req.userId))) {
             throw new Error("Permission denied")
         }
 

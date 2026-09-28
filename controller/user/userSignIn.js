@@ -53,6 +53,10 @@ async function userSignInController (req,res) {
                     userRole = 'developer';
                 } else if (user.roles.includes('partner')) {
                     userRole = 'partner';
+                } else if (user.roles.includes('member') && !user.roles.includes('customer')) {
+                    // Blog-only account from the website's sign-up: no portal screens.
+                    // Only an explicit 'member' qualifies, so older accounts keep the 'customer' default.
+                    userRole = 'member';
                 }
             } else {
                 // Fallback: ensure customer role

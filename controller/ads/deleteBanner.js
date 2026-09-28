@@ -6,7 +6,7 @@ async function DeleteBannerController(req, res) {
         const sessionUserId = req.userId;
         
         // Check permissions
-        if (!uploadBannerPermission(sessionUserId)) {
+        if (!(await uploadBannerPermission(sessionUserId))) {
             return res.status(403).json({
                 message: "Permission denied",
                 error: true,

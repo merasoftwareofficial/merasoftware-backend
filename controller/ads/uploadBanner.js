@@ -4,7 +4,7 @@ const bannerModel = require("../../models/bannerModel")
 async function UploadBannerController(req, res) {
     try {
         const sessionUserId = req.userId;
-        if (!uploadBannerPermission(sessionUserId)) {
+        if (!(await uploadBannerPermission(sessionUserId))) {
             throw new Error("Permission denied");
         }
 

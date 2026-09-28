@@ -6,7 +6,7 @@ const orderModel = require("../../models/orderProductModel")
 async function updateProductController (req,res){
     try {
 
-        if(!uploadProductPermission(req.userId)){
+        if(!(await uploadProductPermission(req.userId))){
             throw new Error("Permission denied")
         }
 
