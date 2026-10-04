@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "portfolio:worker": "node scripts/portfolioWorker.js",
+    "portfolio:sync": "node scripts/portfolioWorker.js --once",
+    "test:portfolio": "node --test tests/portfolio.test.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:external-upload": "node --test tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js",
     "start": "node index.js",
@@ -24,6 +27,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "googleapis": "^146.0.0",
+    "ipaddr.js": "^2.5.0",
     "jsonwebtoken": "^9.0.2",
     "moment": "^2.30.1",
     "mongoose": "^8.9.3",
@@ -32,10 +36,14 @@
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.9",
     "pdfkit": "^0.16.0",
+    "playwright": "^1.63.0",
     "resend": "^4.8.0",
     "sharp": "^0.33.5",
     "socket.io": "^4.8.1",
     "stripe": "^17.5.0",
     "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.3.0"
   }
 }

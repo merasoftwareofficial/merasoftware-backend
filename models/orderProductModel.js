@@ -612,6 +612,10 @@ const orderSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    portfolioCaptureAllowed: {
+        type: Boolean,
+        default: true
+    },
     // Plan closure fields
     planStatus: {
         type: String,

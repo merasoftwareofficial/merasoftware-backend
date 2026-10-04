@@ -1,6 +1,9 @@
 const express = require('express')
 
 const router = express.Router()
+router.patch('/admin/projects/:orderId/portfolio-source', require('../middleware/authToken'), require('../controller/order/portfolioSettings'));
+router.get('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
+router.post('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 const upload = require('../middleware/uploadFiles');
 // const fs = require('fs');
 

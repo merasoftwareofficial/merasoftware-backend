@@ -1,3 +1,5 @@
 /node_modules
 config/google-drive-credentials.json
 .env
+.env.portfolio.local
+.portfolio-worker*.log
