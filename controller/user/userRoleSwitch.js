@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+const { issueSession } = require('../../helpers/sessionToken');
 const userModel = require('../../models/userModel');
 
 async function userRoleSwitchController(req, res) {
@@ -41,23 +41,7 @@ async function userRoleSwitchController(req, res) {
       role: newRole.toLowerCase(),
     };
 
-    const token = jwt.sign(tokenData, process.env.TOKEN_SECRET_KEY, { expiresIn: '365d' });
-
-    const tokenOption = {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'None',
-      path: '/',
-      maxAge: 365 * 24 * 60 * 60 * 1000,
-    };
-
-    // Same cookie shape as userSignIn/userLogout, so logout clears this exact cookie.
-    if (process.env.COOKIE_DOMAIN) {
-      tokenOption.domain = process.env.COOKIE_DOMAIN;
-    }
-
-    // Set new token cookie
-    res.cookie("token", token, tokenOption);
+    const token = issueSession(res, tokenData);
 
     res.status(200).json({
       message: "Role switched successfully",

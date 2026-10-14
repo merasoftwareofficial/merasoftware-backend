@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+const { issueSession } = require('../../helpers/sessionToken');
 const crypto = require("crypto");
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
@@ -11,19 +11,7 @@ const { GUEST_DEMO_CREDIT_AMOUNT } = require("../../config/guestDemoConfig");
 
 const issueLoginCookie = (res, user) => {
   const tokenData = { _id: user._id, email: user.email, role: "customer" };
-  const token = jwt.sign(tokenData, process.env.TOKEN_SECRET_KEY, { expiresIn: "365d" });
-  const tokenOption = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "None",
-    path: "/",
-    maxAge: 365 * 24 * 60 * 60 * 1000,
-  };
-  if (process.env.COOKIE_DOMAIN) {
-    tokenOption.domain = process.env.COOKIE_DOMAIN;
-  }
-  res.cookie("token", token, tokenOption);
-  return token;
+  return issueSession(res, tokenData);
 };
 
 const guestLoginController = async (req, res) => {

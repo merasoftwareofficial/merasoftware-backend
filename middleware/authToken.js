@@ -1,9 +1,9 @@
-const jwt = require('jsonwebtoken')
+const { COOKIE_NAME, verifySession, rejectionReason } = require('../helpers/sessionToken')
 const userModel = require('../models/userModel')
 
 async function authToken(req, res, next) {
     try {
-        const token = req.cookies?.token
+        const token = req.cookies?.[COOKIE_NAME]
 
         if (!token) {
             return res.status(401).json({
@@ -15,8 +15,9 @@ async function authToken(req, res, next) {
 
         let decoded;
         try {
-            decoded = jwt.verify(token, process.env.TOKEN_SECRET_KEY);
+            decoded = verifySession(token);
         } catch (err) {
+            console.warn('Session token rejected:', rejectionReason(err));
             return res.status(401).json({
                 message: "Invalid token. Please login again.",
                 error: true,

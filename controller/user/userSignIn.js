@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const userModel = require("../../models/userModel");
-const jwt = require('jsonwebtoken');
+const { issueSession } = require('../../helpers/sessionToken');
 const { STORE_PLAIN_PASSWORD } = require('../../config/accessControlConfig');
 
 async function userSignInController (req,res) {
@@ -70,20 +70,9 @@ async function userSignInController (req,res) {
                 role: userRole
             };
 
-            const token = await jwt.sign(tokenData, process.env.TOKEN_SECRET_KEY, { expiresIn: '365d' });
-            const tokenOption = {
-                httpOnly: true,
-                secure: true,
-                sameSite: 'None',
-                path: '/',
-                maxAge: 365 * 24 * 60 * 60 * 1000
-            };
+            const token = issueSession(res, tokenData);
 
-            if (process.env.COOKIE_DOMAIN) {
-                tokenOption.domain = process.env.COOKIE_DOMAIN;
-            }
-            
-            res.cookie("token", token, tokenOption).status(200).json({
+            res.status(200).json({
                 message: "Login Successfully",
                 data: {
                     token,

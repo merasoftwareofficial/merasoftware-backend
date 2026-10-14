@@ -1,17 +1,7 @@
+const { clearSession } = require('../../helpers/sessionToken');
 async function userLogout (req,res){
     try {
-        const tokenOption = {
-            httpOnly : true,
-            secure : true,
-            sameSite : 'None',
-            path: '/'
-        };
-
-        if (process.env.COOKIE_DOMAIN) {
-            tokenOption.domain = process.env.COOKIE_DOMAIN;
-        }
-
-        res.clearCookie("token",tokenOption)
+        clearSession(res);
 
         res.json({
             message: "Logged out successfully",

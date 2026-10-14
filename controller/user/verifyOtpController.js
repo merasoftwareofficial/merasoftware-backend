@@ -1,5 +1,5 @@
 const userModel = require("../../models/userModel");
-const jwt = require('jsonwebtoken');
+const { issueSession } = require('../../helpers/sessionToken');
 const { verifyOTP } = require('../../helpers/otpUtils');
 
 async function verifyOtpController(req, res) {
@@ -34,21 +34,9 @@ async function verifyOtpController(req, res) {
             role: role.toLowerCase()
         };
         
-        const token = await jwt.sign(tokenData, process.env.TOKEN_SECRET_KEY, { expiresIn: '365d' });
-        const tokenOption = {
-            httpOnly: true,
-            secure: true,
-            sameSite: 'None',
-            path: '/',
-            maxAge: 365 * 24 * 60 * 60 * 1000
-        };
+        const token = issueSession(res, tokenData);
 
-        // Same cookie shape as userSignIn/userLogout, so logout clears this exact cookie.
-        if (process.env.COOKIE_DOMAIN) {
-            tokenOption.domain = process.env.COOKIE_DOMAIN;
-        }
-
-        res.cookie("token", token, tokenOption).status(200).json({
+        res.status(200).json({
             message: "OTP verified successfully",
             data: {
                 token,

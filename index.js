@@ -3,6 +3,7 @@ const http = require('http')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
 require('dotenv').config()
+require('./helpers/sessionToken').sessionSecret()
 const connnectDB = require("./config/db")
 const router = require("./routes")
 const fileCleanupScheduler = require('./helpers/fileCleanupScheduler');
