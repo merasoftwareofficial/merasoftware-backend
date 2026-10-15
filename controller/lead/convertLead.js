@@ -1,16 +1,21 @@
-const bcrypt = require("bcryptjs");
 const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
-const { STORE_PLAIN_PASSWORD } = require("../../config/accessControlConfig");
+const uploadProductPermission = require("../../helpers/permission");
+const { isAccountEmail } = require("../../helpers/emailValidator");
+const {
+  CLIENT_DEFAULT_PASSWORD,
+  isUpgradeableMember,
+  createClientAccount,
+  upgradeMemberToClient,
+} = require("../../helpers/clientAccount");
 const { executeGuestCascadeDelete } = require("../../helpers/guestCascadeDelete");
-
-// Universal default password given to a converted lead. The customer is
-// prompted to set their own on first login (mustResetPassword flag).
-const UNIVERSAL_DEFAULT_PASSWORD = "1234";
 
 const convertLeadController = async (req, res) => {
   try {
-    if (req.userRole !== "admin") {
+    // Creating or upgrading a login account: the token's role must be admin AND
+    // the account must still be admin in the database (a token lives 365 days,
+    // so a demoted admin's token alone is not enough — same rule as addRole).
+    if (req.userRole !== "admin" || !(await uploadProductPermission(req.userId))) {
       return res.status(403).json({
         message: "Forbidden",
         error: true,
@@ -19,6 +24,7 @@ const convertLeadController = async (req, res) => {
     }
 
     const { leadId } = req.params;
+    const upgradeExisting = req.body?.upgradeExisting === true;
 
     const lead = await leadModel.findById(leadId);
     if (!lead) {
@@ -56,60 +62,79 @@ const convertLeadController = async (req, res) => {
       });
     }
 
-    // Existing-user guard (same email cannot become a second account) — unless
-    // the existing user IS this lead's own live guest account. A guest shares
-    // its lead's exact email/phone (requirement of the guest login system), so
-    // without this exception every guest-originated lead would be wrongly
-    // rejected here as "already exists". The guest account is cascade-deleted
-    // before the real account is created below, since userModel.email has a
-    // hard unique index — both cannot exist at once.
+    // The lead's email becomes the client's login email.
+    if (!isAccountEmail(cleanEmail)) {
+      return res.status(400).json({
+        message: "This lead's email is not a valid email address. Correct it before converting.",
+        error: true,
+        success: false,
+      });
+    }
+
+    // Existing-user guard (same email cannot become a second account), decided
+    // before anything is deleted. Two exceptions:
+    // - the lead's own live guest account: a guest shares its lead's email, and
+    //   is cascade-deleted below, since userModel.email has a hard unique index;
+    // - a blog-only website member: upgraded in place into the client account,
+    //   but only after the admin confirms it (upgradeExisting).
+    let memberToUpgrade = null;
     const existingUser = await userModel.findOne({ email: cleanEmail });
     if (existingUser) {
       const isOwnGuest =
         lead.guestUserId && String(existingUser._id) === String(lead.guestUserId);
 
-      if (!isOwnGuest) {
+      if (isUpgradeableMember(existingUser)) {
+        if (!upgradeExisting) {
+          return res.status(409).json({
+            message: "This email already has a website account. Confirm to turn that account into the client account.",
+            code: "EXISTING_MEMBER",
+            error: true,
+            success: false,
+          });
+        }
+        memberToUpgrade = existingUser;
+      } else if (!isOwnGuest) {
         return res.status(409).json({
           message: "A user with this email already exists. Cannot convert.",
           error: true,
           success: false,
         });
       }
+    }
 
-      await executeGuestCascadeDelete(existingUser._id);
+    // The lead's guest account goes away on convert, whether or not its email
+    // still matches the lead's (the lead's email may have been edited since).
+    if (lead.guestUserId) {
+      const guestResult = await executeGuestCascadeDelete(lead.guestUserId);
+      if (!guestResult.deleted && guestResult.reason === "active_chess_game") {
+        return res.status(409).json({
+          message: "This lead's guest account is in a live chess game. Convert again after the game ends.",
+          error: true,
+          success: false,
+        });
+      }
+      // Deleted, already gone, or no longer a guest: the link is stale either way.
       lead.guestUserId = null;
     }
 
-    // Reuse the same hashing approach as userSignUp.
-    const salt = bcrypt.genSaltSync(10);
-    const hashPassword = bcrypt.hashSync(UNIVERSAL_DEFAULT_PASSWORD, salt);
+    const clientUser = memberToUpgrade
+      ? await upgradeMemberToClient(memberToUpgrade, { phone: cleanPhone })
+      : await createClientAccount({ name: lead.name, email: cleanEmail, phone: cleanPhone });
 
-    const newUser = new userModel({
-      name: lead.name,
-      email: cleanEmail,
-      phone: cleanPhone,
-      password: hashPassword,
-      roles: ["customer"],
-      walletBalance: 0,
-      referredBy: null,
-      referrals: [],
-      mustResetPassword: true,
-      ...(STORE_PLAIN_PASSWORD ? { plainPassword: UNIVERSAL_DEFAULT_PASSWORD } : {}),
-    });
-
-    const savedUser = await newUser.save();
-
-    // Link the lead to the created user and mark it Won.
-    lead.convertedToUserId = savedUser._id;
+    // Link the lead to the client account and mark it Won.
+    lead.convertedToUserId = clientUser._id;
     lead.status = "Won";
     await lead.save();
 
     return res.json({
-      message: "Lead converted to client successfully",
+      message: memberToUpgrade
+        ? "Existing website account turned into the client account"
+        : "Lead converted to client successfully",
       data: {
-        userId: savedUser._id,
-        email: savedUser.email,
-        defaultPassword: UNIVERSAL_DEFAULT_PASSWORD,
+        userId: clientUser._id,
+        email: clientUser.email,
+        defaultPassword: CLIENT_DEFAULT_PASSWORD,
+        upgradedExisting: Boolean(memberToUpgrade),
       },
       success: true,
       error: false,

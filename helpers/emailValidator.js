@@ -234,7 +234,17 @@ const validateEmail = async (email) => {
   }
 };
 
+/**
+ * Shape check for an account or lead email, the same rule sign-up applies
+ * (controller/user/userSignUp.js). Deliberately looser than validateEmailFormat,
+ * which rejects addresses sign-up accepts (e.g. name+tag@gmail.com).
+ * @param {string} email - Email address, already trimmed and lowercased
+ * @returns {boolean} - True if it looks like name@domain.tld
+ */
+const isAccountEmail = (email) => typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
 module.exports = {
+  isAccountEmail,
   validateEmailFormat,
   validateEmailDomain,
   isDisposableEmail,

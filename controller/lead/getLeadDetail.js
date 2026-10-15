@@ -15,6 +15,7 @@ const getLeadDetailController = async (req, res) => {
     const lead = await leadModel
       .findById(leadId)
       .populate("followUps.createdBy", "name email")
+      .populate("referredByUserId", "name phone email")
       .lean();
 
     if (!lead) {

@@ -1,6 +1,7 @@
 const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
+const { isAccountEmail } = require("../../helpers/emailValidator");
 
 const ALLOWED_STATUSES = ["New", "Contacted", "Proposal Sent", "Negative"];
 
@@ -160,6 +161,92 @@ const updateLeadController = async (req, res) => {
 
       return res.json({
         message: "Follow-up updated",
+        data: savedLead,
+        success: true,
+        error: false,
+      });
+    }
+
+    // Edit the lead's own contact details. Same rules as createLead.js: name and
+    // phone are required, email is optional and stored lowercase, and no other
+    // lead may already hold the same phone or email. Source and notes change
+    // only when sent, so a form that edits just the contact fields keeps them.
+    if (action === "editDetails") {
+      const cleanName = (req.body.name || "").trim();
+      const cleanPhone = (req.body.phone || "").trim();
+      const cleanEmail = (req.body.email || "").trim().toLowerCase();
+      const hasSource = req.body.source !== undefined;
+      const cleanSource = hasSource ? String(req.body.source).trim() : lead.source;
+
+      if (!cleanName) {
+        return res.status(400).json({
+          message: "Please provide lead name",
+          error: true,
+          success: false,
+        });
+      }
+
+      if (!cleanPhone) {
+        return res.status(400).json({
+          message: "Please provide a phone number",
+          error: true,
+          success: false,
+        });
+      }
+
+      if (cleanEmail && !isAccountEmail(cleanEmail)) {
+        return res.status(400).json({
+          message: "Please provide a valid email address",
+          error: true,
+          success: false,
+        });
+      }
+
+      // "Reference" is set only at creation: createLead.js links the referrer
+      // and credits their wallet reward then. Changing it here would leave the
+      // reward and referredByUserId out of step with the source.
+      const isReferenceLead = lead.source === "Reference" || Boolean(lead.referredByUserId);
+      if (isReferenceLead && cleanSource !== lead.source) {
+        return res.status(400).json({
+          message: "The source of a Reference lead cannot be changed",
+          error: true,
+          success: false,
+        });
+      }
+      if (!isReferenceLead && cleanSource === "Reference") {
+        return res.status(400).json({
+          message: "Reference can only be chosen when the lead is created",
+          error: true,
+          success: false,
+        });
+      }
+
+      const duplicateOr = [{ phone: cleanPhone }];
+      if (cleanEmail) duplicateOr.push({ email: cleanEmail });
+
+      const existingLead = await leadModel
+        .findOne({ _id: { $ne: lead._id }, $or: duplicateOr })
+        .lean();
+      if (existingLead) {
+        return res.status(409).json({
+          message: "A lead with this phone or email already exists",
+          error: true,
+          success: false,
+        });
+      }
+
+      lead.name = cleanName;
+      lead.phone = cleanPhone;
+      lead.email = cleanEmail;
+      lead.source = cleanSource;
+      if (req.body.notes !== undefined) {
+        lead.notes = req.body.notes;
+      }
+
+      const savedLead = await lead.save();
+
+      return res.json({
+        message: "Lead details updated",
         data: savedLead,
         success: true,
         error: false,
