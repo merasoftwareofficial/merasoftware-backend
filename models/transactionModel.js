@@ -56,7 +56,7 @@ const transactionSchema = new mongoose.Schema(
             // "demo" is additive: guest dummy-wallet-credit only, never real money.
             // "reward" is additive: automatic system-credited rewards (e.g. lead
             // reference), never a manually recorded payment method.
-            enum: ["wallet", "upi", "combined", "cash", "bank_transfer", "demo", "reward"],
+            enum: ["wallet", "upi", "combined", "cash", "bank_transfer", "cheque", "demo", "reward"],
             default: "upi"
         },
          // Add parentTransactionId for combined payments
@@ -72,6 +72,14 @@ const transactionSchema = new mongoose.Schema(
         paymentEvidence: {
             upiReference: { type: String, default: null },
             upiReferenceKey: { type: String, default: null },
+            // Bank transfer / cheque evidence — written by helpers/paymentEvidence.js only.
+            bankTransferMode: { type: String, enum: ["neft", "imps", "rtgs", null], default: null },
+            bankReference: { type: String, default: null },
+            bankReferenceKey: { type: String, default: null },
+            chequeNumber: { type: String, default: null },
+            chequeBankName: { type: String, default: null },
+            chequeDate: { type: Date, default: null },
+            chequeKey: { type: String, default: null },
             capturedVia: { type: String, enum: ["customer", "admin", null], default: null },
             capturedAt: { type: Date, default: null },
         },
@@ -172,6 +180,28 @@ transactionSchema.index(
         partialFilterExpression: {
             paymentMethod: "upi",
             "paymentEvidence.upiReferenceKey": { $exists: true, $type: "string" },
+        },
+    }
+);
+// Same one-reference-one-payment rule for bank transfers and cheques. Partial on the new keys,
+// so records written before these fields existed are never indexed and cannot collide.
+transactionSchema.index(
+    { "paymentEvidence.bankReferenceKey": 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            paymentMethod: "bank_transfer",
+            "paymentEvidence.bankReferenceKey": { $exists: true, $type: "string" },
+        },
+    }
+);
+transactionSchema.index(
+    { "paymentEvidence.chequeKey": 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            paymentMethod: "cheque",
+            "paymentEvidence.chequeKey": { $exists: true, $type: "string" },
         },
     }
 );

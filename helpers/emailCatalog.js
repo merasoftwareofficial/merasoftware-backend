@@ -12,6 +12,7 @@ const events = [
   ['sendAdminUPIPendingNotification', 'Payments', 'UPI payment pending (admin)'],
   ['sendWalletRechargeConfirmationEmail', 'Wallet', 'Wallet recharge confirmed'],
   ['sendPaymentRejectionEmail', 'Payments', 'Payment rejected'],
+  ['sendProjectCreatedEmail', 'Projects', 'Project created'],
   ['sendProjectCancellationEmail', 'Projects', 'Project cancelled'],
   ['sendWalletRechargeRejectionEmail', 'Wallet', 'Wallet recharge rejected'],
   ['sendContactFormConfirmation', 'Website', 'Contact form received'],

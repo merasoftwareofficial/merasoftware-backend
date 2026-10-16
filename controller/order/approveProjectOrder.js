@@ -9,6 +9,7 @@ const {
   buildLineItemsFromOrder,
 } = require("../../helpers/paymentRecording");
 const { syncProjectFinalInvoice } = require("../../helpers/projectFinalInvoice");
+const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
 const { logApproved, logRejected, ACTOR_TYPE } = require("../../helpers/orderLifecycleLog");
 
 // Admin approval for a customer-initiated project order that is waiting on approval.
@@ -28,7 +29,7 @@ const { logApproved, logRejected, ACTOR_TYPE } = require("../../helpers/orderLif
 // recorded (transaction + invoice settlement) — there is no "approve without payment" mode. The
 // only outcomes here are: record a payment and approve, or reject.
 
-const PAYMENT_METHODS = ["upi", "bank_transfer", "cash", "wallet"];
+const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
 const APPROVAL_MODES = ["approve_with_payment", "reject"];
 
 const requireAdmin = async (req, res) => {
@@ -56,7 +57,7 @@ const approveProjectOrder = async (req, res) => {
       });
     }
 
-    const { mode, paymentMethod, transactionReference, notes, rejectionReason } = req.body;
+    const { mode, paymentMethod, transactionReference, paymentDetails, notes, rejectionReason } = req.body;
     if (!APPROVAL_MODES.includes(mode)) {
       return res.status(400).json({
         message: "Invalid approval mode",
@@ -134,6 +135,15 @@ const approveProjectOrder = async (req, res) => {
       });
     }
 
+    // Validate the method-specific reference before anything is written — a refused reference
+    // must not leave a half-made invoice behind.
+    const preparedEvidence = await preparePaymentEvidence({
+      paymentMethod,
+      reference: transactionReference,
+      details: paymentDetails || {},
+      capturedVia: "admin",
+    });
+
     const isPartialPayment = Boolean(order.isPartialPayment) &&
       Array.isArray(order.installments) && order.installments.length > 0;
 
@@ -167,6 +177,8 @@ const approveProjectOrder = async (req, res) => {
       customerId: order.userId,
       paymentMethod,
       transactionReference,
+      paymentDetails: paymentDetails || {},
+      preparedEvidence,
       notes,
       actorId: req.userId,
     });
@@ -205,7 +217,7 @@ const approveProjectOrder = async (req, res) => {
     });
   } catch (error) {
     console.error("Error approving project order:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       message: error.message || "Failed to approve project order",
       error: true,
       success: false,

@@ -83,6 +83,7 @@ const getMyPaymentWorkspace = require('../controller/user/getMyPaymentWorkspace'
 const deleteOrderController = require('../controller/order/deleteOrder');
 const scanDeleteOrderController = require('../controller/order/scanDeleteOrder');
 const adminCreateProjectOrderController = require('../controller/order/adminCreateProjectOrder');
+const adminWebsiteOffersController = require('../controller/order/adminWebsiteOffers');
 const approveProjectOrderController = require('../controller/order/approveProjectOrder');
 const { cancelProjectOrder, getProjectCancellationPreview } = require('../controller/order/cancelProjectOrder');
 const { resendProjectFinalInvoice } = require('../controller/invoice/projectFinalInvoiceController');
@@ -175,6 +176,7 @@ router.get("/my-payment-workspace", authToken, getMyPaymentWorkspace);
 router.get("/admin/delete-order/:orderId/scan", authToken, scanDeleteOrderController);
 router.delete("/admin/delete-order/:orderId", authToken, deleteOrderController);
 router.post("/admin/clients/:customerId/create-project", authToken, adminCreateProjectOrderController);
+router.get("/admin/website-offers", authToken, adminWebsiteOffersController);
 router.post("/admin/clients/:customerId/documents", authToken, upload.any(), uploadClientDocumentController);
 router.get("/admin/clients/:customerId/documents", authToken, getAdminClientDocumentsController);
 router.get("/admin/clients/:customerId/credentials", authToken, getClientCredentialsController);

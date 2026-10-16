@@ -1,7 +1,7 @@
 const monthlyInvoiceModel = require("../models/monthlyInvoiceModel");
 const orderProductModel = require("../models/orderProductModel");
 const transactionModel = require("../models/transactionModel");
-const { prepareUpiPaymentEvidence } = require("./upiPaymentEvidence");
+const { preparePaymentEvidence } = require("./paymentEvidence");
 
 const isMonthlyPlan = (order) =>
   Boolean(order?.productId?.isMonthlyRenewablePlan || order?.productId?.isMonthlyLimitedPlan);
@@ -101,6 +101,7 @@ const ensureCompletedInvoiceTransaction = async ({
   order,
   paymentMethod,
   transactionReference,
+  paymentDetails = {},
   markedPaidBy,
   transaction = null,
   session = null,
@@ -123,15 +124,19 @@ const ensureCompletedInvoiceTransaction = async ({
   }
 
   const transactionId = generateInvoiceTransactionId(invoice);
-  const paymentEvidence = paymentMethod === "upi"
-    ? await prepareUpiPaymentEvidence({ reference: transactionReference, transactionId, capturedVia: "admin" })
-    : undefined;
+  const { reference, paymentEvidence } = await preparePaymentEvidence({
+    paymentMethod,
+    reference: transactionReference,
+    details: paymentDetails,
+    transactionId,
+    capturedVia: "admin",
+  });
   const completedTransaction = new transactionModel({
     userId: invoice.userId,
     orderId: invoice.orderId,
     invoiceId: invoice._id,
     transactionId,
-    upiTransactionId: transactionReference || null,
+    upiTransactionId: reference || null,
     paymentEvidence,
     amount: invoice.amount,
     status: "completed",
@@ -157,6 +162,7 @@ const markInvoicePaidAndResumePlan = async ({
   invoiceId,
   paymentMethod,
   transactionReference,
+  paymentDetails = {},
   markedPaidBy,
   internalNote,
   transaction = null,
@@ -185,6 +191,7 @@ const markInvoicePaidAndResumePlan = async ({
     order,
     paymentMethod,
     transactionReference,
+    paymentDetails,
     markedPaidBy,
     transaction,
     session,

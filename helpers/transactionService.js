@@ -1,6 +1,7 @@
 const transactionModel = require("../models/transactionModel");
 const userModel = require("../models/userModel");
 const { prepareUpiPaymentEvidence } = require("./upiPaymentEvidence");
+const { preparePaymentEvidence } = require("./paymentEvidence");
 
 // Shared transaction-creation SSOT.
 //
@@ -226,6 +227,8 @@ const creditWalletInstant = async ({
   amount,
   paymentMethod = "upi",
   reference = null,
+  // Method-specific details (bank transfer mode, cheque bank/date) — helpers/paymentEvidence.js.
+  paymentDetails = {},
   description,
   actorId = null,
 }) => {
@@ -236,9 +239,15 @@ const creditWalletInstant = async ({
   const existing = await transactionModel.findOne({ transactionId });
   if (existing) return existing;
 
-  const paymentEvidence = paymentMethod === "upi"
-    ? await prepareUpiPaymentEvidence({ reference, transactionId, capturedVia: "admin" })
-    : undefined;
+  // Validated before the balance moves, so a bad reference never credits the wallet.
+  const evidence = await preparePaymentEvidence({
+    paymentMethod,
+    reference,
+    details: paymentDetails,
+    transactionId,
+    capturedVia: "admin",
+  });
+  const paymentEvidence = evidence.paymentEvidence;
 
   const updatedUser = await userModel.findByIdAndUpdate(
     userId,
@@ -251,7 +260,7 @@ const creditWalletInstant = async ({
     userId,
     transactionId,
     amount: Number(amount),
-    upiTransactionId: reference || `ADMIN-${transactionId}`,
+    upiTransactionId: evidence.reference || `ADMIN-${transactionId}`,
     paymentEvidence,
     type: "deposit",
     description: description || "Admin wallet recharge",

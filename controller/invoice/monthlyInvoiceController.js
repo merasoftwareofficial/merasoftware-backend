@@ -9,6 +9,7 @@ const {
   sendMonthlyInvoiceEmail,
 } = require("../../helpers/emailService");
 const mongoose = require("mongoose");
+const { ADMIN_PAYMENT_METHODS } = require("../../helpers/paymentEvidence");
 const { queueMail } = require("../../helpers/emailController");
 
 
@@ -53,12 +54,16 @@ const markInvoiceAsPaid = async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { invoiceId } = req.params;
-    const { paymentMethod, transactionReference, internalNote } = req.body || {};
+    const { paymentMethod, transactionReference, paymentDetails, internalNote } = req.body || {};
+    if (!ADMIN_PAYMENT_METHODS.includes(paymentMethod)) {
+      return res.status(400).json({ message: "Valid payment method is required", success: false, error: true });
+    }
 
     const result = await markInvoicePaidAndResumePlan({
       invoiceId,
       paymentMethod,
       transactionReference,
+      paymentDetails: paymentDetails || {},
       markedPaidBy: req.userId,
       internalNote: typeof internalNote === "string" ? internalNote.trim() : internalNote,
     });

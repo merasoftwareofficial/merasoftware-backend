@@ -4,7 +4,7 @@ const generateInvoiceNumber = require("./generateInvoiceNumber");
 const { getOrderDisplayName } = require("./orderPresentation");
 // Payment SSOT — what has actually been received is derived from completed transactions.
 const { getInvoiceAmountReceived, deriveInvoiceStatus } = require("./orderPaymentTotals");
-const { prepareUpiPaymentEvidence } = require("./upiPaymentEvidence");
+const { preparePaymentEvidence } = require("./paymentEvidence");
 
 const getOrderTotal = (order) =>
   Number(order?.totalAmount || order?.totalPrice || order?.price || 0);
@@ -13,12 +13,23 @@ const getOrderTotal = (order) =>
 // exactly what the customer ordered (base + each feature). Shared SSOT — used by every path that
 // creates a project invoice on demand (approveProjectOrder.js, walletPayInstant.js's due-based
 // installment invoice creation, doc 52 Phase 3).
+//
+// When the agreed price is below what the items add up to (an admin discount, a website offer,
+// or a free project), the difference is shown as its own negative "Discount" line — so the items
+// always add up to the order's price instead of an unexplained gap between items and total.
 const buildLineItemsFromOrder = (order) => {
   if (Array.isArray(order?.orderItems) && order.orderItems.length > 0) {
-    return order.orderItems.map((item) => ({
+    const items = order.orderItems.map((item) => ({
       name: item.name,
       price: Number(item.finalPrice ?? item.originalPrice ?? 0),
     }));
+    const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
+    const discount = Math.round(itemsTotal - getOrderTotal(order));
+    if (discount > 0) {
+      const offerTitle = order?.projectSnapshot?.offer?.title;
+      items.push({ name: offerTitle ? `Discount (${offerTitle})` : "Discount", price: -discount });
+    }
+    return items;
   }
   return [{ name: getOrderDisplayName(order, "Project"), price: getOrderTotal(order) }];
 };
@@ -53,15 +64,26 @@ const markProjectInvoicePaid = async ({
   actorId,
   amount,
   existingTransaction = null,
+  // Method-specific details (bank transfer mode, cheque bank/date) — see helpers/paymentEvidence.js.
+  paymentDetails = {},
+  // Evidence the caller already validated up front (so a bad reference is refused before the
+  // caller creates anything). Omit to have it validated here.
+  preparedEvidence = null,
 }) => {
   const amountNow = Number(amount != null ? amount : invoice.amount);
 
   let transaction = existingTransaction;
   if (!transaction) {
     const transactionId = `INVPAID${String(invoice.invoiceNumber).replace(/[^a-zA-Z0-9]/g, "")}${Date.now()}`;
-    const paymentEvidence = paymentMethod === "upi"
-      ? await prepareUpiPaymentEvidence({ reference: transactionReference, transactionId, capturedVia: "admin" })
-      : undefined;
+    const evidence = preparedEvidence || await preparePaymentEvidence({
+      paymentMethod,
+      reference: transactionReference,
+      details: paymentDetails,
+      transactionId,
+      capturedVia: "admin",
+    });
+    transactionReference = evidence.reference;
+    const paymentEvidence = evidence.paymentEvidence;
     transaction = await transactionModel.create({
       userId: customerId,
       orderId: invoice.orderId,

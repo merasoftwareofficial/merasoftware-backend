@@ -17,7 +17,13 @@ const { getOrderDisplayName } = require("./orderPresentation");
 
 const STATEMENT_TYPES = new Set(["project_final", "service_statement"]);
 
-const money = (value) => `Rs ${Number(value || 0).toLocaleString("en-IN")}`;
+// A negative amount is a discount line (helpers/paymentRecording.js buildLineItemsFromOrder).
+const money = (value) => {
+  const amount = Number(value || 0);
+  return `${amount < 0 ? "- " : ""}Rs ${Math.abs(amount).toLocaleString("en-IN")}`;
+};
+// A ₹0 project (100% discount / offer) reads FREE wherever its total is printed.
+const totalText = (value) => (Number(value || 0) === 0 ? "FREE" : money(value));
 const date = (value) => (value ? new Date(value).toLocaleDateString("en-IN") : "—");
 const ordinal = (value) => {
   const labels = ["1st", "2nd", "3rd"];
@@ -54,7 +60,7 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
   y += 17;
   doc.fontSize(10).fillColor("#475569").text(`Customer: ${customer?.name || "Customer"} · ${customer?.email || ""}`, 48, y);
   y += 34;
-  doc.fillColor("#0f172a").fontSize(12).text(isService ? "Contracted total" : "Project total", 48, y).text(money(total), 420, y, { align: "right" });
+  doc.fillColor("#0f172a").fontSize(12).text(isService ? "Contracted total" : "Project total", 48, y).text(totalText(total), 420, y, { align: "right" });
   y += 22;
   doc.fillColor("#047857").text("Received", 48, y).text(money(paid), 420, y, { align: "right" });
   y += 22;
@@ -65,7 +71,7 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
 
   const history = Array.isArray(transactions) ? transactions : [];
   if (!history.length) {
-    doc.fontSize(10).fillColor("#64748b").text("No completed payment has been recorded yet.", 48, y);
+    doc.fontSize(10).fillColor("#64748b").text(total === 0 ? "No payment is due — this project is free." : "No completed payment has been recorded yet.", 48, y);
     y += 19;
   } else {
     history.forEach((transaction) => {
@@ -125,7 +131,7 @@ const renderInvoice = (doc, { invoice, order, customer }) => {
   });
   doc.moveDown();
   doc.fontSize(11).fillColor("#111827");
-  doc.text(`Invoice amount: ${money(amount)}`, { align: "right" });
+  doc.text(`Invoice amount: ${totalText(amount)}`, { align: "right" });
   doc.text(`Paid: ${money(paid)}`, { align: "right" });
   doc.text(`Balance: ${money(balance)}`, { align: "right" });
   if (invoice.notes) {

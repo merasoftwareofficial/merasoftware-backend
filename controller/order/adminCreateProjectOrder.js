@@ -8,11 +8,14 @@ const generateInvoiceNumber = require("../../helpers/generateInvoiceNumber");
 const { initializeProjectTimeline } = require("../../helpers/projectNodeService");
 // Shared SSOT payment-recording helper (extracted from this file) — reused by the
 // project-approval flow so both paths write one transaction + one invoice, never two.
-const { markProjectInvoicePaid } = require("../../helpers/paymentRecording");
+const { markProjectInvoicePaid, buildLineItemsFromOrder } = require("../../helpers/paymentRecording");
 const { syncProjectFinalInvoice } = require("../../helpers/projectFinalInvoice");
 const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
+const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
+const { findLiveWebsiteOffer } = require("../../helpers/websiteOffers");
+const { sendProjectCreatedEmail } = require("../../helpers/emailService");
 
-const PAYMENT_METHODS = ["upi", "bank_transfer", "cash", "wallet"];
+const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
 
 const PROJECT_CATEGORIES = [
   "standard_websites",
@@ -73,7 +76,7 @@ const adminCreateProjectOrderController = async (req, res) => {
       });
     }
 
-    const client = await userModel.findById(customerId).select("_id");
+    const client = await userModel.findById(customerId).select("_id name email");
     if (!client) {
       return res.status(404).json({
         message: "Client not found",
@@ -93,9 +96,11 @@ const adminCreateProjectOrderController = async (req, res) => {
       paymentType,
       installmentCount,
       recordPayment,
+      offerSlug,
     } = req.body;
 
-    if (!category || !sellingPrice) {
+    // 0 is a real price (a FREE project / 100% discount), so only a missing value is refused.
+    if (!category || sellingPrice === undefined || sellingPrice === null || sellingPrice === "") {
       return res.status(400).json({
         message: "Category and selling price are required",
         error: true,
@@ -114,21 +119,54 @@ const adminCreateProjectOrderController = async (req, res) => {
     }
 
     const finalPrice = Number(sellingPrice);
-    if (!Number.isFinite(finalPrice) || finalPrice <= 0) {
+    if (!Number.isFinite(finalPrice) || finalPrice < 0) {
       return res.status(400).json({
-        message: "Selling price must be a positive number",
+        message: "Selling price must be zero or more",
         error: true,
         success: false,
       });
     }
 
-    const shouldRecordPayment = Boolean(recordPayment && recordPayment.paymentMethod);
+    // A FREE project has nothing to collect: no installments and no payment to record.
+    const isFree = finalPrice === 0;
+    if (isFree && paymentType === "partial") {
+      return res.status(400).json({
+        message: "A free project cannot be split into installments",
+        error: true,
+        success: false,
+      });
+    }
+
+    const shouldRecordPayment = !isFree && Boolean(recordPayment && recordPayment.paymentMethod);
     if (shouldRecordPayment && !PAYMENT_METHODS.includes(recordPayment.paymentMethod)) {
       return res.status(400).json({
         message: "Invalid payment method",
         error: true,
         success: false,
       });
+    }
+
+    // Everything that can be refused is checked before anything is written, so a bad payment
+    // reference or a stale offer never leaves a half-created project behind.
+    const preparedEvidence = shouldRecordPayment
+      ? await preparePaymentEvidence({
+          paymentMethod: recordPayment.paymentMethod,
+          reference: recordPayment.transactionReference,
+          details: recordPayment.paymentDetails || {},
+          capturedVia: "admin",
+        })
+      : null;
+
+    let offer = null;
+    if (offerSlug) {
+      offer = await findLiveWebsiteOffer(String(offerSlug));
+      if (!offer) {
+        return res.status(400).json({
+          message: "The selected offer is no longer live on the website",
+          error: true,
+          success: false,
+        });
+      }
     }
 
     // Base price and feature prices are never trusted from the request body —
@@ -166,23 +204,25 @@ const adminCreateProjectOrderController = async (req, res) => {
     const featuresTotal = clientProjectFeatures.reduce((sum, feature) => sum + (feature.price || 0), 0);
     const referenceTotal = basePrice + featuresTotal;
 
-    const isPartialPayment = paymentType === "partial";
+    const isPartialPayment = !isFree && paymentType === "partial";
     // A project order must never be born `approved` without a real payment recorded. When admin
     // defers payment ("Just Add Project, Let Client Pay the Bill"), the order stays
     // `pending-approval`; the same approveProjectOrder.js "record payment to approve" flow closes it out
     // later. Only when a payment IS recorded at creation time (shouldRecordPayment) is the order
-    // born approved, right below where that payment actually gets settled.
+    // born approved, right below where that payment actually gets settled. The one exception is a
+    // FREE project: there is nothing to pay, so it is fully settled and approved from birth.
+    const startsApproved = shouldRecordPayment || isFree;
     const orderData = {
       userId: customerId,
       price: finalPrice,
       totalAmount: finalPrice,
-      orderVisibility: shouldRecordPayment ? "approved" : "pending-approval",
-      status: shouldRecordPayment ? "in_progress" : "pending",
+      orderVisibility: startsApproved ? "approved" : "pending-approval",
+      status: startsApproved ? "in_progress" : "pending",
       isWebsiteProject: true,
       isPartialPayment,
       paidAmount: 0,
       remainingAmount: finalPrice,
-      paymentComplete: false,
+      paymentComplete: isFree,
       projectSnapshot: {
         displayName: projectName?.trim() || CATEGORY_LABELS[category],
         category,
@@ -192,6 +232,7 @@ const adminCreateProjectOrderController = async (req, res) => {
         referenceTotal,
         finalPrice,
         features: clientProjectFeatures,
+        ...(offer ? { offer: { slug: offer.slug, title: offer.title } } : {}),
       },
       orderItems: [
         { id: `project:${category}`, name: `${CATEGORY_LABELS[category]} (Base)`, type: "main", quantity: 1, originalPrice: basePrice, finalPrice: basePrice },
@@ -216,10 +257,9 @@ const adminCreateProjectOrderController = async (req, res) => {
 
     await order.save();
 
-    const lineItems = [
-      { name: `${CATEGORY_LABELS[category]} (Base)`, price: basePrice },
-      ...clientProjectFeatures.map((feature) => ({ name: feature.name, price: feature.price })),
-    ];
+    // Shared builder: the base + feature rows, plus a "Discount" row whenever the agreed price
+    // is below them — the same lines approval, installment and final invoices use.
+    const lineItems = buildLineItemsFromOrder(order);
 
     const invoiceDate = new Date();
     const createdInvoices = [];
@@ -244,15 +284,19 @@ const adminCreateProjectOrderController = async (req, res) => {
       createdInvoices.push(invoice);
     } else {
       const invoiceNumber = await generateInvoiceNumber();
+      // A FREE project's ₹0 invoice is settled from birth — there is no payment to wait for.
+      // Status is set here directly because deriveInvoiceStatus() treats a 0 total as unpaid.
       const invoice = await invoiceModel.create({
         userId: customerId,
         orderId: order._id,
         invoiceNumber,
         invoiceType: "project",
         amount: finalPrice,
-        status: "unpaid",
+        amountPaid: 0,
+        status: isFree ? "paid" : "unpaid",
         invoiceDate,
         dueDate: invoiceDate,
+        ...(isFree ? { paidDate: invoiceDate } : {}),
         lineItems,
       });
       createdInvoices.push(invoice);
@@ -267,6 +311,8 @@ const adminCreateProjectOrderController = async (req, res) => {
         customerId,
         paymentMethod: recordPayment.paymentMethod,
         transactionReference: recordPayment.transactionReference,
+        paymentDetails: recordPayment.paymentDetails || {},
+        preparedEvidence,
         notes: recordPayment.notes,
         actorId: req.userId,
       });
@@ -286,7 +332,14 @@ const adminCreateProjectOrderController = async (req, res) => {
         await order.save();
       }
       await syncProjectFinalInvoice(order);
+    } else if (isFree) {
+      await syncProjectFinalInvoice(order);
     }
+
+    // Queues the "project started" mail; the response then carries its draft id and the admin
+    // panel shows the same Send / Don't Send review popup project cancellation already shows.
+    // Best-effort: the builder never throws, so a mail problem never undoes a created project.
+    await sendProjectCreatedEmail(client, order, createdInvoices[0]);
 
     return res.status(201).json({
       message: "Project created successfully",
@@ -296,7 +349,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     });
   } catch (error) {
     console.error("Error creating project for client:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       message: error.message || "Failed to create project for client",
       error: true,
       success: false,

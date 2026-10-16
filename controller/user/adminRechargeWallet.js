@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const userModel = require("../../models/userModel");
 const { creditWalletInstant } = require("../../helpers/transactionService");
+const { ADMIN_PAYMENT_METHODS } = require("../../helpers/paymentEvidence");
 
 // Admin-initiated wallet recharge for a client — instant credit, no approval step.
 //
@@ -10,7 +11,7 @@ const { creditWalletInstant } = require("../../helpers/transactionService");
 // a 'completed' deposit transaction + an atomic balance credit — SSOT-safe, and it shows up in
 // the client's own wallet history like any other recharge. No parallel store, no direct set.
 
-const PAYMENT_METHODS = ["upi", "cash", "bank_transfer", "wallet"];
+const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
 
 const requireAdmin = async (req, res) => {
   const adminUser = await userModel.findById(req.userId).select("roles");
@@ -34,7 +35,7 @@ const adminRechargeWallet = async (req, res) => {
       });
     }
 
-    const { amount, paymentMethod = "upi", reference, note } = req.body;
+    const { amount, paymentMethod = "upi", reference, paymentDetails, note } = req.body;
 
     const numericAmount = Number(amount);
     if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
@@ -70,6 +71,7 @@ const adminRechargeWallet = async (req, res) => {
       amount: numericAmount,
       paymentMethod: method,
       reference: reference?.trim() || null,
+      paymentDetails: paymentDetails || {},
       description,
       actorId: req.userId,
     });

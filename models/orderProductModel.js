@@ -278,7 +278,16 @@ const projectSnapshotSchema = new mongoose.Schema({
         // feature). Declared so the snapshot keeps it — strict mode was dropping
         // the quantity the create-project controllers already send.
         quantity: { type: Number, default: 1 }
-    }]
+    }],
+    // Website offer (merasoftware /offer) this project was sold under, if any. Frozen at
+    // creation — the offer itself can later be edited, archived or expire on the website.
+    offer: {
+        type: new mongoose.Schema({
+            slug: { type: String, trim: true },
+            title: { type: String, trim: true },
+        }, { _id: false }),
+        default: undefined
+    }
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
@@ -550,7 +559,7 @@ const orderSchema = new mongoose.Schema({
         type: [{
             method: {
                 type: String,
-                enum: ['wallet', 'upi', 'cash', 'bank_transfer', 'combined', 'demo'],
+                enum: ['wallet', 'upi', 'cash', 'bank_transfer', 'cheque', 'combined', 'demo'],
                 required: true
             },
             amount: { type: Number, required: true },

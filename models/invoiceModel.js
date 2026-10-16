@@ -72,7 +72,7 @@ const invoiceSchema = new mongoose.Schema({
   },
   paymentMethod: {
     type: String,
-    enum: ["upi", "bank_transfer", "cash", "wallet", null],
+    enum: ["upi", "bank_transfer", "cheque", "cash", "wallet", null],
     default: null,
   },
   transactionReference: {
