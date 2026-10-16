@@ -29,6 +29,7 @@ const events = [
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation'],
   ['website.subscription.manage', 'Website', 'Subscription management'],
-].map(([key, section, label]) => ({ key, section, label }));
+].map(([key, section, label]) => ({ key, section, label, application: section === 'Website' ? 'website' : 'portal' }));
 const byKey = new Map(events.map(event => [event.key, event]));
-module.exports = { events, byKey };
+const eventKeys = application => events.filter(event => event.application === application).map(event => event.key);
+module.exports = { events, byKey, eventKeys };

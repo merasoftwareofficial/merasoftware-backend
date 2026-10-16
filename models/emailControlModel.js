@@ -13,7 +13,14 @@ const policySchema = new Schema({
 }, { timestamps: true });
 const draftSchema = new Schema({
   event: { type: String, required: true },
-  actor: { type: Schema.Types.ObjectId, required: true, index: true },
+  actor: { type: Schema.Types.ObjectId, default: null, index: true },
+  application: { type: String, enum: ['website', 'portal'], index: true },
+  dedupeKey: { type: String, unique: true, sparse: true },
+  reference: { subscriberId: String, tokenHash: String },
+  requiredLinks: [String],
+  baseSubject: String,
+  baseText: String,
+  values: { type: Map, of: String },
   source: String,
   to: [String],
   subject: String,
@@ -29,8 +36,17 @@ const draftSchema = new Schema({
   // No worker drains drafts. Expired mail can never become sendable again.
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
 }, { timestamps: true });
+// Small permanent audit records; draft content and attachments still expire.
+const historySchema = new Schema({
+  draftId: { type: Schema.Types.ObjectId, required: true, unique: true },
+  application: { type: String, enum: ['website', 'portal'], required: true, index: true },
+  event: String, actor: Schema.Types.ObjectId, decidedBy: Schema.Types.ObjectId,
+  to: [String], subject: String, status: String, providerId: String, failure: String,
+  expiresAt: Date, sentAt: Date,
+}, { timestamps: true });
 module.exports = {
   EmailTemplate: mongoose.model('EmailTemplate', templateSchema),
   EmailPolicy: mongoose.model('EmailPolicy', policySchema),
   EmailDraft: mongoose.model('EmailDraft', draftSchema),
+  EmailHistory: mongoose.model('EmailHistory', historySchema),
 };

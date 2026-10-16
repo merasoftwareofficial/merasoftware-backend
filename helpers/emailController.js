@@ -1,6 +1,6 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { EmailDraft, EmailTemplate, EmailPolicy } = require('../models/emailControlModel');
-const { byKey } = require('./emailCatalog');
+const { EmailDraft, EmailTemplate, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
+const { byKey, eventKeys } = require('./emailCatalog');
 const userModel = require('../models/userModel');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
@@ -13,13 +13,34 @@ function plainText(html = '') {
 function render(template, values) {
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => String(values[key] ?? ''));
 }
+function withRequiredLinks(text, links = []) {
+  const missing = links.filter(link => !text.includes(link));
+  return missing.length ? `${text}\n\n${missing.join('\n')}` : text;
+}
+function applicationQuery(application) {
+  return { event: { $in: eventKeys(application) } };
+}
+function draftAccess(actor, access = {}) {
+  if (access.application === 'website' && access.websiteAdmin) return applicationQuery('website');
+  if (access.application === 'portal' && access.portalAdmin) return applicationQuery('portal');
+  return { actor, ...(access.application ? applicationQuery(access.application) : {}) };
+}
+async function recordHistory(draft, decidedBy) {
+  try {
+    await EmailHistory.updateOne({ draftId: draft._id }, { $set: {
+      application: byKey.get(draft.event).application, event: draft.event, actor: draft.actor,
+      ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject, status: draft.status,
+      providerId: draft.providerId, failure: draft.failure, expiresAt: draft.expiresAt, sentAt: draft.sentAt,
+    } }, { upsert: true });
+  } catch (error) { console.error('[email] Could not record email history:', error.message); }
+}
 async function applyDefault(event, mail, values = {}) {
   const policy = await EmailPolicy.findOne({ event }).lean();
   if (policy?.mode === 'off') return null;
   const template = policy?.defaultTemplate && await EmailTemplate.findOne({ _id: policy.defaultTemplate, event }).lean();
   const context = { subject: mail.subject, message: mail.text || plainText(mail.html), ...values };
-  if (!template) return { ...mail, text: context.message };
-  const text = render(template.text, context);
+  if (!template) return { ...mail, text: withRequiredLinks(context.message, mail.requiredLinks) };
+  const text = withRequiredLinks(render(template.text, context), mail.requiredLinks);
   return { ...mail, subject: render(template.subject, context), text, html: textHtml(text) };
 }
 function validateContent(subject, text) {
@@ -29,22 +50,40 @@ function validateContent(subject, text) {
 async function prepareMail(event, mail, values) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
-  if (!scope || scope.closed || !scope.req.userId || !byKey.has(event)) return suppressed();
-  const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
-  if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
+  if (!scope || scope.closed || !byKey.has(event)) return suppressed();
+  const publicIntake = scope.req.emailBridgeAccess === 'intake';
+  if (publicIntake && !['website.subscription.confirm', 'website.subscription.manage'].includes(event)) return suppressed();
+  if (!publicIntake) {
+    if (!scope.req.userId) return suppressed();
+    const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
+    if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
+  }
   const content = await applyDefault(event, mail, values);
   if (!content) return suppressed();
   const to = (Array.isArray(content.to) ? content.to : [content.to]).filter(Boolean);
   if (!to.length || to.some(address => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return suppressed();
   validateContent(content.subject, content.text);
-  const draft = await EmailDraft.create({
+  if (mail.dedupeKey) {
+    const previous = await EmailDraft.findOne({ dedupeKey: mail.dedupeKey }).lean();
+    if (previous) return { data: null, error: null, queued: true, draftId: String(previous._id) };
+  }
+  let draft;
+  try { draft = await EmailDraft.create({
     event, actor: scope.req.userId, source: `${scope.req.method} ${scope.req.originalUrl.split('?')[0]}`,
+    application: byKey.get(event).application, dedupeKey: mail.dedupeKey,
+    reference: mail.reference, requiredLinks: mail.requiredLinks,
+    baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values,
     to, subject: content.subject, text: content.text, html: content.html || textHtml(content.text),
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
     expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000),
-  });
+  }); } catch (error) {
+    if (error.code !== 11000 || !mail.dedupeKey) throw error;
+    const previous = await EmailDraft.findOne({ dedupeKey: mail.dedupeKey }).lean();
+    if (!previous) throw error;
+    return { data: null, error: null, queued: true, draftId: String(previous._id) };
+  }
   if (scope.closed) { await EmailDraft.deleteOne({ _id: draft._id }); return suppressed(); }
   scope.ids.push(draft._id);
   return { data: null, error: null, queued: true, draftId: String(draft._id) };
@@ -75,6 +114,7 @@ function requestMiddleware(req, res, next) {
         return json(body);
       }
       await EmailDraft.updateMany({ _id: { $in: scope.ids }, status: 'staged' }, { $set: { status: 'pending' } });
+      for (const draft of await EmailDraft.find({ _id: { $in: scope.ids } })) await recordHistory(draft);
       if (req.body?.emailReview?.choice === 'send' && scope.ids.length === 1) {
         const leadDraft = await EmailDraft.findOne({ _id: scope.ids[0], event: 'lead.created' }).lean();
         if (leadDraft) {
@@ -99,22 +139,25 @@ function requestMiddleware(req, res, next) {
 }
 // This is the ONLY provider call. Content is locked on the first send attempt;
 // retries reuse the same Resend idempotency key and identical payload.
-async function decide(id, actor, decision) {
+async function decide(id, actor, decision, access = {}) {
   if (!['send', 'skip'].includes(decision.choice)) throw new Error('Choose Send Mail or Don’t Send Mail');
-  const query = { _id: id, actor, expiresAt: { $gt: new Date() } };
+  const query = { _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } };
   if (decision.choice === 'skip') {
     const draft = await EmailDraft.findOneAndUpdate({ ...query, status: { $in: ['pending', 'failed'] } }, { $set: { status: 'skipped' } }, { new: true });
     if (!draft) throw new Error('Draft is unavailable or has already been decided');
+    await recordHistory(draft, actor);
     return { status: draft.status };
   }
   validateContent(decision.subject, decision.text);
   const policyDraft = await EmailDraft.findOne(query).lean();
   if (!policyDraft) throw new Error('Draft is unavailable');
+  if (policyDraft.event.startsWith('website.subscription.') && !access.validatedWebsite) throw new Error('Review this subscription email from the website panel');
   const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
   if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
+  const text = withRequiredLinks(decision.text, policyDraft.requiredLinks);
   const update = policyDraft.status === 'failed'
     ? { status: 'sending', failure: '' }
-    : { status: 'sending', subject: decision.subject.trim(), text: decision.text, html: textHtml(decision.text), failure: '' };
+    : { status: 'sending', subject: decision.subject.trim(), text, html: text === policyDraft.text ? policyDraft.html : textHtml(text), failure: '' };
   const draft = await EmailDraft.findOneAndUpdate({ ...query, status: { $in: ['pending', 'failed'] } }, { $set: update }, { new: true });
   if (!draft) throw new Error('Draft has already been decided or is being sent');
   try {
@@ -127,15 +170,18 @@ async function decide(id, actor, decision) {
     const result = await response.json();
     if (!response.ok) throw new Error('Email provider refused the message');
     await EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'sent', providerId: result.id, sentAt: new Date() } });
+    draft.status = 'sent'; draft.providerId = result.id; draft.sentAt = new Date();
+    await recordHistory(draft, actor);
     if (draft.reminderInvoice) {
       try {
         await require('../models/monthlyInvoiceModel').updateOne({ _id: draft.reminderInvoice }, { $inc: { remindersSent: 1 }, $set: { lastReminderDate: new Date() } });
       } catch (error) { console.error('[email] Delivered reminder; could not update invoice counters:', error.message); }
     }
-    return { status: 'sent' };
+    return { status: 'sent', event: draft.event, reference: draft.reference };
   } catch (error) {
     await EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'failed', failure: error.message } });
+    draft.status = 'failed'; draft.failure = error.message; await recordHistory(draft, actor);
     throw error;
   }
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, plainText, render, validateContent, textHtml };
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, plainText, render, validateContent, textHtml, withRequiredLinks, applicationQuery, draftAccess };

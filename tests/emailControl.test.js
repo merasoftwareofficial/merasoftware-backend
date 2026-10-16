@@ -153,3 +153,16 @@ test('text conversion retains links and template interpolation is literal', () =
   assert.equal(plainText('<p>Hello <a href="https://example.test">open</a></p>'), 'Hello open (https://example.test)');
   assert.equal(render('Hi {{name}}', { name: '$& <name>' }), 'Hi $& <name>');
 });
+test('website assertions are bound to body and path and cannot use expired access', async () => {
+  const { signingKey, digest } = require('../helpers/websiteEmailAccess');
+  const route = '/policies/website.subscription.confirm?application=website';
+  const body = { mode: 'off' };
+  const assertion = (overrides = {}, expiresIn = 60) => jwt.sign({ access: 'admin', method: 'PUT', path: route, digest: digest(body), sub: String(customer._id), ...overrides }, signingKey(), { algorithm: 'HS256', audience: 'email-control', issuer: 'merasoftware-website', expiresIn });
+  const send = async (token, payload = body, target = route) => nativeFetch(base + '/email-control' + target, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-website-email-assertion': token }, body: JSON.stringify(payload) });
+  assert.equal((await send(assertion(), { mode: 'review' })).status, 401);
+  assert.equal((await send(assertion(), body, '/policies/invoice.project?application=portal')).status, 401);
+  assert.equal((await send(assertion({}, -1))).status, 401);
+  assert.equal(await EmailPolicy.countDocuments(), 0);
+  assert.equal((await send(assertion())).status, 200);
+  assert.equal(calls.length, 0);
+});
