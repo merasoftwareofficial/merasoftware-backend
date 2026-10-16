@@ -2,11 +2,6 @@ const cron = require('node-cron');
 const orderProductModel = require('../models/orderProductModel');
 const monthlyInvoiceModel = require('../models/monthlyInvoiceModel');
 const userModel = require('../models/userModel');
-const {
-    sendMonthlyInvoiceEmail,
-    sendAdminAutoRenewalNotification,
-    generateMonthlyInvoicePdf
-} = require('../helpers/emailService');
 const { updateOverdueInvoicesAndPausePlans } = require('../helpers/invoiceLifecycle');
 
 // Generate unique invoice number
@@ -136,29 +131,8 @@ const processAutoRenewal = async () => {
                 await invoice.save();
                 console.log(`📄 Invoice ${invoiceNumber} created for order ${plan._id}`);
 
-                // Generate PDF invoice
-                const invoicePdfBuffer = await generateMonthlyInvoicePdf(
-                    plan.userId,
-                    plan,
-                    invoice
-                );
-
-                // Send invoice email to user
-                await sendMonthlyInvoiceEmail(
-                    plan.userId,
-                    plan,
-                    invoice,
-                    invoicePdfBuffer
-                );
-                console.log(`📧 Invoice email sent to user: ${plan.userId.email}`);
-
-                // Send notification to admin
-                await sendAdminAutoRenewalNotification(
-                    plan.userId,
-                    plan,
-                    invoice
-                );
-                console.log(`📧 Admin notification sent for order: ${plan._id}`);
+                // Automatic renewal email is disabled. Billing still completes;
+                // invoice sharing is reviewed manually through Email Control.
 
             } catch (planError) {
                 console.error(`❌ Error processing plan ${plan._id}:`, planError);

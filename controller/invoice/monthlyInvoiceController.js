@@ -9,9 +9,9 @@ const {
   sendMonthlyInvoiceEmail,
 } = require("../../helpers/emailService");
 const mongoose = require("mongoose");
-const { Resend } = require("resend");
+const { queueMail } = require("../../helpers/emailController");
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+
 
 const requireAdmin = (req, res) => {
   if (req.userRole !== "admin") {
@@ -244,7 +244,7 @@ const resendPaymentRecordInvoice = async (req, res) => {
     }
 
     return res.status(200).json({
-      message: "Invoice email resent successfully",
+      message: "Invoice email ready for review",
       success: true,
       error: false,
       data: { invoice },
@@ -294,7 +294,8 @@ const sendPaymentRecordReminder = async (req, res) => {
     }
 
     const invoicePdf = await generateMonthlyInvoicePdf(user, order, invoice);
-    const { error } = await resend.emails.send({
+    const { error, suppressed } = await queueMail("invoice.reminder", {
+      reminderInvoice: invoice._id,
       from: `${process.env.FROM_NAME || "Mera Software"} <${process.env.FROM_EMAIL}>`,
       to: [user.email],
       subject: `Payment reminder - Invoice #${invoice.invoiceNumber}`,
@@ -318,17 +319,16 @@ const sendPaymentRecordReminder = async (req, res) => {
       ],
     });
 
+    if (suppressed) throw new Error("Email is disabled for this action");
     if (error) {
       console.error("Error sending payment reminder email:", error);
       throw new Error("Payment reminder could not be sent");
     }
 
-    invoice.remindersSent = Number(invoice.remindersSent || 0) + 1;
-    invoice.lastReminderDate = new Date();
-    await invoice.save();
+    // Reminder counters change only after an approved mail is delivered.
 
     return res.status(200).json({
-      message: "Payment reminder sent successfully",
+      message: "Payment reminder ready for review",
       success: true,
       error: false,
       data: { invoice },

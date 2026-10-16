@@ -113,6 +113,21 @@ const createLeadController = async (req, res) => {
       }
     }
 
+    // The lead is saved regardless of the mail choice. Delivery happens only
+    // after a successful response and an explicit, reviewed Send Mail decision.
+    if (cleanEmail && req.body.emailReview?.choice === 'send') {
+      try {
+        const { queueMail } = require('../../helpers/emailController');
+        await queueMail('lead.created', {
+          to: [cleanEmail], subject: req.body.emailReview.subject,
+          text: req.body.emailReview.text,
+        }, { name: cleanName });
+      } catch (mailError) {
+        console.error('Lead saved; email draft unavailable:', mailError.message);
+        req.emailPreparationFailed = true;
+      }
+    }
+
     return res.status(201).json({
       message: "Lead created successfully",
       data: savedLead,

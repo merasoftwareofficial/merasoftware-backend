@@ -1,8 +1,7 @@
-const { Resend } = require('resend');
+const { reviewTransport: resend, withEvent } = require('./emailController');
 const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation');
 
-// Initialize Resend with API key
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Legacy builders only prepare review drafts; they cannot send mail.
 
 /**
  * Send notification to admins about new update request
@@ -47,7 +46,9 @@ const sendUpdateRequestNotification = async (updateRequest, adminEmails) => {
     };
     
     // Send email
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending admin notification email:', error);
@@ -82,7 +83,9 @@ const sendUserConfirmation = async (updateRequest) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending user confirmation email:', error);
@@ -137,7 +140,9 @@ const sendDeveloperAssignedNotification = async (entity, type = 'update') => {
       html: content
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending developer assigned notification:', error);
@@ -171,7 +176,9 @@ const sendUpdateCompletedNotification = async (updateRequest) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending update completed notification:', error);
@@ -251,7 +258,9 @@ const sendDeveloperAssignmentEmail = async (entity, type = 'update') => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending developer assignment email:', error);
@@ -352,7 +361,9 @@ const sendPurchaseConfirmationEmail = async (order, paymentDetails) => {
       ],
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending purchase confirmation email:', error);
@@ -523,7 +534,9 @@ const sendMonthlyLimitedPlanActivationEmail = async (order, paymentDetails) => {
       ],
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending monthly limited plan activation email:', error);
@@ -745,7 +758,9 @@ const sendWalletRechargeConfirmationEmail = async (user, transaction) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending wallet recharge confirmation email:', error);
@@ -841,7 +856,9 @@ const sendPaymentRejectionEmail = async (user, transaction, order, rejectionReas
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending payment rejection email:', error);
@@ -960,7 +977,9 @@ const sendProjectCancellationEmail = async (user, order, refunds = [], cancellat
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending project cancellation email:', error);
@@ -1023,7 +1042,9 @@ const sendContactFormConfirmation = async (contactData) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending contact form confirmation email:', error);
@@ -1089,7 +1110,9 @@ const sendContactRequestNotification = async (contactData, adminEmails) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending admin notification email:', error);
@@ -1160,7 +1183,9 @@ const sendProjectUpdateEmail = async (user, updateData, project) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending project update email:', error);
@@ -1263,7 +1288,9 @@ const sendProjectMessageEmail = async (user, messageData, project) => {
       `
     };
     
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
     
     if (error) {
       console.error('Error sending project message email:', error);
@@ -1312,7 +1339,9 @@ const sendCallbackConfirmation = async (callbackData) => {
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending callback confirmation email:', error);
@@ -1374,7 +1403,9 @@ const sendCallbackRequestNotification = async (callbackData, adminEmails) => {
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending callback admin notification email:', error);
@@ -1498,7 +1529,9 @@ const sendMonthlyInvoiceEmail = async (user, order, invoice, invoicePdfBuffer) =
       ],
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending monthly invoice email:', error);
@@ -1590,7 +1623,9 @@ const sendAdminAutoRenewalNotification = async (user, order, invoice) => {
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending admin auto-renewal notification:', error);
@@ -1818,7 +1853,9 @@ const sendAdminPurchaseConfirmationEmail = async (order, paymentDetails) => {
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending admin purchase confirmation email:', error);
@@ -1921,7 +1958,9 @@ const sendAdminUPIPendingNotification = async (order) => {
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending admin UPI pending notification:', error);
@@ -2006,7 +2045,9 @@ const sendPlanClosureEmailToCustomer = async (order, closureReason, closedDate) 
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending plan closure email to customer:', error);
@@ -2106,7 +2147,9 @@ const sendPlanClosureEmailToAdmin = async (order, closureReason, closedByAdmin, 
       `
     };
 
-    const { data, error } = await resend.emails.send(emailData);
+    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
+    if (suppressed) return false;
+    if (queued) return true;
 
     if (error) {
       console.error('Error sending plan closure email to admin:', error);
@@ -2156,3 +2199,8 @@ module.exports = {
   sendAdminAutoRenewalNotification,
   generateMonthlyInvoicePdf
 };
+
+// PDFs remain pure helpers; every mail builder carries its stable central event.
+for (const [key, builder] of Object.entries(module.exports)) {
+  if (key.startsWith('send')) module.exports[key] = withEvent(key, builder);
+}
