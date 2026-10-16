@@ -1,3 +1,4 @@
+const { indiaYear, formatIndiaDate, formatIndiaDateTime } = require('./dateTime');
 const { reviewTransport: resend, withEvent } = require('./emailController');
 const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation');
 
@@ -349,7 +350,7 @@ const sendPurchaseConfirmationEmail = async (order, paymentDetails) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `,
@@ -436,7 +437,7 @@ const sendMonthlyLimitedPlanActivationEmail = async (order, paymentDetails) => {
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #555; font-size: 14px;">Activation Date:</td>
-                  <td style="padding: 8px 0; color: #333; font-weight: bold; font-size: 14px;">${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</td>
+                  <td style="padding: 8px 0; color: #333; font-weight: bold; font-size: 14px;">${formatIndiaDate(Date.now(), { day: 'numeric', month: 'long', year: 'numeric' })}</td>
                 </tr>
               </table>
             </div>
@@ -518,7 +519,7 @@ const sendMonthlyLimitedPlanActivationEmail = async (order, paymentDetails) => {
           <!-- Footer -->
           <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0;">
             <p style="margin: 0; font-size: 12px; color: #666;">
-              © ${new Date().getFullYear()} Mera Software. All rights reserved.
+              © ${indiaYear(Date.now())} Mera Software. All rights reserved.
             </p>
             <p style="margin: 5px 0 0 0; font-size: 11px; color: #999;">
               This is an automated email. Please do not reply to this email.
@@ -586,7 +587,7 @@ const generateInvoicePdf = async (order, paymentDetails) => {
     doc.fontSize(10);
     doc.text(`Customer: ${order.userId.name}`);
     doc.text(`Email: ${order.userId.email}`);
-    doc.text(`Invoice Date: ${new Date().toLocaleDateString()}`);
+    doc.text(`Invoice Date: ${formatIndiaDate(Date.now())}`);
     doc.text(`Invoice #: INV-${order._id}`);
     
     doc.moveDown();
@@ -665,7 +666,7 @@ const generateInvoicePdf = async (order, paymentDetails) => {
       order.installments.forEach((installment, index) => {
         doc.text(`#${installment.installmentNumber} (${installment.percentage}%)`, 50, currentY)
           .text(`₹${installment.amount.toLocaleString()}`, 150, currentY)
-          .text(installment.dueDate ? new Date(installment.dueDate).toLocaleDateString() : 'N/A', 250, currentY);
+          .text(installment.dueDate ? formatIndiaDate(installment.dueDate) : 'N/A', 250, currentY);
 
         currentY += 20;
       });
@@ -675,7 +676,7 @@ const generateInvoicePdf = async (order, paymentDetails) => {
     const footerTop = 700;
     doc.fontSize(10)
       .text('Thank you for your business!', 50, footerTop, { align: 'center' })
-      .text(`Generated on ${new Date().toLocaleString()}`, 50, footerTop + 15, { align: 'center' });
+      .text(`Generated on ${formatIndiaDateTime(Date.now())}`, 50, footerTop + 15, { align: 'center' });
     
     // Handle document streaming properly
     return new Promise((resolve, reject) => {
@@ -737,7 +738,7 @@ const sendWalletRechargeConfirmationEmail = async (user, transaction) => {
               <h2 style="margin-top: 0; color: #333;">Recharge Details</h2>
               <p><strong>Transaction ID:</strong> ${transaction.transactionId}</p>
               <p><strong>Amount:</strong> ₹${transaction.amount.toLocaleString()}</p>
-              <p><strong>Date:</strong> ${new Date(transaction.date).toLocaleString()}</p>
+              <p><strong>Date:</strong> ${formatIndiaDateTime(transaction.date)}</p>
               <p><strong>Payment Method:</strong> ${transaction.paymentMethod || 'UPI'}</p>
               ${transaction.upiTransactionId ? `<p><strong>UPI Reference:</strong> ${transaction.upiTransactionId}</p>` : ''}
             </div>
@@ -752,7 +753,7 @@ const sendWalletRechargeConfirmationEmail = async (user, transaction) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -804,7 +805,7 @@ const sendPaymentRejectionEmail = async (user, transaction, order, rejectionReas
           <p><strong>Product:</strong> ${getOrderDisplayName(order)}</p>
           <p><strong>Transaction ID:</strong> ${transaction.transactionId}</p>
           <p><strong>Amount:</strong> ₹${transaction.amount.toLocaleString()}</p>
-          <p><strong>Date:</strong> ${new Date(transaction.date).toLocaleString()}</p>
+          <p><strong>Date:</strong> ${formatIndiaDateTime(transaction.date)}</p>
         </div>
       `;
     } else {
@@ -817,7 +818,7 @@ const sendPaymentRejectionEmail = async (user, transaction, order, rejectionReas
           <h2 style="margin-top: 0; color: #333;">Transaction Details</h2>
           <p><strong>Transaction ID:</strong> ${transaction.transactionId}</p>
           <p><strong>Amount:</strong> ₹${transaction.amount.toLocaleString()}</p>
-          <p><strong>Date:</strong> ${new Date(transaction.date).toLocaleString()}</p>
+          <p><strong>Date:</strong> ${formatIndiaDateTime(transaction.date)}</p>
         </div>
       `;
     }
@@ -850,7 +851,7 @@ const sendPaymentRejectionEmail = async (user, transaction, order, rejectionReas
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -960,7 +961,7 @@ const sendProjectCancellationEmail = async (user, order, refunds = [], cancellat
             <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
               <h2 style="margin-top: 0; color: #333;">Project Details</h2>
               <p><strong>Project:</strong> ${getOrderDisplayName(order)}</p>
-              <p><strong>Cancelled On:</strong> ${new Date().toLocaleString()}</p>
+              <p><strong>Cancelled On:</strong> ${formatIndiaDateTime(Date.now())}</p>
             </div>
 
             ${reasonBlock}
@@ -972,7 +973,7 @@ const sendProjectCancellationEmail = async (user, order, refunds = [], cancellat
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1052,7 +1053,7 @@ const sendProjectCreatedEmail = async (user, order, invoice) => {
               <p><strong>Project:</strong> ${escape(getOrderDisplayName(order))}</p>
               <p><strong>Price:</strong> ${isFree ? 'FREE' : money(total)}</p>
               ${offerTitle ? `<p><strong>Offer:</strong> ${escape(offerTitle)}</p>` : ''}
-              <p><strong>Started On:</strong> ${new Date().toLocaleString()}</p>
+              <p><strong>Started On:</strong> ${formatIndiaDateTime(Date.now())}</p>
             </div>
 
             <div style="background-color: #f0f9f4; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;">
@@ -1067,7 +1068,7 @@ const sendProjectCreatedEmail = async (user, order, invoice) => {
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1132,7 +1133,7 @@ const sendContactFormConfirmation = async (contactData) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1191,7 +1192,7 @@ const sendContactRequestNotification = async (contactData, adminEmails) => {
               <p><strong>Request Type:</strong> Account Creation</p>
               ${productInfo}
               <p><strong>Message:</strong> ${contactData.message}</p>
-              <p><strong>Date Submitted:</strong> ${new Date().toLocaleString()}</p>
+              <p><strong>Date Submitted:</strong> ${formatIndiaDateTime(Date.now())}</p>
             </div>
             
             <p>Please reach out to this customer to complete their account setup process.</p>
@@ -1200,7 +1201,7 @@ const sendContactRequestNotification = async (contactData, adminEmails) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1273,7 +1274,7 @@ const sendProjectUpdateEmail = async (user, updateData, project) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1377,7 +1378,7 @@ const sendProjectMessageEmail = async (user, messageData, project) => {
           </div>
           
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
             <p>If you have any issues, please contact our support team.</p>
           </div>
         </div>
@@ -1429,7 +1430,7 @@ const sendCallbackConfirmation = async (callbackData) => {
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1482,7 +1483,7 @@ const sendCallbackRequestNotification = async (callbackData, adminEmails) => {
               <p><strong>Email:</strong> <a href="mailto:${callbackData.email}">${callbackData.email}</a></p>
               <p><strong>Phone:</strong> <a href="tel:${callbackData.phone}">${callbackData.phone}</a></p>
               ${callbackData.message ? `<p><strong>Interested In:</strong> ${callbackData.message}</p>` : '<p><strong>Interested In:</strong> General Inquiry</p>'}
-              <p><strong>Date Submitted:</strong> ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
+              <p><strong>Date Submitted:</strong> ${formatIndiaDateTime(Date.now())}</p>
             </div>
 
             <p style="background-color: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin: 20px 0;">
@@ -1493,7 +1494,7 @@ const sendCallbackRequestNotification = async (callbackData, adminEmails) => {
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -1561,19 +1562,19 @@ const sendMonthlyInvoiceEmail = async (user, order, invoice, invoicePdfBuffer) =
             <div style="background-color: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4A90E2;">
               <h2 style="margin-top: 0; color: #333;">📋 BILLING DETAILS</h2>
               <p style="margin: 8px 0;"><strong>Plan:</strong> ${order.productId.serviceName}</p>
-              <p style="margin: 8px 0;"><strong>Billing Period:</strong> ${new Date(invoice.renewalPeriodStart).toLocaleDateString('en-GB')} - ${new Date(invoice.renewalPeriodEnd).toLocaleDateString('en-GB')}</p>
+              <p style="margin: 8px 0;"><strong>Billing Period:</strong> ${formatIndiaDate(invoice.renewalPeriodStart)} - ${formatIndiaDate(invoice.renewalPeriodEnd)}</p>
               <p style="margin: 8px 0;"><strong>Invoice Number:</strong> ${invoice.invoiceNumber}</p>
-              <p style="margin: 8px 0;"><strong>Invoice Date:</strong> ${new Date(invoice.invoiceDate).toLocaleDateString('en-GB')}</p>
+              <p style="margin: 8px 0;"><strong>Invoice Date:</strong> ${formatIndiaDate(invoice.invoiceDate)}</p>
               <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
               <p style="margin: 8px 0; font-size: 18px;"><strong>Amount Due:</strong> <span style="color: #e74c3c; font-size: 24px;">₹${invoice.amount.toLocaleString()}</span></p>
-              <p style="margin: 8px 0;"><strong>Payment Due Date:</strong> ${new Date(invoice.dueDate).toLocaleDateString('en-GB')}</p>
+              <p style="margin: 8px 0;"><strong>Payment Due Date:</strong> ${formatIndiaDate(invoice.dueDate)}</p>
               <p style="margin: 8px 0;"><strong>Status:</strong> <span style="background-color: #ffebee; color: #c62828; padding: 4px 8px; border-radius: 4px;">⏳ PAYMENT PENDING</span></p>
             </div>
 
             <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0;">
               <h3 style="margin-top: 0; color: #2e7d32;">📦 PLAN BENEFITS (This Month)</h3>
               <p style="margin: 5px 0;">✓ 1 Website Update Request</p>
-              <p style="margin: 5px 0;">✓ Valid for 30 days (${new Date(invoice.renewalPeriodStart).toLocaleDateString('en-GB')} - ${new Date(invoice.renewalPeriodEnd).toLocaleDateString('en-GB')})</p>
+              <p style="margin: 5px 0;">✓ Valid for 30 days (${formatIndiaDate(invoice.renewalPeriodStart)} - ${formatIndiaDate(invoice.renewalPeriodEnd)})</p>
               <p style="margin: 5px 0;">✓ Quick turnaround time</p>
             </div>
 
@@ -1592,7 +1593,7 @@ const sendMonthlyInvoiceEmail = async (user, order, invoice, invoicePdfBuffer) =
             <div style="background-color: #ffebee; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f44336;">
               <h3 style="margin-top: 0; color: #c62828;">📋 PAYMENT INSTRUCTIONS</h3>
               <p style="margin: 5px 0;">📎 Invoice PDF is attached to this email for your records.</p>
-              <p style="margin: 5px 0;">⏰ Please make the payment by <strong>${new Date(invoice.dueDate).toLocaleDateString('en-GB')}</strong></p>
+              <p style="margin: 5px 0;">⏰ Please make the payment by <strong>${formatIndiaDate(invoice.dueDate)}</strong></p>
               <p style="margin: 5px 0;">📸 After payment, please share the transaction screenshot with us for faster processing.</p>
               <p style="margin: 10px 0 5px 0; color: #d32f2f;"><strong>⚠️ Remember:</strong> Your update requests will be processed only after payment confirmation.</p>
             </div>
@@ -1611,7 +1612,7 @@ const sendMonthlyInvoiceEmail = async (user, order, invoice, invoicePdfBuffer) =
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
             <p>VA Computers, Near New Bus Stand, Majitha, 143601</p>
             <p>Email: vacomputers.com@gmail.com</p>
           </div>
@@ -1679,18 +1680,18 @@ const sendAdminAutoRenewalNotification = async (user, order, invoice) => {
               <h2 style="margin-top: 0; color: #856404;">Invoice Details</h2>
               <p><strong>Invoice Number:</strong> ${invoice.invoiceNumber}</p>
               <p><strong>Plan:</strong> ${order.productId.serviceName}</p>
-              <p><strong>Billing Period:</strong> ${new Date(invoice.renewalPeriodStart).toLocaleDateString('en-GB')} - ${new Date(invoice.renewalPeriodEnd).toLocaleDateString('en-GB')}</p>
+              <p><strong>Billing Period:</strong> ${formatIndiaDate(invoice.renewalPeriodStart)} - ${formatIndiaDate(invoice.renewalPeriodEnd)}</p>
               <p><strong>Renewal Month:</strong> ${invoice.renewalMonth} of 12</p>
               <p><strong>Amount:</strong> ₹${invoice.amount.toLocaleString()}</p>
               <p><strong>Status:</strong> <span style="background-color: #fff; padding: 4px 8px; border-radius: 4px; color: #e74c3c;">UNPAID</span></p>
-              <p><strong>Due Date:</strong> ${new Date(invoice.dueDate).toLocaleDateString('en-GB')}</p>
+              <p><strong>Due Date:</strong> ${formatIndiaDate(invoice.dueDate)}</p>
             </div>
 
             <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0;">
               <h3 style="margin-top: 0; color: #1976d2;">Plan Status</h3>
               <p><strong>Updates Available:</strong> 1 update for this month</p>
               <p><strong>Yearly Days Remaining:</strong> ${order.totalYearlyDaysRemaining} days</p>
-              <p><strong>Current Month Expiry:</strong> ${new Date(order.currentMonthExpiryDate).toLocaleDateString('en-GB')}</p>
+              <p><strong>Current Month Expiry:</strong> ${formatIndiaDate(order.currentMonthExpiryDate)}</p>
             </div>
 
             <p style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
@@ -1771,8 +1772,8 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
     const boxY = doc.y + 10;
     doc.fontSize(10);
     doc.text(`Invoice Number: ${invoice.invoiceNumber}`, 60, boxY);
-    doc.text(`Invoice Date: ${new Date(invoice.invoiceDate).toLocaleDateString('en-GB')}`, 60, boxY + 20);
-    doc.text(`Due Date: ${new Date(invoice.dueDate).toLocaleDateString('en-GB')}`, 60, boxY + 40);
+    doc.text(`Invoice Date: ${formatIndiaDate(invoice.invoiceDate)}`, 60, boxY + 20);
+    doc.text(`Due Date: ${formatIndiaDate(invoice.dueDate)}`, 60, boxY + 40);
     doc.text(`Status: UNPAID`, 60, boxY + 60, { fillColor: '#e74c3c' });
     doc.fillColor('#333');
     doc.text(`Renewal Month: ${invoice.renewalMonth} of 12`, 60, boxY + 80);
@@ -1791,7 +1792,7 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
     doc.fontSize(12).text('Plan Details:');
     doc.fontSize(10);
     doc.text(`Plan Name: ${order.productId.serviceName}`);
-    doc.text(`Billing Period: ${new Date(invoice.renewalPeriodStart).toLocaleDateString('en-GB')} - ${new Date(invoice.renewalPeriodEnd).toLocaleDateString('en-GB')}`);
+    doc.text(`Billing Period: ${formatIndiaDate(invoice.renewalPeriodStart)} - ${formatIndiaDate(invoice.renewalPeriodEnd)}`);
     doc.text(`Updates Included: 1 update per month`);
 
     doc.moveDown(2);
@@ -1807,7 +1808,7 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
       .stroke();
 
     const itemY = tableTop + 25;
-    doc.text(`Monthly Plan Charge (${new Date(invoice.renewalPeriodStart).toLocaleDateString('en-GB')} - ${new Date(invoice.renewalPeriodEnd).toLocaleDateString('en-GB')})`, 50, itemY)
+    doc.text(`Monthly Plan Charge (${formatIndiaDate(invoice.renewalPeriodStart)} - ${formatIndiaDate(invoice.renewalPeriodEnd)})`, 50, itemY)
       .text(`₹${invoice.amount.toLocaleString()}`, 450, itemY);
 
     doc.moveTo(50, itemY + 20)
@@ -1839,7 +1840,7 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
     doc.fontSize(10).fillColor('#333')
       .text('Thank you for your business!', 50, footerTop, { align: 'center' })
       .fontSize(8).fillColor('#999')
-      .text(`Generated on ${new Date().toLocaleString('en-GB')}`, 50, footerTop + 15, { align: 'center' });
+      .text(`Generated on ${formatIndiaDateTime(Date.now())}`, 50, footerTop + 15, { align: 'center' });
 
     // Handle document streaming
     return new Promise((resolve, reject) => {
@@ -1918,7 +1919,7 @@ const sendAdminPurchaseConfirmationEmail = async (order, paymentDetails) => {
               <p><strong>Payment Method:</strong> ${paymentDetails.method || 'Unknown'}</p>
               <p><strong>Transaction ID:</strong> ${paymentDetails.transactionId}</p>
               ${paymentDetails.upiTransactionId ? `<p><strong>UPI Reference:</strong> ${paymentDetails.upiTransactionId}</p>` : ''}
-              <p><strong>Date:</strong> ${new Date(paymentDetails.date).toLocaleString('en-IN')}</p>
+              <p><strong>Date:</strong> ${formatIndiaDateTime(paymentDetails.date)}</p>
             </div>
 
             ${order.isPartialPayment ? `
@@ -1943,7 +1944,7 @@ const sendAdminPurchaseConfirmationEmail = async (order, paymentDetails) => {
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -2028,7 +2029,7 @@ const sendAdminUPIPendingNotification = async (order) => {
               <h3 style="margin-top: 0; color: #d32f2f;">Status</h3>
               <p><strong>Order Status:</strong> <span style="background-color: #ffebee; padding: 4px 8px; border-radius: 4px; color: #c62828;">PENDING APPROVAL</span></p>
               <p><strong>Payment Method:</strong> UPI</p>
-              <p><strong>Order Date:</strong> ${new Date(order.createdAt || new Date()).toLocaleString('en-IN')}</p>
+              <p><strong>Order Date:</strong> ${formatIndiaDateTime(order.createdAt || new Date())}</p>
             </div>
 
             <div style="text-align: center; margin: 20px 0;">
@@ -2048,7 +2049,7 @@ const sendAdminUPIPendingNotification = async (order) => {
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -2103,7 +2104,7 @@ const sendPlanClosureEmailToCustomer = async (order, closureReason, closedDate) 
             <div style="background-color: #ffe0e0; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #e74c3c;">
               <h3 style="margin-top: 0; color: #c62828;">Plan Details</h3>
               <p><strong>Plan Name:</strong> ${order.productId?.serviceName || 'Website Update Plan'}</p>
-              <p><strong>Closure Date:</strong> ${new Date(closedDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+              <p><strong>Closure Date:</strong> ${formatIndiaDate(closedDate, { day: 'numeric', month: 'long', year: 'numeric' })}</p>
               <p><strong>Closure Reason:</strong> ${closureReason}</p>
               <p><strong>Status:</strong> <span style="color: #e74c3c; font-weight: bold;">CLOSED ❌</span></p>
             </div>
@@ -2135,7 +2136,7 @@ const sendPlanClosureEmailToCustomer = async (order, closureReason, closedDate) 
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; border-top: 1px solid #ddd; margin-top: 20px;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `
@@ -2205,8 +2206,8 @@ const sendPlanClosureEmailToAdmin = async (order, closureReason, closedByAdmin, 
                     ? 'Yearly Renewable Plan'
                     : 'Regular Update Plan'
               }</p>
-              <p><strong>Created Date:</strong> ${new Date(order.createdAt).toLocaleDateString('en-GB')}</p>
-              <p><strong>Closure Date:</strong> ${new Date(closedDate).toLocaleDateString('en-GB')}</p>
+              <p><strong>Created Date:</strong> ${formatIndiaDate(order.createdAt)}</p>
+              <p><strong>Closure Date:</strong> ${formatIndiaDate(closedDate)}</p>
               <p><strong>Status:</strong> <span style="background-color: #ffebee; color: #c62828; padding: 4px 8px; border-radius: 4px;">CLOSED ❌</span></p>
             </div>
 
@@ -2237,7 +2238,7 @@ const sendPlanClosureEmailToAdmin = async (order, closureReason, closedByAdmin, 
           </div>
 
           <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; border-top: 1px solid #ddd; margin-top: 20px;">
-            <p>© ${new Date().getFullYear()} Mera Software. All rights reserved.</p>
+            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
           </div>
         </div>
       `

@@ -6,7 +6,9 @@ const { EmailTemplate, EmailPolicy, EmailDraft, EmailHistory } = require('../mod
 const { events, byKey } = require('../helpers/emailCatalog');
 const { decide, applyDefault, validateContent, applicationQuery, draftAccess, render, plainText, withRequiredLinks } = require('../helpers/emailController');
 const { verifyWebsiteAccess } = require('../helpers/websiteEmailAccess');
+const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
 const router = express.Router();
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(async (req, res, next) => {
   try {
     const claims = verifyWebsiteAccess(req);
@@ -72,12 +74,18 @@ router.get('/', handle(async (req, res) => {
   adminOnly(req);
   const eventFilter = applicationQuery(req.emailApplication);
   const ownership = draftAccess(req.userId, req.emailAccess);
+  await reconcileSent(ownership);
   const [policies, templates, drafts, history] = await Promise.all([
     EmailPolicy.find(eventFilter).lean(), EmailTemplate.find(eventFilter).sort({ name: 1 }).lean(),
     EmailDraft.find({ ...ownership, status: { $ne: 'staged' }, expiresAt: { $gt: new Date() } }).select('-html -attachments.content -headers').sort({ createdAt: -1 }).limit(100).lean(),
     EmailHistory.find(ownership).sort({ updatedAt: -1 }).limit(100).lean(),
   ]);
-  res.json({ success: true, data: { application: req.emailApplication, events: events.filter(e => e.application === req.emailApplication), policies, templates, drafts, history, automaticSending: false } });
+  res.json({ success: true, data: { application: req.emailApplication, events: events.filter(e => e.application === req.emailApplication), policies, templates, drafts, history, automaticSending: false, serverNow: Date.now() } });
+}));
+router.get('/outbox', handle(async (req, res) => {
+  adminOnly(req);
+  const ownership = { ...draftAccess(req.userId, req.emailAccess), application: req.emailApplication };
+  res.json({ success: true, data: await queryOutbox(ownership, req.query) });
 }));
 router.put('/policies/:event', handle(async (req, res) => {
   adminOnly(req); const event = req.params.event; allowedEvent(req, event);

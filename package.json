@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "test:email": "node --test tests/emailControl.test.js",
     "test:session": "node --test tests/sessionToken.test.js",
     "test:session:browser": "node --test tests/sessionCookies.browser.test.js",
     "portfolio:worker": "node scripts/portfolioWorker.js",

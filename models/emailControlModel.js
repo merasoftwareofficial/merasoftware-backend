@@ -32,6 +32,11 @@ const draftSchema = new Schema({
   providerId: String,
   failure: String,
   sentAt: Date,
+  sender: String,
+  templateName: String,
+  attemptCount: { type: Number, default: 0 },
+  lastAttemptAt: Date,
+  attempts: [{ _id: false, at: Date, status: String, failure: String }],
   reminderInvoice: Schema.Types.ObjectId,
   // No worker drains drafts. Expired mail can never become sendable again.
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
@@ -43,7 +48,12 @@ const historySchema = new Schema({
   event: String, actor: Schema.Types.ObjectId, decidedBy: Schema.Types.ObjectId,
   to: [String], subject: String, status: String, providerId: String, failure: String,
   expiresAt: Date, sentAt: Date,
+  source: String, sender: String, templateName: String,
+  attemptCount: { type: Number, default: 0 }, lastAttemptAt: Date,
+  attempts: [{ _id: false, at: Date, status: String, failure: String }],
 }, { timestamps: true });
+historySchema.index({ application: 1, status: 1, sentAt: -1 });
+historySchema.index({ application: 1, status: 1, lastAttemptAt: -1 });
 module.exports = {
   EmailTemplate: mongoose.model('EmailTemplate', templateSchema),
   EmailPolicy: mongoose.model('EmailPolicy', policySchema),

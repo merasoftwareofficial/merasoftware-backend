@@ -1,3 +1,4 @@
+const { formatIndiaDate } = require('./../../helpers/dateTime');
 const {
   updateOverdueInvoicesAndPausePlans,
   markInvoicePaidAndResumePlan,
@@ -311,7 +312,7 @@ const sendPaymentRecordReminder = async (req, res) => {
           <p>${reminderMessage}</p>
           <p><strong>Invoice:</strong> ${invoice.invoiceNumber}</p>
           <p><strong>Amount Due:</strong> Rs ${Number(invoice.amount || 0).toLocaleString("en-IN")}</p>
-          <p><strong>Due Date:</strong> ${new Date(invoice.dueDate).toLocaleDateString("en-IN")}</p>
+          <p><strong>Due Date:</strong> ${formatIndiaDate(invoice.dueDate)}</p>
           <p>Invoice PDF is attached for your reference.</p>
           <p>Regards,<br>Mera Software Team</p>
         </div>

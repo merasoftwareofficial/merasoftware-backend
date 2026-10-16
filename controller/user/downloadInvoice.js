@@ -1,3 +1,4 @@
+const { formatIndiaDate } = require('./../../helpers/dateTime');
 const orderModel = require("../../models/orderProductModel");
 const PDFDocument = require('pdfkit');
 const mongoose = require('mongoose');
@@ -42,7 +43,7 @@ const downloadInvoice = async (req, res) => {
     
     // Invoice details
     doc.fontSize(12).text(`Invoice #: INV-${order._id.toString().substr(-6)}`);
-    doc.text(`Order Date: ${new Date(order.createdAt).toLocaleDateString()}`);
+    doc.text(`Order Date: ${formatIndiaDate(order.createdAt)}`);
     doc.moveDown();
     
     // Customer info

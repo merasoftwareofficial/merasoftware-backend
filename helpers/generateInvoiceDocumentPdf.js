@@ -1,3 +1,4 @@
+const { formatIndiaDate } = require('./dateTime');
 const PDFDocument = require("pdfkit");
 const { getOrderDisplayName } = require("./orderPresentation");
 
@@ -24,7 +25,7 @@ const money = (value) => {
 };
 // A ₹0 project (100% discount / offer) reads FREE wherever its total is printed.
 const totalText = (value) => (Number(value || 0) === 0 ? "FREE" : money(value));
-const date = (value) => (value ? new Date(value).toLocaleDateString("en-IN") : "—");
+const date = (value) => (value ? formatIndiaDate(value) : "—");
 const ordinal = (value) => {
   const labels = ["1st", "2nd", "3rd"];
   return labels[Number(value) - 1] || `${value}th`;

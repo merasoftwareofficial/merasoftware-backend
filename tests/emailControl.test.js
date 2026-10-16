@@ -6,7 +6,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { requestMiddleware, queueMail, plainText, render } = require('../helpers/emailController');
-const { EmailDraft, EmailPolicy, EmailTemplate } = require('../models/emailControlModel');
+const { EmailDraft, EmailPolicy, EmailTemplate, EmailHistory } = require('../models/emailControlModel');
 const userModel = require('../models/userModel');
 const authToken = require('../middleware/authToken');
 const nativeFetch = global.fetch;
@@ -26,7 +26,7 @@ before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-email-test-secret';
   process.env.RESEND_API_KEY = 'not-a-real-provider-key';
   process.env.FROM_EMAIL = 'sender@example.test';
-  db = await MongoMemoryServer.create({ instance: { launchTimeout: 60000 } });
+  db = await MongoMemoryServer.create({ instance: { launchTimeout: Number(process.env.EMAIL_TEST_MONGO_TIMEOUT || 60000) } });
   await mongoose.connect(db.getUri(), { dbName: 'email-control-isolated-test' });
   [admin, customer, secondAdmin] = await userModel.create([
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
@@ -48,7 +48,7 @@ before(async () => {
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
-beforeEach(async () => { calls = []; providerFails = false; await Promise.all([EmailDraft.deleteMany({}), EmailPolicy.deleteMany({}), EmailTemplate.deleteMany({})]); });
+beforeEach(async () => { calls = []; providerFails = false; await Promise.all([EmailDraft.deleteMany({}), EmailPolicy.deleteMany({}), EmailTemplate.deleteMany({}), EmailHistory.deleteMany({})]); });
 after(async () => { global.fetch = nativeFetch; if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 
 test('cron and legacy mail builders cannot send or create review drafts', async () => {
@@ -165,4 +165,82 @@ test('website assertions are bound to body and path and cannot use expired acces
   assert.equal(await EmailPolicy.countDocuments(), 0);
   assert.equal((await send(assertion())).status, 200);
   assert.equal(calls.length, 0);
+});
+
+test('Outbox counts unique mails across retries, preserves sentAt and survives draft deletion', async () => {
+  const id = await draft(); providerFails = true;
+  const decision = { choice: 'send', subject: 'Outbox invoice', text: 'Approved content' };
+  await api(`/email-control/drafts/${id}/decision`, admin, decision);
+  let result = await api('/email-control/outbox?application=portal', admin, null, 'GET');
+  assert.equal(result.data.summary.failed, 1); assert.equal(result.data.summary.sent, 0);
+  providerFails = false;
+  const sent = await api(`/email-control/drafts/${id}/decision`, admin, decision);
+  const row = await EmailHistory.findOne({ draftId: id }).lean();
+  assert.equal(row.sentAt.toISOString(), sent.data.sentAt);
+  assert.equal(row.attemptCount, 2); assert.deepEqual(row.attempts.map(a => a.status), ['failed', 'sent']);
+  assert.equal((await EmailDraft.findById(id)).sentAt.toISOString(), sent.data.sentAt);
+  await EmailDraft.deleteOne({ _id: id });
+  result = await api('/email-control/outbox?application=portal', admin, null, 'GET');
+  assert.equal(result.data.total, 1); assert.equal(result.data.summary.sent, 1);
+  assert.equal(result.data.summary.todaySent, 1); assert.equal(result.data.summary.sentRecipients, 1);
+  assert.equal(result.data.rows[0].sentAt, sent.data.sentAt);
+});
+
+test('Outbox database totals exceed 100 rows, paginate, isolate applications and use IST boundaries', async () => {
+  const at = new Date('2026-10-17T18:30:00Z');
+  await EmailHistory.insertMany(Array.from({ length: 106 }, (_, i) => ({
+    draftId: new mongoose.Types.ObjectId(), application: 'portal', event: 'invoice.project',
+    to: ['client@example.test', 'second@example.test'], subject: i === 0 ? 'Literal .* invoice' : `Invoice ${i}`,
+    status: 'sent', sentAt: at,
+  })));
+  await EmailHistory.create({ draftId: new mongoose.Types.ObjectId(), application: 'website', event: 'website.subscription.confirm', status: 'sent', to: ['reader@example.test'], subject: 'Confirm', sentAt: at });
+  let result = await api('/email-control/outbox?application=portal&page=5', admin, null, 'GET');
+  assert.equal(result.data.summary.sent, 106); assert.equal(result.data.summary.sentRecipients, 212);
+  assert.equal(result.data.total, 106); assert.equal(result.data.rows.length, 6); assert.equal(result.data.pages, 5);
+  result = await api('/email-control/outbox?application=portal&from=2026-10-18&to=2026-10-18', admin, null, 'GET');
+  assert.equal(result.data.total, 106);
+  result = await api('/email-control/outbox?application=portal&to=2026-10-17', admin, null, 'GET');
+  assert.equal(result.data.total, 0);
+  result = await api('/email-control/outbox?application=portal&q=.*', admin, null, 'GET');
+  assert.equal(result.data.total, 1);
+  assert.equal((await api('/email-control/outbox?application=website', admin, null, 'GET')).data.total, 1);
+  for (const query of ['page=0', 'status=pending', 'from=2026-02-30', 'from=2026-10-18&to=2026-10-17']) {
+    assert.equal((await api(`/email-control/outbox?${query}`, admin, null, 'GET')).status, 400);
+  }
+  assert.equal((await api('/email-control/outbox', customer, null, 'GET')).status, 403);
+  assert.equal((await api('/email-control/outbox', null, null, 'GET')).status, 401);
+});
+
+test('legacy sent records count without inventing a sending time', async () => {
+  await EmailHistory.create({ draftId: new mongoose.Types.ObjectId(), application: 'portal', event: 'invoice.project', status: 'sent', to: ['old@example.test'], subject: 'Old mail' });
+  const result = await api('/email-control/outbox', admin, null, 'GET');
+  assert.equal(result.data.summary.sent, 1); assert.equal(result.data.rows[0].sentAt, undefined);
+});
+
+test('accepted mail never becomes failed when a draft result write fails', async () => {
+  const id = await draft(); const original = EmailDraft.updateOne;
+  EmailDraft.updateOne = function(filter, update, ...rest) {
+    if (update.$set?.status === 'sent') return Promise.reject(new Error('simulated result write failure'));
+    return original.call(this, filter, update, ...rest);
+  };
+  try {
+    const result = await api(`/email-control/drafts/${id}/decision`, admin, { choice: 'send', subject: 'Invoice', text: 'Approved' });
+    assert.equal(result.data.status, 'sent');
+    assert.equal((await EmailHistory.findOne({ draftId: id })).status, 'sent');
+    assert.equal(calls.length, 1);
+  } finally { EmailDraft.updateOne = original; }
+});
+
+test('Outbox repairs an audit write failure from the accepted draft', async () => {
+  const id = await draft(); const original = EmailHistory.updateOne;
+  EmailHistory.updateOne = function(filter, update, ...rest) {
+    if (update.$set?.status === 'sent') return Promise.reject(new Error('simulated audit write failure'));
+    return original.call(this, filter, update, ...rest);
+  };
+  try {
+    assert.equal((await api(`/email-control/drafts/${id}/decision`, admin, { choice: 'send', subject: 'Invoice', text: 'Approved' })).data.status, 'sent');
+  } finally { EmailHistory.updateOne = original; }
+  const result = await api('/email-control/outbox', admin, null, 'GET');
+  assert.equal(result.data.summary.sent, 1); assert.ok(result.data.rows[0].sentAt);
+  assert.equal(calls.length, 1);
 });

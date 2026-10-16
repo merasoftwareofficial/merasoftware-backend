@@ -25,14 +25,19 @@ function draftAccess(actor, access = {}) {
   if (access.application === 'portal' && access.portalAdmin) return applicationQuery('portal');
   return { actor, ...(access.application ? applicationQuery(access.application) : {}) };
 }
-async function recordHistory(draft, decidedBy) {
+async function recordHistory(draft, decidedBy, required = false) {
   try {
     await EmailHistory.updateOne({ draftId: draft._id }, { $set: {
       application: byKey.get(draft.event).application, event: draft.event, actor: draft.actor,
       ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject, status: draft.status,
       providerId: draft.providerId, failure: draft.failure, expiresAt: draft.expiresAt, sentAt: draft.sentAt,
+      source: draft.source, sender: draft.sender, templateName: draft.templateName,
+      attemptCount: draft.attemptCount, lastAttemptAt: draft.lastAttemptAt, attempts: draft.attempts,
     } }, { upsert: true });
-  } catch (error) { console.error('[email] Could not record email history:', error.message); }
+  } catch (error) {
+    console.error('[email] Could not record email history:', error.message);
+    if (required) throw error;
+  }
 }
 async function applyDefault(event, mail, values = {}) {
   const policy = await EmailPolicy.findOne({ event }).lean();
@@ -41,7 +46,7 @@ async function applyDefault(event, mail, values = {}) {
   const context = { subject: mail.subject, message: mail.text || plainText(mail.html), ...values };
   if (!template) return { ...mail, text: withRequiredLinks(context.message, mail.requiredLinks) };
   const text = withRequiredLinks(render(template.text, context), mail.requiredLinks);
-  return { ...mail, subject: render(template.subject, context), text, html: textHtml(text) };
+  return { ...mail, templateName: template.name, subject: render(template.subject, context), text, html: textHtml(text) };
 }
 function validateContent(subject, text) {
   if (typeof subject !== 'string' || !subject.trim() || subject.length > 300 || /[\r\n]/.test(subject)) throw new Error('Subject must be 1–300 characters on one line');
@@ -74,6 +79,7 @@ async function prepareMail(event, mail, values) {
     reference: mail.reference, requiredLinks: mail.requiredLinks,
     baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values,
     to, subject: content.subject, text: content.text, html: content.html || textHtml(content.text),
+    templateName: content.templateName || 'Built-in action template',
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
@@ -155,32 +161,58 @@ async function decide(id, actor, decision, access = {}) {
   const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
   if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
   const text = withRequiredLinks(decision.text, policyDraft.requiredLinks);
+  let templateName = policyDraft.templateName;
+  if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
+    const template = decision.templateId && await EmailTemplate.findOne({ _id: decision.templateId, event: policyDraft.event }).lean();
+    if (decision.templateId && !template) throw new Error('Choose a template for this action');
+    templateName = template ? template.name : 'Built-in action template';
+  }
   const update = policyDraft.status === 'failed'
     ? { status: 'sending', failure: '' }
     : { status: 'sending', subject: decision.subject.trim(), text, html: text === policyDraft.text ? policyDraft.html : textHtml(text), failure: '' };
-  const draft = await EmailDraft.findOneAndUpdate({ ...query, status: { $in: ['pending', 'failed'] } }, { $set: update }, { new: true });
+  const attemptedAt = new Date();
+  const sender = policyDraft.sender || `${process.env.FROM_NAME || 'Mera Software'} <${process.env.FROM_EMAIL}>`;
+  const draft = await EmailDraft.findOneAndUpdate({ ...query, status: { $in: ['pending', 'failed'] } }, {
+    $set: { ...update, sender, templateName, lastAttemptAt: attemptedAt },
+    $inc: { attemptCount: 1 }, $push: { attempts: { at: attemptedAt, status: 'sending' } },
+  }, { new: true });
   if (!draft) throw new Error('Draft has already been decided or is being sent');
+  let accepted = false;
   try {
+    // Do not contact the provider unless a durable attempt exists first.
+    await recordHistory(draft, actor, true);
     if (!process.env.RESEND_API_KEY || !process.env.FROM_EMAIL) throw new Error('Email provider is not configured');
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST', signal: AbortSignal.timeout(20000),
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': `email-draft-${draft._id}` },
-      body: JSON.stringify({ from: `${process.env.FROM_NAME || 'Mera Software'} <${process.env.FROM_EMAIL}>`, to: draft.to, subject: draft.subject, text: draft.text, html: draft.html, attachments: draft.attachments.map(a => ({ filename: a.filename, content: a.content })), headers: Object.fromEntries(draft.headers || []) }),
+      body: JSON.stringify({ from: draft.sender, to: draft.to, subject: draft.subject, text: draft.text, html: draft.html, attachments: draft.attachments.map(a => ({ filename: a.filename, content: a.content })), headers: Object.fromEntries(draft.headers || []) }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error('Email provider refused the message');
-    await EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'sent', providerId: result.id, sentAt: new Date() } });
+    if (!result.id) throw new Error('Email provider did not return a message ID');
+    accepted = true;
     draft.status = 'sent'; draft.providerId = result.id; draft.sentAt = new Date();
-    await recordHistory(draft, actor);
+    draft.attempts[draft.attempts.length - 1].status = 'sent';
+    // Persist both copies independently. A post-acceptance database error must
+    // never turn an accepted mail into a retryable failure.
+    const writes = await Promise.allSettled([
+      recordHistory(draft, actor, true),
+      EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'sent', providerId: draft.providerId, sentAt: draft.sentAt, attempts: draft.attempts } }),
+    ]);
+    if (writes.every(write => write.status === 'rejected')) throw new Error('Provider accepted mail; recording its result needs recovery. Do not resend.');
     if (draft.reminderInvoice) {
       try {
         await require('../models/monthlyInvoiceModel').updateOne({ _id: draft.reminderInvoice }, { $inc: { remindersSent: 1 }, $set: { lastReminderDate: new Date() } });
       } catch (error) { console.error('[email] Delivered reminder; could not update invoice counters:', error.message); }
     }
-    return { status: 'sent', event: draft.event, reference: draft.reference };
+    return { status: 'sent', sentAt: draft.sentAt, event: draft.event, reference: draft.reference };
   } catch (error) {
-    await EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'failed', failure: error.message } });
-    draft.status = 'failed'; draft.failure = error.message; await recordHistory(draft, actor);
+    if (accepted) throw error;
+    draft.status = 'failed'; draft.failure = error.message;
+    draft.attempts[draft.attempts.length - 1].status = 'failed';
+    draft.attempts[draft.attempts.length - 1].failure = error.message;
+    await EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'failed', failure: error.message, attempts: draft.attempts } });
+    await recordHistory(draft, actor);
     throw error;
   }
 }
