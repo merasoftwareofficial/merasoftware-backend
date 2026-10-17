@@ -1,9 +1,9 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { EmailDraft, EmailTemplate, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
-const { byKey, eventKeys } = require('./emailCatalog');
+const { byKey, eventKeys, isCustomerTriggered, customerEventKeys } = require('./emailCatalog');
 const userModel = require('../models/userModel');
 const { render, compose, withRequiredLinks } = require('./emailMarkup');
-const { resolveTemplate, systemTemplate, composeTemplate, LEGACY_BUILT_IN } = require('./emailTemplates');
+const { resolveTemplate, systemTemplate, composeTemplate, composeLegacy, LEGACY_BUILT_IN } = require('./emailTemplates');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
@@ -13,10 +13,12 @@ function plainText(html = '') {
 function applicationQuery(application) {
   return { event: { $in: eventKeys(application) } };
 }
+// An action's user reviews its own mail, except customer-started mail: only admins may retry it.
 function draftAccess(actor, access = {}) {
   if (access.application === 'website' && access.websiteAdmin) return applicationQuery('website');
   if (access.application === 'portal' && access.portalAdmin) return applicationQuery('portal');
-  return { actor, ...(access.application ? applicationQuery(access.application) : {}) };
+  const own = { actor, event: { $nin: customerEventKeys } };
+  return access.application ? { $and: [own, applicationQuery(access.application)] } : own;
 }
 async function recordHistory(draft, decidedBy, required = false) {
   try {
@@ -36,14 +38,18 @@ async function recordHistory(draft, decidedBy, required = false) {
 // or the legacy code-built HTML (kept as is) of one not yet migrated.
 async function applyDefault(event, mail, values = {}) {
   const policy = await EmailPolicy.findOne({ event }).lean();
-  if (policy?.mode === 'off') return null;
+  // Customer-started mail exists only while its action is On; it is Off until an admin turns it on.
+  if (policy?.mode === 'off' || (isCustomerTriggered(event) && policy?.mode !== 'auto')) return null;
+  // The lead form's mail is reviewed before the lead is saved: its text is final, never re-templated.
+  if (mail.reviewed) {
+    const text = render(mail.text, values, mail.blocks);
+    const final = compose(text, mail.blocks);
+    return { ...mail, text, plain: final.text, html: final.html };
+  }
   const chosen = policy?.defaultTemplate && await EmailTemplate.findOne({ _id: policy.defaultTemplate, event }).lean();
   const template = chosen || await systemTemplate(event);
   const context = { subject: mail.subject, message: mail.text || plainText(mail.html), ...values };
-  if (!template) {
-    const text = withRequiredLinks(context.message, mail.requiredLinks);
-    return { ...mail, text, plain: text };
-  }
+  if (!template) return { ...mail, ...composeLegacy(mail.subject, context.message, mail.requiredLinks) };
   return { ...mail, ...composeTemplate(template, context, mail.blocks, mail.requiredLinks) };
 }
 /**
@@ -131,7 +137,12 @@ function requestMiddleware(req, res, next) {
         return json(body);
       }
       await EmailDraft.updateMany({ _id: { $in: scope.ids }, status: 'staged' }, { $set: { status: 'pending' } });
-      for (const draft of await EmailDraft.find({ _id: { $in: scope.ids } })) await recordHistory(draft);
+      const drafts = await EmailDraft.find({ _id: { $in: scope.ids } });
+      for (const draft of drafts) await recordHistory(draft);
+      // Customer-started mail never opens a popup; it sends once the response has gone.
+      const automatic = drafts.filter(draft => isCustomerTriggered(draft.event));
+      const reviewIds = scope.ids.filter(id => !automatic.some(draft => draft._id.equals(id))).map(String);
+      if (automatic.length) res.once('finish', () => { sendAutomatic(automatic); });
       if (req.body?.emailReview?.choice === 'send' && scope.ids.length === 1) {
         const leadDraft = await EmailDraft.findOne({ _id: scope.ids[0], event: 'lead.created' }).lean();
         if (leadDraft) {
@@ -143,7 +154,7 @@ function requestMiddleware(req, res, next) {
           }
         }
       }
-      return json({ ...body, emailDraftIds: scope.ids.map(String), emailStatus: 'awaiting-review' });
+      return json(reviewIds.length ? { ...body, emailDraftIds: reviewIds, emailStatus: 'awaiting-review' } : body);
     };
     finish().catch(error => {
       console.error('[email] Could not finalize review drafts:', error.message);
@@ -153,6 +164,19 @@ function requestMiddleware(req, res, next) {
   };
   res.on('finish', () => { scope.closed = true; });
   requestScope.run(scope, next);
+}
+/**
+ * Sends customer-started mail through the same decide() as a reviewed send. A failed send
+ * stays in Email Control's review list for an admin to retry.
+ */
+async function sendAutomatic(drafts) {
+  for (const draft of drafts) {
+    try {
+      await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: draft.application, portalAdmin: true, websiteAdmin: true });
+    } catch (error) {
+      console.error(`[email] Automatic ${draft.event} mail was not sent; it waits in Email Control:`, error.message);
+    }
+  }
 }
 // This is the ONLY provider call. Content is locked on the first send attempt;
 // retries reuse the same Resend idempotency key and identical payload.

@@ -12,7 +12,8 @@ const templateSchema = new Schema({
 templateSchema.index({ event: 1, system: 1 }, { unique: true, partialFilterExpression: { system: true } });
 const policySchema = new Schema({
   event: { type: String, required: true, unique: true },
-  mode: { type: String, enum: ['review', 'off'], default: 'review' },
+  // review/off for actions an admin performs; auto/off for customer-started mail (emailCatalog.js).
+  mode: { type: String, enum: ['review', 'auto', 'off'], default: 'review' },
   defaultTemplate: { type: Schema.Types.ObjectId, default: null },
 }, { timestamps: true });
 const draftSchema = new Schema({

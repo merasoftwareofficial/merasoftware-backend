@@ -1,0 +1,36 @@
+// Stable event keys shared by builders, policies, templates and the review UI.
+const events = [
+  ['lead.created', 'Leads', 'New lead welcome'],
+  ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)'],
+  ['sendUserConfirmation', 'Updates', 'Update request received'],
+  ['sendDeveloperAssignedNotification', 'Updates', 'Developer assigned (customer)'],
+  ['sendUpdateCompletedNotification', 'Updates', 'Update completed'],
+  ['sendDeveloperAssignmentEmail', 'Updates', 'Assignment (developer)'],
+  ['sendPurchaseConfirmationEmail', 'Orders', 'Purchase confirmation'],
+  ['sendMonthlyLimitedPlanActivationEmail', 'Plans', 'Plan activation'],
+  ['sendAdminPurchaseConfirmationEmail', 'Orders', 'Purchase confirmation (admin)'],
+  ['sendAdminUPIPendingNotification', 'Payments', 'UPI payment pending (admin)'],
+  ['sendWalletRechargeConfirmationEmail', 'Wallet', 'Wallet recharge confirmed'],
+  ['sendPaymentRejectionEmail', 'Payments', 'Payment rejected'],
+  ['sendProjectCreatedEmail', 'Projects', 'Project created'],
+  ['sendProjectCancellationEmail', 'Projects', 'Project cancelled'],
+  ['sendWalletRechargeRejectionEmail', 'Wallet', 'Wallet recharge rejected'],
+  ['sendContactFormConfirmation', 'Website', 'Contact form received'],
+  ['sendContactRequestNotification', 'Website', 'Contact request (admin)'],
+  ['sendCallbackConfirmation', 'Website', 'Callback request received'],
+  ['sendCallbackRequestNotification', 'Website', 'Callback request (admin)'],
+  ['sendProjectUpdateEmail', 'Projects', 'Project progress update'],
+  ['sendProjectMessageEmail', 'Projects', 'Project message'],
+  ['sendMonthlyInvoiceEmail', 'Invoices', 'Monthly invoice'],
+  ['sendAdminAutoRenewalNotification', 'Renewals', 'Auto renewal (admin)'],
+  ['sendPlanClosureEmailToCustomer', 'Plans', 'Plan closure (customer)'],
+  ['sendPlanClosureEmailToAdmin', 'Plans', 'Plan closure (admin)'],
+  ['invoice.project', 'Invoices', 'Project payment summary'],
+  ['invoice.reminder', 'Invoices', 'Payment reminder'],
+  ['auth.otp', 'Account', 'Login OTP'],
+  ['website.subscription.confirm', 'Website', 'Subscription confirmation'],
+  ['website.subscription.manage', 'Website', 'Subscription management'],
+].map(([key, section, label]) => ({ key, section, label, application: section === 'Website' ? 'website' : 'portal' }));
+const byKey = new Map(events.map(event => [event.key, event]));
+const eventKeys = application => events.filter(event => event.application === application).map(event => event.key);
+module.exports = { events, byKey, eventKeys };

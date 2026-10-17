@@ -118,9 +118,12 @@ const createLeadController = async (req, res) => {
     if (cleanEmail && req.body.emailReview?.choice === 'send') {
       try {
         const { queueMail } = require('../../helpers/emailController');
+        const { reviewTextFromEditor } = require('../../helpers/emailTemplates');
+        // The popup sends the editor's document; the send decision after the response reads this text.
+        const text = reviewTextFromEditor('lead.created', req.body.emailReview, { name: cleanName }, {});
+        req.body.emailReview = { ...req.body.emailReview, text };
         await queueMail('lead.created', {
-          to: [cleanEmail], subject: req.body.emailReview.subject,
-          text: req.body.emailReview.text,
+          to: [cleanEmail], subject: req.body.emailReview.subject, text, reviewed: true,
         }, { name: cleanName });
       } catch (mailError) {
         console.error('Lead saved; email draft unavailable:', mailError.message);

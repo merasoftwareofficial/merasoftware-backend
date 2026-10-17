@@ -8,7 +8,8 @@ const { EmailTemplate } = require('../models/emailControlModel');
 const { byKey } = require('./emailCatalog');
 const { formatIndiaDateTime } = require('./dateTime');
 const { getOrderDisplayName } = require('./orderPresentation');
-const { render, compose, placeholders, tableBlock, withRequiredLinks } = require('./emailMarkup');
+const { render, compose, placeholders, tableBlock, withRequiredLinks, escapeMarkup, asObject, has } = require('./emailMarkup');
+const { markupToDoc, subjectToDoc, docToMarkup, docToSubject } = require('./emailDoc');
 
 const SYSTEM_NAME = 'Standard';
 const LEGACY_BUILT_IN = 'Built-in action template';
@@ -41,12 +42,12 @@ const definitions = {
     variables: {
       name: { label: 'Customer name', sample: 'Ravi Kumar' },
       project: { label: 'Project name', sample: 'Business Website' },
-      price: { label: 'Price (or FREE)', sample: '₹25,000' },
-      offer: { label: 'Offer title (empty when none)', sample: 'Diwali Offer' },
+      price: { label: 'Price', hint: 'The amount, or FREE', sample: '₹25,000' },
+      offer: { label: 'Offer title', hint: 'Empty when the project has no offer', sample: 'Diwali Offer' },
       startedOn: { label: 'Start date and time', sample: '17 Oct 2026, 11:30 am' },
-      paymentPlan: { label: 'Payment plan sentence', sample: 'Payable in 2 installments: ₹12,500 + ₹12,500.' },
-      receivedSoFar: { label: 'Amount received (empty when nothing paid)', sample: '' },
-      dueNow: { label: 'Amount due now with invoice (empty when free or paid)', sample: '₹12,500 (invoice INV-1001)' },
+      paymentPlan: { label: 'Payment plan', hint: 'One sentence: free, one-time or installments', sample: 'Payable in 2 installments: ₹12,500 + ₹12,500.' },
+      receivedSoFar: { label: 'Amount received', hint: 'Empty when nothing is paid yet', sample: '' },
+      dueNow: { label: 'Amount due now', hint: 'With the invoice number; empty when free or already paid', sample: '₹12,500 (invoice INV-1001)' },
     },
     blocks: {},
     build(user, order, invoice) {
@@ -80,11 +81,11 @@ const definitions = {
     variables: {
       name: { label: 'Customer name', sample: 'Ravi Kumar' },
       project: { label: 'Project name', sample: 'Business Website' },
-      cancelledOn: { label: 'Cancellation date and time', sample: '17 Oct 2026, 11:30 am' },
-      reason: { label: 'Cancellation reason (empty when none)', sample: 'Requirements changed' },
+      cancelledOn: { label: 'Cancelled on', hint: 'Date and time of the cancellation', sample: '17 Oct 2026, 11:30 am' },
+      reason: { label: 'Cancellation reason', hint: 'Empty when no reason was given', sample: 'Requirements changed' },
     },
     blocks: {
-      refundTable: { label: 'Refund details table (empty when nothing refunded)', sample: () => refundTable([{ method: 'wallet', amount: 5000 }, { method: 'upi', amount: 2500, referenceId: 'UPI123456' }]) },
+      refundTable: { label: 'Refund details', hint: 'Table of refunds and their total; left out when nothing was refunded', sample: () => refundTable([{ method: 'wallet', amount: 5000 }, { method: 'upi', amount: 2500, referenceId: 'UPI123456' }]) },
     },
     build(user, order, refunds = [], cancellationReason = '') {
       if (!user?.email) return null;
@@ -98,8 +99,8 @@ const definitions = {
 };
 
 const LEGACY_VARIABLES = {
-  subject: { label: 'Original subject', sample: 'Sample subject' },
-  message: { label: 'Original message', sample: 'Sample action message' },
+  subject: { label: 'Original subject', hint: 'The subject the action wrote', sample: 'Sample subject' },
+  message: { label: 'Original message', hint: 'The whole mail the action wrote', sample: 'Sample action message' },
 };
 const LEAD_VARIABLES = { name: { label: 'Lead name', sample: 'Sample customer' } };
 const hasSystemTemplate = event => Object.prototype.hasOwnProperty.call(definitions, event);
@@ -115,8 +116,8 @@ function catalogFor(events) {
     const { variables, blocks } = variablesFor(key);
     return [key, {
       system: hasSystemTemplate(key),
-      variables: Object.entries(variables).map(([name, { label }]) => ({ key: name, label })),
-      blocks: Object.entries(blocks).map(([name, { label }]) => ({ key: name, label })),
+      variables: Object.entries(variables).map(([name, { label, hint }]) => ({ key: name, label, ...(hint ? { hint } : {}) })),
+      blocks: Object.entries(blocks).map(([name, { label, hint }]) => ({ key: name, label, ...(hint ? { hint } : {}) })),
     }];
   }));
 }
@@ -180,7 +181,53 @@ async function resetSystemTemplate(id) {
 function composeTemplate(template, values, blocks, requiredLinks = []) {
   const text = withRequiredLinks(render(template.text, values, blocks), requiredLinks);
   const mail = compose(text, blocks);
-  return { templateName: template.name, subject: render(template.subject, values), text, html: mail.html, plain: mail.text };
+  return { templateName: template.name, subject: render(template.subject, values, {}, { plain: true }), text, html: mail.html, plain: mail.text };
+}
+
+/** A not-yet-migrated action's own mail: its message, made literal for review. */
+function composeLegacy(subject, message, requiredLinks = []) {
+  return { subject, text: withRequiredLinks(escapeMarkup(message), requiredLinks), plain: withRequiredLinks(message, requiredLinks) };
+}
+
+// --- Visual editor (emailDoc.js) -------------------------------------------------------
+const keysOf = event => {
+  const { variables, blocks } = variablesFor(event);
+  return { variables: Object.keys(variables), blocks: Object.keys(blocks) };
+};
+/** A template as the editor needs it: its text and subject as documents. */
+function templateWithDocs(template) {
+  const keys = keysOf(template.event);
+  return { ...template, doc: markupToDoc(template.text, keys), subjectDoc: subjectToDoc(template.subject, keys) };
+}
+/** Template fields from the editor's documents; plain text from older clients is kept. */
+function templateFromEditor(event, body) {
+  const keys = keysOf(event);
+  return {
+    name: body.name,
+    subject: body.subjectDoc ? docToSubject(body.subjectDoc, keys) : body.subject,
+    text: body.doc ? docToMarkup(body.doc, keys) : body.text,
+  };
+}
+/**
+ * The chips a review offers: details this mail has values for, and its sections. A reviewed
+ * text is filled with the same values (emailController.reviewedMail).
+ */
+function reviewFields(event, values, blocks) {
+  const { variables, blocks: sections } = variablesFor(event);
+  return {
+    variables: Object.keys(asObject(values)).filter(key => has(variables, key)).map(key => ({ key, label: variables[key].label, ...(variables[key].hint ? { hint: variables[key].hint } : {}) })),
+    blocks: Object.keys(asObject(blocks)).filter(key => has(sections, key)).map(key => ({ key, label: sections[key].label, ...(sections[key].hint ? { hint: sections[key].hint } : {}) })),
+  };
+}
+const fieldKeys = fields => ({ variables: fields.variables.map(row => row.key), blocks: fields.blocks.map(row => row.key) });
+/** A review as the editor needs it: its text as a document and the chips it may use. */
+function reviewWithDoc(event, text, values, blocks) {
+  const fields = reviewFields(event, values, blocks);
+  return { doc: markupToDoc(text, fieldKeys(fields)), editorFields: fields };
+}
+/** Reviewed text from the editor's document; plain text from older clients is kept. */
+function reviewTextFromEditor(event, body, values, blocks) {
+  return body.doc ? docToMarkup(body.doc, fieldKeys(reviewFields(event, values, blocks))) : body.text;
 }
 
 function buildTemplatedMail(event, ...args) {
@@ -189,5 +236,6 @@ function buildTemplatedMail(event, ...args) {
 
 module.exports = {
   LEGACY_BUILT_IN, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables,
-  systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, buildTemplatedMail,
+  systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, composeLegacy, buildTemplatedMail,
+  templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor,
 };

@@ -3,10 +3,10 @@ const mongoose = require('mongoose');
 const authToken = require('../middleware/authToken');
 const userModel = require('../models/userModel');
 const { EmailTemplate, EmailPolicy, EmailDraft, EmailHistory } = require('../models/emailControlModel');
-const { events, byKey } = require('../helpers/emailCatalog');
+const { events, byKey, isCustomerTriggered } = require('../helpers/emailCatalog');
 const { decide, applyDefault, reviewedMail, validateContent, applicationQuery, draftAccess } = require('../helpers/emailController');
 const { withRequiredLinks } = require('../helpers/emailMarkup');
-const { LEGACY_BUILT_IN, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables, systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate } = require('../helpers/emailTemplates');
+const { LEGACY_BUILT_IN, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables, systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, composeLegacy, templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor } = require('../helpers/emailTemplates');
 const { verifyWebsiteAccess } = require('../helpers/websiteEmailAccess');
 const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
 const router = express.Router();
@@ -99,7 +99,7 @@ router.get('/', handle(async (req, res) => {
     EmailHistory.find(ownership).sort({ updatedAt: -1 }).limit(100).lean(),
   ]);
   const applicationEvents = events.filter(e => e.application === req.emailApplication);
-  res.json({ success: true, data: { application: req.emailApplication, events: applicationEvents, catalog: catalogFor(applicationEvents), policies, templates, drafts, history, automaticSending: false, serverNow: Date.now() } });
+  res.json({ success: true, data: { application: req.emailApplication, events: applicationEvents, catalog: catalogFor(applicationEvents), policies, templates: templates.map(templateWithDocs), drafts, history, automaticSending: false, serverNow: Date.now() } });
 }));
 router.get('/outbox', handle(async (req, res) => {
   adminOnly(req);
@@ -108,7 +108,7 @@ router.get('/outbox', handle(async (req, res) => {
 }));
 router.put('/policies/:event', handle(async (req, res) => {
   adminOnly(req); const event = req.params.event; allowedEvent(req, event);
-  if (!['review', 'off'].includes(req.body.mode)) throw new Error('Invalid sending rule');
+  if (!(isCustomerTriggered(event) ? ['auto', 'off'] : ['review', 'off']).includes(req.body.mode)) throw new Error('Invalid sending rule');
   const defaultTemplate = req.body.defaultTemplate || null;
   if (defaultTemplate && (!mongoose.isValidObjectId(defaultTemplate) || !await EmailTemplate.exists({ _id: defaultTemplate, event }))) throw new Error('Choose a template for this action');
   await EmailPolicy.findOneAndUpdate({ event }, { $set: { mode: req.body.mode, defaultTemplate } }, { upsert: true, runValidators: true });
@@ -119,62 +119,75 @@ function validateTemplate(event, body) {
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 100) throw new Error('Template name is required (up to 100 characters)');
   validateTemplateVariables(event, body.subject, body.text);
 }
+// Template bodies arrive as the editor's documents (or plain text from older clients).
 router.post('/templates', handle(async (req, res) => {
-  adminOnly(req); allowedEvent(req, req.body.event); validateTemplate(req.body.event, req.body);
-  const { event, name, subject, text } = req.body;
-  res.json({ success: true, data: await EmailTemplate.create({ event, name: name.trim(), subject, text }) });
+  adminOnly(req); allowedEvent(req, req.body.event);
+  const { event } = req.body; const fields = templateFromEditor(event, req.body);
+  validateTemplate(event, fields);
+  const created = await EmailTemplate.create({ event, name: fields.name.trim(), subject: fields.subject, text: fields.text });
+  res.json({ success: true, data: templateWithDocs(created.toObject()) });
 }));
 router.put('/templates/:id', handle(async (req, res) => {
   adminOnly(req);
   const current = await EmailTemplate.findById(req.params.id).lean();
   if (!current) throw new Error('Template not found');
-  allowedEvent(req, current.event); validateTemplate(current.event, req.body);
-  const { name, subject, text } = req.body;
-  res.json({ success: true, data: await EmailTemplate.findByIdAndUpdate(current._id, { $set: { name: name.trim(), subject, text } }, { new: true, runValidators: true }) });
+  allowedEvent(req, current.event);
+  const fields = templateFromEditor(current.event, req.body);
+  validateTemplate(current.event, fields);
+  const updated = await EmailTemplate.findByIdAndUpdate(current._id, { $set: { name: fields.name.trim(), subject: fields.subject, text: fields.text } }, { new: true, runValidators: true }).lean();
+  res.json({ success: true, data: templateWithDocs(updated) });
 }));
 router.post('/templates/:id/reset', handle(async (req, res) => {
   adminOnly(req);
   const current = await EmailTemplate.findById(req.params.id).select('event').lean();
   if (!current) throw new Error('Template not found');
   allowedEvent(req, current.event);
-  res.json({ success: true, data: await resetSystemTemplate(req.params.id) });
+  res.json({ success: true, data: templateWithDocs(await resetSystemTemplate(req.params.id)) });
 }));
 router.post('/templates/preview', handle(async (req, res) => {
-  adminOnly(req); allowedEvent(req, req.body.event); validateContent(req.body.subject, req.body.text);
-  validateTemplateVariables(req.body.event, req.body.subject, req.body.text);
+  adminOnly(req); allowedEvent(req, req.body.event);
+  const fields = templateFromEditor(req.body.event, req.body);
+  validateContent(fields.subject, fields.text); validateTemplateVariables(req.body.event, fields.subject, fields.text);
   const { values, blocks } = sampleContext(req.body.event);
-  const { subject, text, html } = composeTemplate({ subject: req.body.subject, text: req.body.text }, values, blocks);
+  const { subject, text, html } = composeTemplate(fields, values, blocks);
   res.json({ success: true, data: { subject, text, html } });
 }));
 router.get('/drafts/:id', handle(async (req, res) => {
   const draft = await loadDraft(req);
-  res.json({ success: true, data: req.emailIsAdmin ? { ...draft, templateOptions: await templateOptions(draft.event) } : draft });
+  const review = { ...draft, ...reviewWithDoc(draft.event, draft.text, draft.values, draft.blocks) };
+  res.json({ success: true, data: req.emailIsAdmin ? { ...review, templateOptions: await templateOptions(draft.event) } : review });
 }));
-// Two previews: { templateId } fills that template for this mail; { subject, text } shows
-// how the reviewer's edited text will be sent.
+// Two previews: { templateId } fills that template for this mail; { subject, doc } (or text
+// from older clients) shows how the reviewer's edited mail will be sent.
 router.post('/drafts/:id/preview', handle(async (req, res) => {
   const draft = await loadDraft(req);
   if (draft.status !== 'pending') throw new Error('The first send attempt locks the reviewed content');
-  if (typeof req.body.text === 'string') {
-    validateContent(req.body.subject, req.body.text);
-    return res.json({ success: true, data: { html: reviewedMail(draft, withRequiredLinks(req.body.text, draft.requiredLinks)).html } });
+  if (req.body.doc || typeof req.body.text === 'string') {
+    const text = reviewTextFromEditor(draft.event, req.body, draft.values, draft.blocks);
+    validateContent(req.body.subject, text);
+    return res.json({ success: true, data: { html: reviewedMail(draft, withRequiredLinks(text, draft.requiredLinks)).html } });
   }
   templateChoiceAllowed(req);
   const template = await resolveTemplate(draft.event, req.body.templateId);
   const context = draftContext(draft);
   const mail = template
     ? composeTemplate(template, context, draft.blocks, draft.requiredLinks)
-    : { subject: context.subject, text: withRequiredLinks(context.message, draft.requiredLinks) };
-  res.json({ success: true, data: { subject: mail.subject, text: mail.text, html: reviewedMail(draft, mail.text).html } });
+    : composeLegacy(context.subject, context.message, draft.requiredLinks);
+  const { doc } = reviewWithDoc(draft.event, mail.text, draft.values, draft.blocks);
+  res.json({ success: true, data: { subject: mail.subject, text: mail.text, doc, html: reviewedMail(draft, mail.text).html } });
 }));
 router.post('/drafts/:id/decision', handle(async (req, res) => {
   if (req.body.templateId !== undefined && req.body.templateId !== 'current') templateChoiceAllowed(req);
+  if (req.body.doc && req.body.choice === 'send') {
+    const draft = await loadDraft(req);
+    req.body.text = reviewTextFromEditor(draft.event, req.body, draft.values, draft.blocks);
+  }
   res.json({ success: true, data: await decide(req.params.id, req.userId, req.body, req.emailAccess) });
 }));
 router.post('/lead-preview', handle(async (req, res) => {
   adminOnly(req); allowedEvent(req, 'lead.created');
   const name = String(req.body.name || 'Customer').slice(0, 200);
   const mail = await applyDefault('lead.created', { subject: 'Welcome to Mera Software', text: `Hello ${name},\n\nThank you for connecting with Mera Software. Our team will contact you to discuss your requirements.\n\nMera Software Team` }, { name });
-  res.json({ success: true, data: mail && { to: [String(req.body.email || '')], subject: mail.subject, text: mail.text, event: 'lead.created' } });
+  res.json({ success: true, data: mail && { to: [String(req.body.email || '')], subject: mail.subject, text: mail.text, event: 'lead.created', ...reviewWithDoc('lead.created', mail.text, { name }, {}) } });
 }));
 module.exports = router;
