@@ -5,14 +5,14 @@ const { SESSION_STAGE, AUTH_MODE } = require("./externalUploadSession");
 // A signed cookie is only a short-lived reference. Every protected external-upload
 // request resolves the live link and client again, so revoke, regenerate, account
 // status, and consent changes take effect without waiting for the cookie to expire.
-const resolveExternalUploadAccess = async ({ session, requiredStage = SESSION_STAGE.ACCESS }) => {
+const resolveExternalUploadAccess = async ({ session, requiredStage = SESSION_STAGE.ACCESS, allowUsed = false }) => {
   if (!session || session.stage !== requiredStage) throw new Error("External upload access is not verified");
 
   const link = await externalUploadLinkModel.findOne({
     _id: session.linkId,
     customerId: session.customerId,
     orderId: session.orderId,
-    status: "active",
+    status: allowUsed ? { $in: ['active', 'used'] } : "active",
   }).lean();
   if (!link) throw new Error("Upload link is no longer active");
 

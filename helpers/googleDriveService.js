@@ -1,6 +1,11 @@
 const { google } = require('googleapis');
 const { Readable } = require('stream');
 const { measureUpload } = require('./uploadTiming');
+const { runDriveUpload } = require('./uploadConcurrency');
+
+const folderCache = new Map();
+const clientCache = new Map();
+const FOLDER_TTL_MS = 5 * 60 * 1000;
 
 class GoogleDriveService {
   constructor(keyFilePath, folderName, timing) {
@@ -11,16 +16,36 @@ class GoogleDriveService {
   }
 
   createDriveClient() {
+    const cached = clientCache.get(this.keyFilePath);
+    if (cached && cached.expires > Date.now()) return cached.client;
     const auth = new google.auth.GoogleAuth({
       keyFile: this.keyFilePath,
       scopes: ['https://www.googleapis.com/auth/drive']
     });
    
-    return google.drive({ version: 'v3', auth });
+    const client = google.drive({ version: 'v3', auth });
+    if (clientCache.size >= 16) clientCache.delete(clientCache.keys().next().value);
+    clientCache.set(this.keyFilePath, { client, expires: Date.now() + FOLDER_TTL_MS });
+    return client;
   }
 
   // Create folder in Google Drive if it doesn't exist
   async createFolder() {
+    const key = `${this.keyFilePath}:${this.folderName}`;
+    const cached = folderCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.promise;
+    if (folderCache.size >= 32) folderCache.delete(folderCache.keys().next().value);
+    const promise = runDriveUpload(() => this.findOrCreateFolder());
+    folderCache.set(key, { promise, expires: Date.now() + FOLDER_TTL_MS });
+    try { return await promise; }
+    catch (error) { if (folderCache.get(key)?.promise === promise) folderCache.delete(key); throw error; }
+  }
+
+  invalidateFolder() {
+    folderCache.delete(`${this.keyFilePath}:${this.folderName}`);
+  }
+
+  async findOrCreateFolder() {
     try {
       console.log(`Looking for folder: ${this.folderName}`);
       
@@ -74,7 +99,14 @@ class GoogleDriveService {
   }
 
   // Upload file to Google Drive
-  async uploadFile(fileName, fileBuffer, mimeType, folderId) {
+  async uploadFile(fileName, fileBuffer, mimeType, folderId, shouldStop = () => false) {
+    return runDriveUpload(async () => {
+      if (shouldStop()) return null;
+      return this.uploadFileNow(fileName, fileBuffer, mimeType, folderId);
+    });
+  }
+
+  async uploadFileNow(fileName, fileBuffer, mimeType, folderId) {
     let createdFileId = null;
     try {
       console.log(`Starting upload for file: ${fileName}`);
@@ -123,8 +155,10 @@ class GoogleDriveService {
         embedLink: embedLink
       };
     } catch (error) {
+      if (Number(error.code || error.response?.status) === 404) this.invalidateFolder();
       if (createdFileId) {
         await this.driveClient.files.delete({ fileId: createdFileId }).catch((cleanupError) => {
+          error.uploadCleanupFailed = true;
           console.error('Error cleaning up incomplete Drive upload:', cleanupError.message);
         });
       }
@@ -139,11 +173,12 @@ class GoogleDriveService {
   // Delete file from Google Drive
   async deleteFile(fileId) {
     try {
-      await this.driveClient.files.delete({
+      await runDriveUpload(() => this.driveClient.files.delete({
         fileId
-      });
+      }));
       return true;
     } catch (error) {
+      if (Number(error.code || error.response?.status) === 404) return true;
       console.error('Error deleting file:', error);
       throw error;
     }

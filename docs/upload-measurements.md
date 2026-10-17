@@ -1,8 +1,8 @@
 # Upload measurements
 
-Scope: diagnose upload delays only. Background jobs/mobile background operation
-are excluded by the owner's instruction. Existing upload ordering, limits,
-permissions, allowance rules and response bodies stay unchanged.
+Timing diagnostics cover the upload flow. Background jobs/mobile background
+operation are excluded by the owner's instruction. The optimized request flow,
+retry contract and deployment checks are documented in `upload-flow.md`.
 
 Enable `UPLOAD_TIMING_ENABLED=true` in the backend process and build the portal
 with `REACT_APP_UPLOAD_TIMING_ENABLED=true`. Both switches default to off.
@@ -25,6 +25,8 @@ CORS policy as `X-Upload-Timing-Id`). Do not enable diagnostics on unrelated app
 - Measured spans separate order/access/settings queries, Drive folder lookup
   (and creation/permission if needed), each file upload and permission call,
   allowance writes, request save and notification preparation.
+  With bounded parallel uploads, file-operation spans overlap: do not sum their
+  durations to calculate wall time. Cache hits may omit folder lookup spans.
 - `controller_response_ready` to response finish includes response middleware
   such as email-draft finalization and external-link successful-use recording.
   Actual email delivery starts after the response and is outside this total.

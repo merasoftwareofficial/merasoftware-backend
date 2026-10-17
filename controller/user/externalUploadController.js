@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const externalUploadLinkModel = require("../../models/externalUploadLinkModel");
 const submitUpdateRequest = require("./submitUpdateRequest");
 const upload = require("../../middleware/uploadFiles");
+const { findSubmission } = require('../../helpers/uploadSubmission');
 const { digestExternalUploadToken } = require("../../helpers/externalUploadToken");
 const { resolveEligibleUploadTarget } = require("../../helpers/externalUploadLinkPolicy");
 const { resolveExternalUploadAccess } = require("../../helpers/externalUploadAccessPolicy");
@@ -133,8 +134,12 @@ const verifyCredentials = async (req, res) => {
 const requireAccess = async (req, res, next) => {
   try {
     const session = readExternalUploadSession(req);
-    const context = await resolveExternalUploadAccess({ session });
+    if (!session) throw fail('Upload-link session is unavailable', 401);
+    req.externalUpload = { session };
+    const previous = await findSubmission(req);
+    const context = await resolveExternalUploadAccess({ session, allowUsed: previous?.status === 'succeeded' });
     req.externalUpload = { session, ...context };
+    req.existingUploadSubmission = previous;
     return next();
   } catch (error) {
     clearExternalUploadSession(res);
@@ -199,6 +204,7 @@ const getSession = async (req, res) => {
 };
 
 const reserveSingleUse = async (req, res, next) => {
+  if (req.existingUploadSubmission && req.existingUploadSubmission.status !== 'failed') return next();
   const link = req.externalUpload.link;
   if (link.mode !== "single") return next();
   try {
@@ -268,7 +274,7 @@ const applyExternalUploadIdentity = (req) => {
 
 const submit = async (req, res, next) => {
   try {
-    const refreshed = await resolveExternalUploadAccess({ session: req.externalUpload.session });
+    const refreshed = await resolveExternalUploadAccess({ session: req.externalUpload.session, allowUsed: req.existingUploadSubmission?.status === 'succeeded' });
     req.externalUpload = { ...req.externalUpload, ...refreshed };
     applyExternalUploadIdentity(req);
   } catch (error) {
@@ -282,8 +288,10 @@ const submit = async (req, res, next) => {
     status(value) { responseStatus = value; return this; },
     json: async (payload) => {
       if (payload?.success) {
-        await recordSuccessfulUse(req);
-        if (req.externalUpload.link.mode === "single") clearExternalUploadSession(res);
+        if (!req.uploadAttempt) {
+          await recordSuccessfulUse(req);
+          if (req.externalUpload.link.mode === "single") clearExternalUploadSession(res);
+        }
       }
       else await releaseReservation(req);
       return res.status(responseStatus).json(payload);

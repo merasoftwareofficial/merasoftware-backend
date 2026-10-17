@@ -164,6 +164,7 @@ router.post("/admin/clients/:customerId/upload-links/:linkId/revoke", authToken,
 router.post("/external-upload/exchange", externalUploadController.requireAllowedOrigin, externalUploadController.exchange);
 router.post("/external-upload/credentials", externalUploadController.requireAllowedOrigin, externalUploadController.verifyCredentials);
 router.get("/external-upload/session", externalUploadController.getSession);
+router.get('/external-upload/progress/:uploadId', externalUploadController.requireAccess, require('../controller/user/getUploadProgress'));
 router.post(
   "/external-upload/submit",
   externalUploadController.requireAllowedOrigin,
@@ -229,6 +230,7 @@ router.post("/update-partner-customer/:customerId", authToken, updatePartnerCust
 router.post("/addRole", authToken, addRoleToUserController)
 router.get("/user-update-plans", authToken, getUserUpdatePlans)
 router.post("/user-request-update", authToken, upload.any(), submitUpdateRequest)
+router.get('/upload-progress/:uploadId', authToken, require('../controller/user/getUploadProgress'));
 router.get("/get-update-requests", authToken, getUserUpdateRequests)
 // Uploaded-data surface. One pair of routes for customer and admin alike — each
 // authorises internally (admin reads any order, everyone else only their own), so the

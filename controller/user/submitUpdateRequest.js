@@ -15,6 +15,8 @@ const {
 const { UPLOAD_KIND, getUploadKind } = require('../../helpers/uploadType');
 const { assertProjectAcceptsUpload } = require('../../helpers/projectUploadGate');
 const { measureUpload } = require('../../helpers/uploadTiming');
+const { uploadBatch } = require('../../helpers/uploadConcurrency');
+const submission = require('../../helpers/uploadSubmission');
 
 // Path to the Google Drive credentials file
 let KEY_FILE_PATH;
@@ -32,8 +34,10 @@ const FOLDER_NAME = 'ClientUpdateFiles';
 // Error handling wrapper
 const asyncHandler = (fn) => (req, res, next) => {
   return Promise.resolve(fn(req, res, next)).catch(err => {
+    req.uploadNeedsReview ||= Boolean(err.uploadCleanupFailed);
+    req.uploadCommitUncertain ||= Boolean(err.uploadCommitUncertain);
     console.error('Error in async handler:', err);
-    return res.status(500).json({
+    return res.status(err.status || 500).json({
       message: err.message || 'Internal server error',
       error: true,
       success: false
@@ -41,7 +45,7 @@ const asyncHandler = (fn) => (req, res, next) => {
   });
 };
 
-const submitUpdateRequest = asyncHandler(async (req, res) => {
+const submitCore = asyncHandler(async (req, res) => {
   const timing = req.uploadTiming;
   timing?.mark('controller_entered'); // Auth/access checks and multipart parsing are complete.
   console.log("Request body keys:", Object.keys(req.body));
@@ -240,7 +244,7 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
   const fileExpirationDays = adminSettings.fileExpirationDays;
   
   // Process uploaded files and upload to Google Drive
-  const fileObjects = [];
+  let fileObjects = [];
   if (req.files && req.files.length > 0) {
     console.log("***** FILE UPLOAD DEBUGGING *****");
     console.log("Files received count:", req.files.length);
@@ -251,14 +255,13 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
   console.log("Folder created with ID:", folderId);
 
 
-    for (const file of req.files) {
-      try {
+    fileObjects = await uploadBatch(req.files, async (file, index, shouldStop) => {
         // Set expiration date for the file
         const expirationDate = new Date();
         expirationDate.setDate(expirationDate.getDate() + fileExpirationDays);
         
         // Create a Buffer from the file
-        const fileBuffer = Buffer.from(file.buffer);
+        const fileBuffer = file.buffer;
         
         // Clean filename and upload to Google Drive
         const safeFilename = file.originalname.replace(/\s+/g, '_');
@@ -269,8 +272,10 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
           safeFilename,
           fileBuffer,
           file.mimetype,
-          folderId
+          folderId,
+          shouldStop
         );
+        if (!uploadedFile) return null;
 
         // Generate direct download link and embedable link for images
       const downloadLink = driveService.getDownloadLink(uploadedFile.id);
@@ -290,7 +295,7 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
       }
         
        // Add file info to the array - make sure each property is the right type
-       fileObjects.push({
+       return {
         filename: safeFilename,
         originalName: file.originalname,
         type: file.mimetype,
@@ -300,103 +305,105 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
         downloadLink: downloadLink,
         embedLink: embedLink,
         expirationDate: expirationDate
-      });
-        
-      console.log(`Uploaded file: ${file.originalname} to Google Drive with ID: ${uploadedFile.id}`);
-      } catch (error) {
-        console.error('Error processing file:', error);
-        console.error('File type:', file.mimetype, 'File name:', file.originalname);
-        await Promise.all(fileObjects.map((storedFile) => (
-          driveService.deleteFile(storedFile.driveFileId).catch((cleanupError) => {
-            console.error('Could not clean up Drive file after failed upload:', cleanupError.message);
-          })
-        )));
-        throw error;
-      }
-    }
+      };
+    }, stored => driveService.deleteFile(stored.driveFileId),
+    () => submission.progress(req, { $inc: { completedFiles: 1 } }));
   }
   
   // Create update request document
   let serviceAllowanceReserved = false;
   let requestPersisted = false;
+  let committedResponse;
+  let updateRequest;
   try {
     console.log("***** DATABASE SAVE DEBUGGING *****");
     console.log("Files object structure:", JSON.stringify(fileObjects));
 
-    if (isServiceUpload) {
-      const snapshot = updatePlan.servicePlanSnapshot || {};
-      const reservationFilter = {
-        _id: new ObjectId(planId),
-        userId: new ObjectId(userId),
-        servicePlanStatus: 'active',
-        isActive: true,
-        planStatus: { $ne: 'closed' },
-        autoRenewalStatus: { $ne: 'paused' },
-      };
-      if (snapshot.limitScope !== 'unlimited') {
-        reservationFilter.$expr = {
-          $lt: [
-            { $ifNull: ['$serviceAccessUsedInCycle', 0] },
-            Number(snapshot.portalAccessCount || 0),
-          ],
+    if (req.uploadAttempt) {
+      await submission.progress(req, { $set: { phase: 'finalizing' } });
+      const committed = await submission.commitSubmission(req, {
+        instructions: instructions.map(msg => ({ text: msg.text, timestamp: new Date(msg.timestamp || Date.now()) })),
+        files: fileObjects,
+      });
+      committedResponse = committed.response;
+      updateRequest = { _id: committed.requestId };
+      requestPersisted = true;
+    } else {
+      if (isServiceUpload) {
+        const snapshot = updatePlan.servicePlanSnapshot || {};
+        const reservationFilter = {
+          _id: new ObjectId(planId),
+          userId: new ObjectId(userId),
+          servicePlanStatus: 'active',
+          isActive: true,
+          planStatus: { $ne: 'closed' },
+          autoRenewalStatus: { $ne: 'paused' },
         };
+        if (snapshot.limitScope !== 'unlimited') {
+          reservationFilter.$expr = {
+            $lt: [
+              { $ifNull: ['$serviceAccessUsedInCycle', 0] },
+              Number(snapshot.portalAccessCount || 0),
+            ],
+          };
+        }
+        const reservedOrder = await measureUpload(timing, 'service_allowance_reserve', () => orderModel.findOneAndUpdate(
+          reservationFilter,
+          { $inc: { serviceAccessUsedInCycle: 1, serviceAccessUsedTotal: 1 } },
+          { new: true },
+        ).select('_id'));
+        if (!reservedOrder) throw new Error('Selected service upload limit or availability changed');
+        serviceAllowanceReserved = true;
       }
-      const reservedOrder = await measureUpload(timing, 'service_allowance_reserve', () => orderModel.findOneAndUpdate(
-        reservationFilter,
-        { $inc: { serviceAccessUsedInCycle: 1, serviceAccessUsedTotal: 1 } },
-        { new: true },
-      ).select('_id'));
-      if (!reservedOrder) throw new Error('Selected service upload limit or availability changed');
-      serviceAllowanceReserved = true;
-    }
 
-    // Create the update request
-    const updateRequest = new updateRequestModel({
-      userId: new ObjectId(userId),
-      updatePlanId: new ObjectId(planId),
-      instructions: instructions.map(msg => ({
-        text: msg.text,
-        timestamp: new Date(msg.timestamp || Date.now())
-      })),
-      files: fileObjects,
-      status: 'pending'
-    });
+      // Create the update request
+      updateRequest = new updateRequestModel({
+        userId: new ObjectId(userId),
+        updatePlanId: new ObjectId(planId),
+        instructions: instructions.map(msg => ({
+          text: msg.text,
+          timestamp: new Date(msg.timestamp || Date.now())
+        })),
+        files: fileObjects,
+        status: 'pending'
+      });
     
-    // Save the request
-    await measureUpload(timing, 'request_save', () => updateRequest.save());
-    requestPersisted = true;
+      // Save the request
+      await measureUpload(timing, 'request_save', () => updateRequest.save());
+      requestPersisted = true;
     
-    // Spend the allowance this upload was made against — each kind spends its own, and a
-    // project spends nothing at all. A project has no allowance, so incrementing one on it
-    // is not just useless but wrong: it left updatesUsed=1 sitting on project orders,
-    // a legacy plan's counter on something that has no plan.
-    const updateFields = isLegacyUpload
-        ? { updatesUsed: 1 }
-        : null;
+      // Spend the allowance this upload was made against — each kind spends its own, and a
+      // project spends nothing at all. A project has no allowance, so incrementing one on it
+      // is not just useless but wrong: it left updatesUsed=1 sitting on project orders,
+      // a legacy plan's counter on something that has no plan.
+      const updateFields = isLegacyUpload
+          ? { updatesUsed: 1 }
+          : null;
 
-    if (updateFields) {
-      // For yearly renewable plans and monthly limited plans, also increment currentMonthUpdatesUsed
-      if (updatePlan.productId?.isMonthlyRenewablePlan || updatePlan.productId?.isMonthlyLimitedPlan) {
-        updateFields.currentMonthUpdatesUsed = 1;
+      if (updateFields) {
+        // For yearly renewable plans and monthly limited plans, also increment currentMonthUpdatesUsed
+        if (updatePlan.productId?.isMonthlyRenewablePlan || updatePlan.productId?.isMonthlyLimitedPlan) {
+          updateFields.currentMonthUpdatesUsed = 1;
+        }
+
+        // For monthly limited plans, also update the remaining counter
+        const updateQuery = { $inc: updateFields };
+        if (updatePlan.productId?.isMonthlyLimitedPlan) {
+          const effectiveMonthlyLimit =
+            updatePlan.currentMonthUpdatesLimit ||
+            updatePlan.productId.monthlyUpdateLimit ||
+            1;
+          const newRemaining = effectiveMonthlyLimit - (updatePlan.currentMonthUpdatesUsed + 1);
+          updateQuery.$set = { currentMonthUpdatesRemaining: newRemaining };
+        }
+
+        await measureUpload(timing, 'legacy_allowance_update', () => orderModel.updateOne(
+          { _id: new ObjectId(planId) },
+          updateQuery
+        ));
       }
 
-      // For monthly limited plans, also update the remaining counter
-      const updateQuery = { $inc: updateFields };
-      if (updatePlan.productId?.isMonthlyLimitedPlan) {
-        const effectiveMonthlyLimit =
-          updatePlan.currentMonthUpdatesLimit ||
-          updatePlan.productId.monthlyUpdateLimit ||
-          1;
-        const newRemaining = effectiveMonthlyLimit - (updatePlan.currentMonthUpdatesUsed + 1);
-        updateQuery.$set = { currentMonthUpdatesRemaining: newRemaining };
-      }
-
-      await measureUpload(timing, 'legacy_allowance_update', () => orderModel.updateOne(
-        { _id: new ObjectId(planId) },
-        updateQuery
-      ));
     }
-
     // Send email notifications
     console.log("Sending email notifications...");
     try {
@@ -428,7 +435,7 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
     }
     
     timing?.mark('controller_response_ready');
-    return res.status(200).json({
+    return res.status(200).json(committedResponse || {
       message: "Update request submitted successfully",
       error: false,
       success: true,
@@ -443,15 +450,17 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
       }
     });
   } catch (error) {
+    req.uploadCommitUncertain ||= Boolean(error.uploadCommitUncertain);
     if (serviceAllowanceReserved && !requestPersisted) {
       await orderModel.updateOne(
         { _id: new ObjectId(planId) },
         { $inc: { serviceAccessUsedInCycle: -1, serviceAccessUsedTotal: -1 } },
       ).catch((rollbackError) => console.error('Could not release service upload reservation:', rollbackError.message));
     }
-    if (!requestPersisted) {
+    if (!requestPersisted && !error.uploadCommitUncertain) {
       await Promise.all(fileObjects.map((storedFile) => (
         driveService.deleteFile(storedFile.driveFileId).catch((cleanupError) => {
+          req.uploadNeedsReview = true;
           console.error('Could not clean up Drive file after failed request:', cleanupError.message);
         })
       )));
@@ -464,6 +473,22 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
       success: false
     });
   }
+});
+
+const submitUpdateRequest = asyncHandler(async (req, res) => {
+  const attempt = await submission.claimSubmission(req);
+  req.uploadAttempt = attempt;
+  if (attempt?.replay) return res.status(200).json(attempt.replay);
+  if (attempt?.pending) return res.status(202).json({ success: false, error: false, code: 'UPLOAD_IN_PROGRESS', data: { status: attempt.status } });
+  let status = 200;
+  const response = {
+    status(value) { status = value; return this; },
+    async json(payload) {
+      if (!payload.success && !req.uploadCommitUncertain) await submission.failSubmission(req, req.uploadNeedsReview);
+      return res.status(status).json(payload);
+    },
+  };
+  return submitCore(req, response);
 });
 
 module.exports = submitUpdateRequest;

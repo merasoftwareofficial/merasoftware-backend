@@ -18,13 +18,13 @@ function variablesFor(event) {
   return hasSystemTemplate(event) ? { variables: definitions[event].variables, blocks: definitions[event].blocks } : { variables: {}, blocks: {} };
 }
 
-/** What the template editors show per action: variables, blocks, and the kind of built-in. */
+/** What the template editors show per action: variables (with an example), blocks, and the kind of built-in. */
 function catalogFor(events) {
   return Object.fromEntries(events.map(({ key }) => {
     const { variables, blocks } = variablesFor(key);
     return [key, {
       system: hasSystemTemplate(key),
-      variables: Object.entries(variables).map(([name, { label, hint }]) => ({ key: name, label, ...(hint ? { hint } : {}) })),
+      variables: Object.entries(variables).map(([name, { label, hint, sample }]) => ({ key: name, label, ...(hint ? { hint } : {}), ...(sample ? { sample } : {}) })),
       blocks: Object.entries(blocks).map(([name, { label, hint }]) => ({ key: name, label, ...(hint ? { hint } : {}) })),
     }];
   }));
@@ -115,7 +115,7 @@ function templateFromEditor(event, body) {
 function reviewFields(event, values, blocks) {
   const { variables, blocks: sections } = variablesFor(event);
   return {
-    variables: Object.keys(asObject(values)).filter(key => has(variables, key)).map(key => ({ key, label: variables[key].label, ...(variables[key].hint ? { hint: variables[key].hint } : {}) })),
+    variables: Object.entries(asObject(values)).filter(([key]) => has(variables, key)).map(([key, value]) => ({ key, label: variables[key].label, ...(variables[key].hint ? { hint: variables[key].hint } : {}), value: String(value ?? '') })),
     blocks: Object.keys(asObject(blocks)).filter(key => has(sections, key)).map(key => ({ key, label: sections[key].label, ...(sections[key].hint ? { hint: sections[key].hint } : {}) })),
   };
 }

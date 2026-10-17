@@ -291,6 +291,8 @@ const projectSnapshotSchema = new mongoose.Schema({
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
+    // Transaction fence for project uploads racing order-state changes.
+    uploadRevision: { type: Number, default: 0 },
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'user',
