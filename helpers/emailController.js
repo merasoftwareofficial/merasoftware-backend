@@ -3,7 +3,7 @@ const { EmailDraft, EmailTemplate, EmailPolicy, EmailHistory } = require('../mod
 const { byKey, eventKeys, isCustomerTriggered, customerEventKeys } = require('./emailCatalog');
 const userModel = require('../models/userModel');
 const { render, compose, withRequiredLinks } = require('./emailMarkup');
-const { resolveTemplate, systemTemplate, composeTemplate, composeLegacy, LEGACY_BUILT_IN } = require('./emailTemplates');
+const { resolveTemplate, systemTemplate, composeTemplate, REVIEWED_NAME } = require('./emailTemplates');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
@@ -34,8 +34,7 @@ async function recordHistory(draft, decidedBy, required = false) {
     if (required) throw error;
   }
 }
-// The action's default template, or its built-in: the system template of a migrated action,
-// or the legacy code-built HTML (kept as is) of one not yet migrated.
+// The action's default template, or its built-in system template, filled with the action's values.
 async function applyDefault(event, mail, values = {}) {
   const policy = await EmailPolicy.findOne({ event }).lean();
   // Customer-started mail exists only while its action is On; it is Off until an admin turns it on.
@@ -48,9 +47,8 @@ async function applyDefault(event, mail, values = {}) {
   }
   const chosen = policy?.defaultTemplate && await EmailTemplate.findOne({ _id: policy.defaultTemplate, event }).lean();
   const template = chosen || await systemTemplate(event);
-  const context = { subject: mail.subject, message: mail.text || plainText(mail.html), ...values };
-  if (!template) return { ...mail, ...composeLegacy(mail.subject, context.message, mail.requiredLinks) };
-  return { ...mail, ...composeTemplate(template, context, mail.blocks, mail.requiredLinks) };
+  if (!template) throw new Error(`No email template for ${event}`);
+  return { ...mail, ...composeTemplate(template, values, mail.blocks, mail.requiredLinks) };
 }
 /**
  * What a reviewed text sends. Unchanged text keeps the prepared mail; edited text is filled
@@ -77,7 +75,7 @@ async function prepareMail(event, mail, extraValues) {
     const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
     if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
   }
-  // Migrated builders send their data as values/blocks; the lead form adds its own values.
+  // Builders send their data as values/blocks; the lead form adds its own values.
   const values = { ...(mail.values || {}), ...(extraValues || {}) };
   const content = await applyDefault(event, mail, values);
   if (!content) return suppressed();
@@ -96,7 +94,7 @@ async function prepareMail(event, mail, extraValues) {
     baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values, blocks: mail.blocks,
     to, subject: content.subject, text: content.text, plain: content.plain,
     html: content.html || compose(content.text, mail.blocks).html,
-    templateName: content.templateName || LEGACY_BUILT_IN,
+    templateName: content.templateName || REVIEWED_NAME,
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
@@ -198,8 +196,7 @@ async function decide(id, actor, decision, access = {}) {
   const text = withRequiredLinks(decision.text, policyDraft.requiredLinks);
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
-    const template = await resolveTemplate(policyDraft.event, decision.templateId);
-    templateName = template ? template.name : LEGACY_BUILT_IN;
+    templateName = (await resolveTemplate(policyDraft.event, decision.templateId)).name;
   }
   const update = policyDraft.status === 'failed'
     ? { status: 'sending', failure: '' }

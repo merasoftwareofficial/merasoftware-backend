@@ -1,6 +1,7 @@
 // Stable event keys shared by builders, policies, templates and the review UI.
 const events = [
   ['lead.created', 'Leads', 'New lead welcome'],
+  ['sendClientAccountCreatedEmail', 'Leads', 'Client account created'],
   ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)'],
   ['sendUserConfirmation', 'Updates', 'Update request received'],
   ['sendDeveloperAssignedNotification', 'Updates', 'Developer assigned (customer)'],

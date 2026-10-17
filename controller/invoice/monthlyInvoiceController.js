@@ -1,4 +1,3 @@
-const { formatIndiaDate } = require('./../../helpers/dateTime');
 const {
   updateOverdueInvoicesAndPausePlans,
   markInvoicePaidAndResumePlan,
@@ -8,10 +7,10 @@ const monthlyInvoiceModel = require("../../models/monthlyInvoiceModel");
 const {
   generateMonthlyInvoicePdf,
   sendMonthlyInvoiceEmail,
+  prepareTemplatedMail,
 } = require("../../helpers/emailService");
 const mongoose = require("mongoose");
 const { ADMIN_PAYMENT_METHODS } = require("../../helpers/paymentEvidence");
-const { queueMail } = require("../../helpers/emailController");
 
 
 
@@ -300,30 +299,9 @@ const sendPaymentRecordReminder = async (req, res) => {
     }
 
     const invoicePdf = await generateMonthlyInvoicePdf(user, order, invoice);
-    const { error, suppressed } = await queueMail("invoice.reminder", {
-      reminderInvoice: invoice._id,
-      from: `${process.env.FROM_NAME || "Mera Software"} <${process.env.FROM_EMAIL}>`,
-      to: [user.email],
-      subject: `Payment reminder - Invoice #${invoice.invoiceNumber}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2>Payment Reminder</h2>
-          <p>Hello ${user.name || "Customer"},</p>
-          <p>${reminderMessage}</p>
-          <p><strong>Invoice:</strong> ${invoice.invoiceNumber}</p>
-          <p><strong>Amount Due:</strong> Rs ${Number(invoice.amount || 0).toLocaleString("en-IN")}</p>
-          <p><strong>Due Date:</strong> ${formatIndiaDate(invoice.dueDate)}</p>
-          <p>Invoice PDF is attached for your reference.</p>
-          <p>Regards,<br>Mera Software Team</p>
-        </div>
-      `,
-      attachments: [
-        {
-          filename: `Invoice-${invoice.invoiceNumber}.pdf`,
-          content: invoicePdf,
-        },
-      ],
-    });
+    // Wording: the "Payment reminder" template (helpers/emailDefinitions.js); the reminder
+    // message is one of its details.
+    const { error, suppressed } = await prepareTemplatedMail("invoice.reminder", invoice, reminderMessage, invoicePdf);
 
     if (suppressed) throw new Error("Email is disabled for this action");
     if (error) {

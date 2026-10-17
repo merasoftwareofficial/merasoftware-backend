@@ -6,7 +6,7 @@ const { EmailTemplate, EmailPolicy, EmailDraft, EmailHistory } = require('../mod
 const { events, byKey, isCustomerTriggered } = require('../helpers/emailCatalog');
 const { decide, applyDefault, reviewedMail, validateContent, applicationQuery, draftAccess } = require('../helpers/emailController');
 const { withRequiredLinks } = require('../helpers/emailMarkup');
-const { LEGACY_BUILT_IN, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables, systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, composeLegacy, templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor } = require('../helpers/emailTemplates');
+const { catalogFor, sampleContext, validateTemplateVariables, systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor } = require('../helpers/emailTemplates');
 const { verifyWebsiteAccess } = require('../helpers/websiteEmailAccess');
 const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
 const router = express.Router();
@@ -68,23 +68,26 @@ async function loadDraft(req) {
   if (!draft) throw new Error('Draft unavailable');
   return draft;
 }
-const draftContext = draft => ({ subject: draft.baseSubject || draft.subject, message: draft.baseText || draft.text, ...(draft.values || {}) });
-// The choices a review offers, built-in first. '' is the legacy code-built mail of an action
-// that has no system template yet.
+// The choices a review offers, built-in first.
 async function templateOptions(event) {
   await systemTemplate(event);
   const templates = await EmailTemplate.find({ event }).sort({ system: -1, name: 1 }).select('name system').lean();
-  const options = templates.map(row => ({ id: String(row._id), name: row.name, system: !!row.system }));
-  return hasSystemTemplate(event) ? options : [{ id: '', name: LEGACY_BUILT_IN, system: true }, ...options];
+  return templates.map(row => ({ id: String(row._id), name: row.name, system: !!row.system }));
 }
 router.post('/website-drafts', handle(async (req, res) => {
-  const { event, to, subject, text, headers, requiredLinks, reference, dedupeKey } = req.body;
+  const { event, to, subject, text, headers, requiredLinks, reference, dedupeKey, values } = req.body;
   if (!['website.subscription.confirm', 'website.subscription.manage'].includes(event)) throw new Error('Unknown website email action');
+  // The website still sends its own subject and text (kept on the draft as its base); the mail
+  // itself comes from the action's template, filled with the topics and the required link.
   validateContent(subject, text);
+  const details = {
+    link: Array.isArray(requiredLinks) && typeof requiredLinks[0] === 'string' ? requiredLinks[0] : '',
+    topics: typeof values?.topics === 'string' ? values.topics.slice(0, 500) : '',
+  };
   // Legacy portal admins can still prepare their own website drafts, but only
   // the website server can submit public requests and validate a send decision.
   const { queueMail } = require('../helpers/emailController');
-  const result = await queueMail(event, { to, subject, text, headers, requiredLinks, reference, dedupeKey });
+  const result = await queueMail(event, { to, subject, text, headers, requiredLinks, reference, dedupeKey, values: details });
   res.json({ success: true, data: { queued: !!result.queued, sent: false, draftId: result.draftId } });
 }));
 router.get('/', handle(async (req, res) => {
@@ -169,10 +172,7 @@ router.post('/drafts/:id/preview', handle(async (req, res) => {
   }
   templateChoiceAllowed(req);
   const template = await resolveTemplate(draft.event, req.body.templateId);
-  const context = draftContext(draft);
-  const mail = template
-    ? composeTemplate(template, context, draft.blocks, draft.requiredLinks)
-    : composeLegacy(context.subject, context.message, draft.requiredLinks);
+  const mail = composeTemplate(template, draft.values || {}, draft.blocks, draft.requiredLinks);
   const { doc } = reviewWithDoc(draft.event, mail.text, draft.values, draft.blocks);
   res.json({ success: true, data: { subject: mail.subject, text: mail.text, doc, html: reviewedMail(draft, mail.text).html } });
 }));
@@ -187,7 +187,7 @@ router.post('/drafts/:id/decision', handle(async (req, res) => {
 router.post('/lead-preview', handle(async (req, res) => {
   adminOnly(req); allowedEvent(req, 'lead.created');
   const name = String(req.body.name || 'Customer').slice(0, 200);
-  const mail = await applyDefault('lead.created', { subject: 'Welcome to Mera Software', text: `Hello ${name},\n\nThank you for connecting with Mera Software. Our team will contact you to discuss your requirements.\n\nMera Software Team` }, { name });
+  const mail = await applyDefault('lead.created', {}, { name });
   res.json({ success: true, data: mail && { to: [String(req.body.email || '')], subject: mail.subject, text: mail.text, event: 'lead.created', ...reviewWithDoc('lead.created', mail.text, { name }, {}) } });
 }));
 module.exports = router;

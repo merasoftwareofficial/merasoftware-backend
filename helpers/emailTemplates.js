@@ -1,113 +1,21 @@
-// Built-in templates. Each migrated action owns, in this one place: its variables with
-// sample values, its original wording, and how its business data becomes those variables.
-// The wording is copied once into the database as the action's editable system template;
-// the copy here stays the original for "Reset to original". Actions not listed here still
-// use their legacy code-built HTML (emailService.js) until they are migrated.
+// Built-in templates: every action's wording, details and data mapping live in
+// emailDefinitions.js. This file copies that wording once into the database as the action's
+// editable system template ("Standard"), resets it, fills templates for one mail, and converts
+// templates and reviews to and from the visual editor's documents.
 const mongoose = require('mongoose');
 const { EmailTemplate } = require('../models/emailControlModel');
 const { byKey } = require('./emailCatalog');
-const { formatIndiaDateTime } = require('./dateTime');
-const { getOrderDisplayName } = require('./orderPresentation');
-const { render, compose, placeholders, tableBlock, withRequiredLinks, escapeMarkup, asObject, has } = require('./emailMarkup');
+const { definitions } = require('./emailDefinitions');
+const { render, compose, placeholders, withRequiredLinks, asObject, has } = require('./emailMarkup');
 const { markupToDoc, subjectToDoc, docToMarkup, docToSubject } = require('./emailDoc');
 
 const SYSTEM_NAME = 'Standard';
-const LEGACY_BUILT_IN = 'Built-in action template';
-const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
-const REFUND_METHODS = { wallet: 'Wallet', upi: 'UPI', cash: 'Cash', bank_transfer: 'Bank Transfer', cheque: 'Cheque', combined: 'Combined', demo: 'Demo Credit' };
-
-function refundTable(refunds) {
-  const rows = refunds.map(entry => [
-    REFUND_METHODS[entry.method] || entry.method || 'Refund',
-    money(entry.amount),
-    entry.method === 'wallet' ? 'Credited to your wallet' : `Reference: ${entry.referenceId || 'N/A'}`,
-  ]);
-  const total = refunds.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
-  return tableBlock('Refund Details', rows, ['Total Refunded', money(total), '']);
-}
-
-const definitions = {
-  sendProjectCreatedEmail: {
-    subject: 'Your Project Has Started',
-    text: [
-      'Hello {{name}},', '',
-      'We have created your project and work has begun. The details are below.', '',
-      '## Project Details',
-      '**Project:** {{project}}', '**Price:** {{price}}', '**Offer:** {{offer}}', '**Started On:** {{startedOn}}', '',
-      '## Payment',
-      '{{paymentPlan}}', '**Received so far:** {{receivedSoFar}}', '**Due now:** {{dueNow}}', '',
-      "You can follow your project's progress from your account at any time.", '',
-      'Best regards,', 'Mera Software Team',
-    ].join('\n'),
-    variables: {
-      name: { label: 'Customer name', sample: 'Ravi Kumar' },
-      project: { label: 'Project name', sample: 'Business Website' },
-      price: { label: 'Price', hint: 'The amount, or FREE', sample: '₹25,000' },
-      offer: { label: 'Offer title', hint: 'Empty when the project has no offer', sample: 'Diwali Offer' },
-      startedOn: { label: 'Start date and time', sample: '17 Oct 2026, 11:30 am' },
-      paymentPlan: { label: 'Payment plan', hint: 'One sentence: free, one-time or installments', sample: 'Payable in 2 installments: ₹12,500 + ₹12,500.' },
-      receivedSoFar: { label: 'Amount received', hint: 'Empty when nothing is paid yet', sample: '' },
-      dueNow: { label: 'Amount due now', hint: 'With the invoice number; empty when free or already paid', sample: '₹12,500 (invoice INV-1001)' },
-    },
-    blocks: {},
-    build(user, order, invoice) {
-      if (!user?.email) return null;
-      const total = Number(order.totalAmount || order.price || 0);
-      const isFree = total === 0;
-      const installments = Array.isArray(order.installments) ? order.installments : [];
-      const paidNow = Number(order.paidAmount || 0);
-      let paymentPlan = `One-time payment of ${money(total)}.`;
-      if (isFree) paymentPlan = 'This project is FREE — nothing is due.';
-      else if (order.isPartialPayment && installments.length) paymentPlan = `Payable in ${installments.length} installments: ${installments.map(item => money(item.amount)).join(' + ')}.`;
-      const due = `${money(invoice?.amount ?? total)}${invoice?.invoiceNumber ? ` (invoice ${invoice.invoiceNumber})` : ''}`;
-      return { to: [user.email], values: {
-        name: user.name || 'Customer', project: getOrderDisplayName(order), price: isFree ? 'FREE' : money(total),
-        offer: order.projectSnapshot?.offer?.title || '', startedOn: formatIndiaDateTime(Date.now()), paymentPlan,
-        receivedSoFar: !isFree && paidNow > 0 ? money(paidNow) : '', dueNow: !isFree && paidNow <= 0 ? due : '',
-      } };
-    },
-  },
-  sendProjectCancellationEmail: {
-    subject: 'Project Cancelled',
-    text: [
-      'Hello {{name}},', '',
-      'Your project has been cancelled. The details are below.', '',
-      '## Project Details',
-      '**Project:** {{project}}', '**Cancelled On:** {{cancelledOn}}', '**Reason:** {{reason}}', '',
-      '{{refundTable}}', '',
-      'If you have any questions about this cancellation or the refund, please contact our support team.', '',
-      'Best regards,', 'Mera Software Team',
-    ].join('\n'),
-    variables: {
-      name: { label: 'Customer name', sample: 'Ravi Kumar' },
-      project: { label: 'Project name', sample: 'Business Website' },
-      cancelledOn: { label: 'Cancelled on', hint: 'Date and time of the cancellation', sample: '17 Oct 2026, 11:30 am' },
-      reason: { label: 'Cancellation reason', hint: 'Empty when no reason was given', sample: 'Requirements changed' },
-    },
-    blocks: {
-      refundTable: { label: 'Refund details', hint: 'Table of refunds and their total; left out when nothing was refunded', sample: () => refundTable([{ method: 'wallet', amount: 5000 }, { method: 'upi', amount: 2500, referenceId: 'UPI123456' }]) },
-    },
-    build(user, order, refunds = [], cancellationReason = '') {
-      if (!user?.email) return null;
-      return {
-        to: [user.email],
-        values: { name: user.name || 'Customer', project: getOrderDisplayName(order), cancelledOn: formatIndiaDateTime(Date.now()), reason: cancellationReason || '' },
-        blocks: { refundTable: refundTable(refunds) },
-      };
-    },
-  },
-};
-
-const LEGACY_VARIABLES = {
-  subject: { label: 'Original subject', hint: 'The subject the action wrote', sample: 'Sample subject' },
-  message: { label: 'Original message', hint: 'The whole mail the action wrote', sample: 'Sample action message' },
-};
-const LEAD_VARIABLES = { name: { label: 'Lead name', sample: 'Sample customer' } };
+// The name a mail reviewed before it was prepared carries (the lead form's popup).
+const REVIEWED_NAME = 'Reviewed in popup';
 const hasSystemTemplate = event => Object.prototype.hasOwnProperty.call(definitions, event);
 
 function variablesFor(event) {
-  if (hasSystemTemplate(event)) return { variables: definitions[event].variables, blocks: definitions[event].blocks };
-  return { variables: { ...LEGACY_VARIABLES, ...(event === 'lead.created' ? LEAD_VARIABLES : {}) }, blocks: {} };
+  return hasSystemTemplate(event) ? { variables: definitions[event].variables, blocks: definitions[event].blocks } : { variables: {}, blocks: {} };
 }
 
 /** What the template editors show per action: variables, blocks, and the kind of built-in. */
@@ -158,10 +66,7 @@ async function systemTemplate(event) {
 const ensureSystemTemplates = application => Promise.all(Object.keys(definitions)
   .filter(event => byKey.get(event)?.application === application).map(systemTemplate));
 
-/**
- * The template a choice means. An id must belong to the action; no id means the action's
- * built-in: its system template, or null for an action still on legacy code-built HTML.
- */
+/** The template a choice means. An id must belong to the action; no id means its system template. */
 async function resolveTemplate(event, templateId) {
   if (!templateId) return systemTemplate(event);
   const template = mongoose.isValidObjectId(templateId) && await EmailTemplate.findOne({ _id: templateId, event }).lean();
@@ -182,11 +87,6 @@ function composeTemplate(template, values, blocks, requiredLinks = []) {
   const text = withRequiredLinks(render(template.text, values, blocks), requiredLinks);
   const mail = compose(text, blocks);
   return { templateName: template.name, subject: render(template.subject, values, {}, { plain: true }), text, html: mail.html, plain: mail.text };
-}
-
-/** A not-yet-migrated action's own mail: its message, made literal for review. */
-function composeLegacy(subject, message, requiredLinks = []) {
-  return { subject, text: withRequiredLinks(escapeMarkup(message), requiredLinks), plain: withRequiredLinks(message, requiredLinks) };
 }
 
 // --- Visual editor (emailDoc.js) -------------------------------------------------------
@@ -230,12 +130,14 @@ function reviewTextFromEditor(event, body, values, blocks) {
   return body.doc ? docToMarkup(body.doc, fieldKeys(reviewFields(event, values, blocks))) : body.text;
 }
 
+/** The action's mail data ({ to, values, blocks, attachments }), or null without a recipient. */
 function buildTemplatedMail(event, ...args) {
+  if (typeof definitions[event]?.build !== 'function') throw new Error(`${event} has no mail builder`);
   return definitions[event].build(...args);
 }
 
 module.exports = {
-  LEGACY_BUILT_IN, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables,
-  systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, composeLegacy, buildTemplatedMail,
+  REVIEWED_NAME, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables,
+  systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, buildTemplatedMail,
   templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor,
 };

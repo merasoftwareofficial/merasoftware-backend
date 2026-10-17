@@ -9,6 +9,7 @@ const {
   upgradeMemberToClient,
 } = require("../../helpers/clientAccount");
 const { executeGuestCascadeDelete } = require("../../helpers/guestCascadeDelete");
+const { sendClientAccountCreatedEmail } = require("../../helpers/emailService");
 
 const convertLeadController = async (req, res) => {
   try {
@@ -125,6 +126,10 @@ const convertLeadController = async (req, res) => {
     lead.convertedToUserId = clientUser._id;
     lead.status = "Won";
     await lead.save();
+
+    // "Client account created" mail: prepared for the admin's Send / Don't Send review and
+    // dropped if this response fails. It never carries the default password.
+    await sendClientAccountCreatedEmail(clientUser);
 
     return res.json({
       message: memberToUpgrade

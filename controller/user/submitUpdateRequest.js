@@ -14,6 +14,7 @@ const {
 } = require('../../config/uploadLimits');
 const { UPLOAD_KIND, getUploadKind } = require('../../helpers/uploadType');
 const { assertProjectAcceptsUpload } = require('../../helpers/projectUploadGate');
+const { measureUpload } = require('../../helpers/uploadTiming');
 
 // Path to the Google Drive credentials file
 let KEY_FILE_PATH;
@@ -41,6 +42,8 @@ const asyncHandler = (fn) => (req, res, next) => {
 };
 
 const submitUpdateRequest = asyncHandler(async (req, res) => {
+  const timing = req.uploadTiming;
+  timing?.mark('controller_entered'); // Auth/access checks and multipart parsing are complete.
   console.log("Request body keys:", Object.keys(req.body));
   console.log("Files received:", req.files ? req.files.length : 'No files');
   
@@ -88,10 +91,10 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
   }
   
   // Validate the update plan exists and belongs to the user
-  const updatePlan = await orderModel.findOne({
+  const updatePlan = await measureUpload(timing, 'order_lookup', () => orderModel.findOne({
     _id: planId,
     userId
-  }).populate('productId');
+  }).populate('productId'));
 
   if (!updatePlan) {
     return res.status(404).json({
@@ -122,7 +125,7 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
     // there is no plan template behind it and no counter to spend. What gates it is the
     // project's own state — the same four conditions ProjectDetails.js uses to disable the
     // button, enforced here too because this route is reachable directly.
-    const refusal = await assertProjectAcceptsUpload(updatePlan);
+    const refusal = await measureUpload(timing, 'project_access_check', () => assertProjectAcceptsUpload(updatePlan));
     if (refusal) {
       return res.status(400).json({ message: refusal, error: true, success: false });
     }
@@ -229,10 +232,11 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
   }
   
   // Initialize Google Drive service
-  const driveService = new GoogleDriveService(KEY_FILE_PATH, FOLDER_NAME);
+  timing?.mark('validation_complete');
+  const driveService = new GoogleDriveService(KEY_FILE_PATH, FOLDER_NAME, timing);
   
   // Get file expiration days from admin settings
-  const adminSettings = await AdminSettings.getSettings();
+  const adminSettings = await measureUpload(timing, 'admin_settings', () => AdminSettings.getSettings());
   const fileExpirationDays = adminSettings.fileExpirationDays;
   
   // Process uploaded files and upload to Google Drive
@@ -337,11 +341,11 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
           ],
         };
       }
-      const reservedOrder = await orderModel.findOneAndUpdate(
+      const reservedOrder = await measureUpload(timing, 'service_allowance_reserve', () => orderModel.findOneAndUpdate(
         reservationFilter,
         { $inc: { serviceAccessUsedInCycle: 1, serviceAccessUsedTotal: 1 } },
         { new: true },
-      ).select('_id');
+      ).select('_id'));
       if (!reservedOrder) throw new Error('Selected service upload limit or availability changed');
       serviceAllowanceReserved = true;
     }
@@ -359,7 +363,7 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
     });
     
     // Save the request
-    await updateRequest.save();
+    await measureUpload(timing, 'request_save', () => updateRequest.save());
     requestPersisted = true;
     
     // Spend the allowance this upload was made against — each kind spends its own, and a
@@ -387,16 +391,16 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
         updateQuery.$set = { currentMonthUpdatesRemaining: newRemaining };
       }
 
-      await orderModel.updateOne(
+      await measureUpload(timing, 'legacy_allowance_update', () => orderModel.updateOne(
         { _id: new ObjectId(planId) },
         updateQuery
-      );
+      ));
     }
 
     // Send email notifications
     console.log("Sending email notifications...");
     try {
-      const populatedRequest = await updateRequestModel.findById(updateRequest._id)
+      const populatedRequest = await measureUpload(timing, 'notification_record_lookup', () => updateRequestModel.findById(updateRequest._id)
         .populate('userId', 'name email')
         .populate({
           path: 'updatePlanId',
@@ -404,25 +408,26 @@ const submitUpdateRequest = asyncHandler(async (req, res) => {
             path: 'productId',
             select: 'serviceName validityPeriod updateCount'
           }
-        });
+        }));
       // Admin emails
       const adminEmails = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
 
-      await sendUpdateRequestNotification(populatedRequest, adminEmails);
+      await measureUpload(timing, 'admin_email_prepare', () => sendUpdateRequestNotification(populatedRequest, adminEmails));
       console.log(`Admin notification emails sent to ${adminEmails.length} admins`);
       
       // Send confirmation to user
-      await sendUserConfirmation(populatedRequest);
+      await measureUpload(timing, 'client_email_prepare', () => sendUserConfirmation(populatedRequest));
       console.log("User confirmation email sent");
       
       // Create in-app notifications for admins
-      await createUpdateRequestNotification(populatedRequest);
+      await measureUpload(timing, 'in_app_notifications', () => createUpdateRequestNotification(populatedRequest));
       console.log("Admin in-app notifications created");
     } catch (emailError) {
       console.error("Error with notification process:", emailError);
       // Continue execution even if notification fails
     }
     
+    timing?.mark('controller_response_ready');
     return res.status(200).json({
       message: "Update request submitted successfully",
       error: false,

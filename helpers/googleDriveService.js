@@ -1,10 +1,12 @@
 const { google } = require('googleapis');
 const { Readable } = require('stream');
+const { measureUpload } = require('./uploadTiming');
 
 class GoogleDriveService {
-  constructor(keyFilePath, folderName) {
+  constructor(keyFilePath, folderName, timing) {
     this.keyFilePath = keyFilePath;
     this.folderName = folderName;
+    this.timing = timing;
     this.driveClient = this.createDriveClient();
   }
 
@@ -23,10 +25,10 @@ class GoogleDriveService {
       console.log(`Looking for folder: ${this.folderName}`);
       
       // Check if folder already exists
-      const response = await this.driveClient.files.list({
+      const response = await measureUpload(this.timing, 'drive_folder_lookup', () => this.driveClient.files.list({
         q: `name='${this.folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
         fields: 'files(id, name)'
-      });
+      }));
       
       console.log(`Found ${response.data.files.length} matching folders`);
       
@@ -43,21 +45,21 @@ class GoogleDriveService {
         mimeType: 'application/vnd.google-apps.folder'
       };
       
-      const newFolder = await this.driveClient.files.create({
+      const newFolder = await measureUpload(this.timing, 'drive_folder_create', () => this.driveClient.files.create({
         resource: fileMetadata,
         fields: 'id'
-      });
+      }));
       
       console.log(`Created folder with ID: ${newFolder.data.id}`);
       
       // Make the folder public so links will work
-      await this.driveClient.permissions.create({
+      await measureUpload(this.timing, 'drive_folder_permission', () => this.driveClient.permissions.create({
         fileId: newFolder.data.id,
         requestBody: {
           role: 'reader',
           type: 'anyone'
         }
-      });
+      }));
       
       console.log(`Set public permissions on folder: ${newFolder.data.id}`);
       
@@ -88,24 +90,24 @@ class GoogleDriveService {
       };
       
       console.log(`Uploading file to Google Drive in folder: ${folderId}`);
-      const response = await this.driveClient.files.create({
+      const response = await measureUpload(this.timing, 'drive_file_upload', () => this.driveClient.files.create({
         resource: fileMetadata,
         media: media,
         fields: 'id,name,webViewLink'
-      });
+      }), { bytes: fileBuffer.length });
       createdFileId = response.data.id;
       
       console.log(`File uploaded with ID: ${response.data.id}`);
       
       // Set public permissions so anyone with the link can view
       console.log(`Setting public permissions for file: ${response.data.id}`);
-      await this.driveClient.permissions.create({
+      await measureUpload(this.timing, 'drive_file_permission', () => this.driveClient.permissions.create({
         fileId: response.data.id,
         requestBody: {
           role: 'reader',
           type: 'anyone'
         }
-      });
+      }));
       
       // For images, create an embedable link
       let embedLink = null;

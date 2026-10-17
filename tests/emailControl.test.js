@@ -56,9 +56,21 @@ before(async () => {
     res.json({ success: true });
   });
   app.post('/action', authToken, async (req, res) => {
-    await queueMail('invoice.project', { reminderInvoice: req.body.reminderInvoice, to: ['client@example.test'], subject: 'Invoice', html: '<p>Original <a href="https://example.test/invoice">invoice</a></p>', attachments: [{ filename: 'invoice.pdf', content: Buffer.from('test-pdf') }] });
+    await queueMail('invoice.project', { reminderInvoice: req.body.reminderInvoice, to: ['client@example.test'], values: { name: 'Client', invoiceNumber: 'INV-7' }, attachments: [{ filename: 'invoice.pdf', content: Buffer.from('test-pdf') }] });
     res.status(req.body.fail ? 400 : 200).json({ success: !req.body.fail });
   });
+  // Any builder by name, with its own arguments: how the action's controller calls it.
+  app.post('/builder/:name', authToken, async (req, res) => {
+    const args = (req.body.args || []).map(arg => (arg?.buffer ? Buffer.from(arg.buffer) : arg));
+    await service[req.params.name](...args);
+    res.json({ success: true });
+  });
+  app.post('/prepare/:event', authToken, async (req, res) => {
+    const args = (req.body.args || []).map(arg => (arg?.buffer ? Buffer.from(arg.buffer) : arg));
+    const result = await service.prepareTemplatedMail(req.params.event, ...args);
+    res.json({ success: !result.suppressed });
+  });
+  app.post('/convert/:leadId', authToken, require('../controller/lead/convertLead'));
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -75,7 +87,8 @@ test('cron and legacy mail builders cannot send or create review drafts', async 
 test('successful action stages a review with preserved recipient, links and attachment', async () => {
   const id = await draft(); const result = await api(`/email-control/drafts/${id}`, admin, null, 'GET');
   assert.equal(result.data.status, 'pending'); assert.deepEqual(result.data.to, ['client@example.test']);
-  assert.match(result.data.text, /https:\/\/example.test\/invoice/);
+  assert.match(result.data.text, /^Hello Client,/); assert.match(result.data.text, /\(INV-7\)/);
+  assert.equal(result.data.subject, 'Project payment summary - INV-7');
   assert.equal(result.data.attachments[0].filename, 'invoice.pdf');
   assert.equal(result.data.attachments[0].content, undefined); assert.equal(calls.length, 0);
 });
@@ -121,11 +134,13 @@ test('failed send retries keep the same idempotency key and content', async () =
   assert.equal(calls.length, 2); assert.equal(calls[0].key, calls[1].key); assert.deepEqual(calls[0].payload, calls[1].payload);
 });
 test('templates are action scoped and default selection is validated', async () => {
-  const template = (await api('/email-control/templates', admin, { event: 'invoice.project', name: 'Friendly', subject: 'Your {{subject}}', text: 'Please review:\n{{message}}' })).data;
+  const template = (await api('/email-control/templates', admin, { event: 'invoice.project', name: 'Friendly', subject: 'Your {{invoiceNumber}}', text: 'Please review:\n{{name}}' })).data;
   assert.equal((await api('/email-control/policies/lead.created', admin, { mode: 'review', defaultTemplate: template._id }, 'PUT')).success, false);
   await api('/email-control/policies/invoice.project', admin, { mode: 'review', defaultTemplate: template._id }, 'PUT');
   const id = await draft(); const record = await EmailDraft.findById(id);
-  assert.equal(record.subject, 'Your Invoice'); assert.match(record.text, /^Please review:/);
+  assert.equal(record.subject, 'Your INV-7'); assert.equal(record.text, 'Please review:\nClient');
+  // The old "original message" details are gone: every action has its own details now.
+  assert.equal((await api('/email-control/templates', admin, { event: 'invoice.project', name: 'Old', subject: '{{subject}}', text: '{{message}}' })).success, false);
 });
 test('expired and malformed decisions cannot send', async () => {
   const id = await draft();
@@ -341,8 +356,8 @@ test('only an admin chooses a template; reviewers preview their edits', async ()
   assert.equal((await api(`/email-control/drafts/${id}/preview`, customer, { templateId: '' })).status, 403);
   assert.equal((await api(`/email-control/drafts/${id}/decision`, customer, { choice: 'send', subject: 'X', text: 'Y', templateId: '' })).status, 403);
   assert.equal((await api(`/email-control/drafts/${id}/preview`, customer, { subject: 'X', text: 'Own edit' })).success, true);
-  const legacy = await api(`/email-control/drafts/${(await draft())}`, admin, null, 'GET');
-  assert.deepEqual(legacy.data.templateOptions.map(row => row.id), ['']);
+  const other = await api(`/email-control/drafts/${(await draft())}`, admin, null, 'GET');
+  assert.deepEqual(other.data.templateOptions.map(row => row.name), ['Standard']);
 });
 
 const waitFor = async check => { for (let i = 0; i < 100 && !(await check()); i += 1) await new Promise(resolve => setTimeout(resolve, 20)); };
@@ -405,7 +420,7 @@ test('escapes keep typed characters and values literal; links inside quotes stay
 test('editor documents round-trip every built-in template and refuse unknown content', async () => {
   const listing = await api('/email-control', admin, null, 'GET');
   const systems = listing.data.templates.filter(row => row.system);
-  assert.deepEqual(systems.map(row => row.event).sort(), ['sendProjectCancellationEmail', 'sendProjectCreatedEmail']);
+  assert.deepEqual(systems.map(row => row.event).sort(), listing.data.events.map(event => event.key).sort());
   for (const row of systems) {
     const entry = listing.data.catalog[row.event];
     const keys = { variables: entry.variables.map(item => item.key), blocks: entry.blocks.map(item => item.key) };
@@ -452,13 +467,103 @@ test('templates and reviews travel as editor documents', async () => {
 });
 
 test('the lead popup sends the reviewed document as final text, never re-templated', async () => {
-  const wrapper = (await api('/email-control/templates', admin, { event: 'lead.created', name: 'Wrapper', subject: 'Wrapped', text: 'WRAP {{message}}' })).data;
+  const standard = await api('/email-control/lead-preview', admin, { name: 'Asha', email: 'asha@example.test' });
+  assert.equal(standard.data.subject, 'Welcome to Mera Software'); assert.match(standard.data.text, /^Hello Asha,/);
+  const wrapper = (await api('/email-control/templates', admin, { event: 'lead.created', name: 'Wrapper', subject: 'Wrapped', text: 'WRAP {{name}}' })).data;
   await api('/email-control/policies/lead.created', admin, { mode: 'review', defaultTemplate: wrapper._id }, 'PUT');
   const preview = await api('/email-control/lead-preview', admin, { name: 'Asha', email: 'asha@example.test' });
-  assert.equal(preview.data.doc.type, 'doc'); assert.match(preview.data.text, /^WRAP /);
+  assert.equal(preview.data.doc.type, 'doc'); assert.equal(preview.data.text, 'WRAP Asha');
   const doc = { type: 'doc', content: [para(txt('Hello '), chip('name'), txt(' **welcome**'))] };
   const result = await api('/lead', admin, { name: 'Asha', phone: '100009', email: 'asha@example.test', emailReview: { choice: 'send', subject: 'Welcome Asha', doc } });
   assert.equal(result.emailStatus, 'sent');
   assert.equal(calls.at(-1).payload.subject, 'Welcome Asha'); assert.equal(calls.at(-1).payload.text, 'Hello Asha **welcome**');
   assert.doesNotMatch(calls.at(-1).payload.html, /WRAP/);
+});
+
+// --- Every action on its own editable template ----------------------------------------------
+const sampleUser = { name: 'Ravi <b>', email: 'ravi@example.test' };
+async function builderDraft(name, args) {
+  const result = await api(`/builder/${name}`, admin, { args });
+  assert.equal(result.emailStatus, 'awaiting-review', name);
+  return EmailDraft.findById(result.emailDraftIds[0]).lean();
+}
+
+test('every action has a Standard template whose sample fills every detail and round-trips', () => {
+  const { events } = require('../helpers/emailCatalog');
+  const { definitions } = require('../helpers/emailDefinitions');
+  const { sampleContext, composeTemplate, validateTemplateVariables } = require('../helpers/emailTemplates');
+  for (const { key } of events) {
+    const definition = definitions[key]; assert.ok(definition, key);
+    validateTemplateVariables(key, definition.subject, definition.text);
+    const { values, blocks } = sampleContext(key);
+    const mail = composeTemplate(definition, values, blocks);
+    assert.doesNotMatch(mail.subject + mail.plain, /\{\{/, key);
+    const keys = { variables: Object.keys(definition.variables), blocks: Object.keys(definition.blocks) };
+    assert.equal(compose(docToMarkup(markupToDoc(definition.text, keys), keys)).html, compose(definition.text).html, key);
+    assert.equal(docToSubject(subjectToDoc(definition.subject, keys), keys), definition.subject, key);
+    for (const detail of [...Object.values(definition.variables), ...Object.values(definition.blocks)]) assert.ok(detail.label, key);
+  }
+});
+
+test('a subject keeps its words when one of its details is empty', () => {
+  assert.equal(render('Payment reminder - Invoice #{{invoiceNumber}}', {}, {}, { plain: true }), 'Payment reminder - Invoice #');
+  assert.equal(render('Hello {{name}},\nNext', {}), 'Next');
+});
+
+test('builders fill each action’s details from its data, escaped, with empty lines dropped', async () => {
+  let record = await builderDraft('sendDeveloperAssignmentEmail', [{ assignedDeveloper: { name: 'Aman', email: 'dev@example.test' }, userId: sampleUser, updatePlanId: { projectSnapshot: { displayName: 'Shop Website' } }, instructions: [{ text: 'Change <logo>' }] }, 'update']);
+  assert.deepEqual(record.to, ['dev@example.test']); assert.match(record.text, /^Hello Aman,/);
+  assert.match(record.text, /\*\*Service:\*\* Shop Website/); assert.match(record.text, /^\{\{instructions\}\}$/m);
+  assert.match(record.html, /<li>Change &lt;logo&gt;<\/li>/); assert.match(record.html, /Ravi &lt;b&gt;/);
+  record = await builderDraft('sendDeveloperAssignmentEmail', [{ assignedDeveloper: { name: 'Aman', email: 'dev@example.test' }, userId: sampleUser, projectSnapshot: { displayName: 'Shop Website' } }, 'project']);
+  assert.match(record.text, /a website project\./); assert.doesNotMatch(record.html, /Client Instructions/);
+  record = await builderDraft('sendPurchaseConfirmationEmail', [{ _id: 'o1', userId: sampleUser, productId: { serviceName: 'SEO Plan', category: 'digital_marketing' }, quantity: 1, price: 22500, originalPrice: 25000, discountAmount: 2500 }, { method: 'Wallet' }]);
+  assert.match(record.text, /\*\*Final Price:\*\* ₹22,500/); assert.match(record.text, /\*\*Discount:\*\* ₹2,500/);
+  assert.match(record.text, /\*\*Category:\*\* digital marketing/); assert.doesNotMatch(record.text, /Installment paid now|Remaining amount/);
+  record = await builderDraft('sendProjectMessageEmail', [sampleUser, { clientName: 'Ravi', projectName: 'Shop', message: 'See [[Preview||example.test/p]]', projectProgress: 40, developerName: 'Aman' }]);
+  assert.equal(record.subject, 'New Message About Your Project: Shop'); assert.match(record.text, /See Preview: https:\/\/example.test\/p/);
+  assert.match(record.html, /<a href="https:\/\/example.test\/p"/); assert.match(record.text, /\*\*Current Progress:\*\* 40% complete/);
+  record = await builderDraft('sendWalletRechargeRejectionEmail', [sampleUser, { transactionId: 'T1', amount: 500, date: '2026-10-17T06:00:00Z' }, '']);
+  assert.equal(record.subject, 'Wallet Recharge Rejected'); assert.match(record.text, /\*\*Amount:\*\* ₹500/); assert.doesNotMatch(record.text, /Reason for rejection/);
+});
+
+test('a customer update request on a client project (no catalogue product) still sends', async () => {
+  await api('/email-control/policies/sendUpdateRequestNotification', admin, { mode: 'auto' }, 'PUT');
+  const result = await api('/builder/sendUpdateRequestNotification', customer, { args: [{ userId: sampleUser, updatePlanId: { projectSnapshot: { displayName: 'Shop Website' } }, files: [{}, {}], instructions: [] }, ['a1@example.test', 'a2@example.test']] });
+  assert.equal(result.emailDraftIds, undefined);
+  await waitFor(() => calls.length === 1);
+  assert.deepEqual(calls[0].payload.to, ['a1@example.test', 'a2@example.test']);
+  assert.match(calls[0].payload.text, /Plan: Shop Website/); assert.match(calls[0].payload.text, /2 file\(s\) uploaded/);
+  assert.match(calls[0].payload.text, /No instructions provided/);
+});
+
+test('payment reminder fills the message, keeps the PDF and the reminder counter link', async () => {
+  const invoiceId = new mongoose.Types.ObjectId();
+  const result = await api('/prepare/invoice.reminder', admin, { args: [{ _id: String(invoiceId), userId: sampleUser, invoiceNumber: 'INV-9', amount: 3000, dueDate: '2026-10-25' }, 'Please pay **soon**', { buffer: [1, 2, 3] }] });
+  const record = await EmailDraft.findById(result.emailDraftIds[0]).lean();
+  assert.equal(record.subject, 'Payment reminder - Invoice #INV-9');
+  assert.match(record.html, /Please pay \*\*soon\*\*/); assert.match(record.text, /\*\*Amount Due:\*\* ₹3,000/);
+  assert.equal(String(record.reminderInvoice), String(invoiceId));
+  assert.equal(record.attachments[0].filename, 'Invoice-INV-9.pdf'); assert.equal(record.attachments[0].content, Buffer.from([1, 2, 3]).toString('base64'));
+});
+
+test('converting a lead prepares a "Client account created" review without the password', async () => {
+  process.env.FORNTEND_URL = 'https://portal.example.test/';
+  const lead = await api('/lead', admin, { name: 'Neha', phone: '100020', email: 'neha@example.test' });
+  const result = await api(`/convert/${lead.data._id}`, admin, {});
+  assert.equal(result.success, true); assert.equal(result.emailStatus, 'awaiting-review');
+  const record = await EmailDraft.findById(result.emailDraftIds[0]).lean();
+  assert.equal(record.event, 'sendClientAccountCreatedEmail'); assert.deepEqual(record.to, ['neha@example.test']);
+  assert.match(record.text, /^Hello Neha,/); assert.match(record.text, /You have been added as a client/);
+  assert.match(record.text, /\*\*Login here:\*\* https:\/\/portal.example.test\/login/);
+  assert.doesNotMatch(`${record.subject}\n${record.text}`, /convert|1234/i);
+  assert.equal((await api(`/convert/${lead.data._id}`, admin, {})).status, 409);
+  assert.equal(await EmailDraft.countDocuments({ event: 'sendClientAccountCreatedEmail' }), 1);
+});
+
+test('website subscription mail fills its topics and required link from the request', async () => {
+  const result = await api('/email-control/website-drafts', admin, { event: 'website.subscription.confirm', to: ['reader@example.test'], subject: 'Confirm', text: 'Confirm at https://example.test/confirm', requiredLinks: ['https://example.test/confirm?t=1'], values: { topics: 'SEO and offers' } });
+  const record = await EmailDraft.findById(result.data.draftId).lean();
+  assert.equal(record.subject, 'Confirm your Mera Software updates'); assert.match(record.text, /\*\*Topics:\*\* SEO and offers/);
+  assert.match(record.html, /href="https:\/\/example.test\/confirm\?t=1"/);
 });

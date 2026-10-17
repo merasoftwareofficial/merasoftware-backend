@@ -33,8 +33,9 @@ function placeholders(template) {
 
 /**
  * Fills {{variables}}. Values are inserted literally (escaped for markup; as is with `plain`,
- * which subjects use). A block variable keeps its token for compose(); a line whose every
- * placeholder is empty is removed, so optional details need no logic.
+ * which subjects use). A block variable keeps its token for compose(); a message line whose
+ * every placeholder is empty is removed, so optional details need no logic. A subject is one
+ * line and is never removed: its empty details are simply left out.
  */
 function render(template, values = {}, blocks = {}, { plain = false } = {}) {
   const text = asObject(values); const sections = asObject(blocks);
@@ -50,7 +51,7 @@ function render(template, values = {}, blocks = {}, { plain = false } = {}) {
       if (value) filled += 1;
       return plain ? value : escapeMarkup(value);
     });
-    return found && !filled ? [] : [output];
+    return found && !filled && !plain ? [] : [output];
   });
   return restore(lines.join('\n'), !plain);
 }
@@ -144,4 +145,14 @@ function tableBlock(title, rows, totalRow) {
   };
 }
 
-module.exports = { render, compose, parseBlocks, layout, placeholders, tableBlock, withRequiredLinks, escapeHtml, escapeMarkup, protect, restore, URL_PATTERN, PLACEHOLDER, asObject, has };
+/** A section for a list the action collects (instructions); every item is escaped here. */
+function listBlock(title, items) {
+  if (!items.length) return { html: '', text: '' };
+  return {
+    html: `<h2 style="margin:22px 0 10px;font-size:17px;color:${COLORS.teal}">${escapeHtml(title)}</h2>`
+      + `<ul style="margin:0 0 14px;padding-left:22px">${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`,
+    text: [title, ...items.map(item => `- ${item}`)].join('\n'),
+  };
+}
+
+module.exports = { render, compose, parseBlocks, layout, placeholders, tableBlock, listBlock, withRequiredLinks, escapeHtml, escapeMarkup, protect, restore, URL_PATTERN, PLACEHOLDER, asObject, has };

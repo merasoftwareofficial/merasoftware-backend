@@ -1,4 +1,4 @@
-const { queueMail } = require("../../helpers/emailController");
+const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { generateInvoiceDocumentPdf } = require("../../helpers/generateInvoiceDocumentPdf");
 const { loadInvoiceDocument } = require("./invoiceDocumentController");
 
@@ -22,13 +22,8 @@ const resendProjectFinalInvoice = async (req, res) => {
     const { invoice, transactions } = await loadInvoiceDocument(req.params.invoiceId, req);
     if (!invoice.userId?.email) throw new Error("Customer email is not available");
     const pdf = await generateInvoiceDocumentPdf({ invoice, order: invoice.orderId, customer: invoice.userId, transactions });
-    const result = await queueMail("invoice.project", {
-      from: `${process.env.FROM_NAME || "Mera Software"} <${process.env.FROM_EMAIL}>`,
-      to: [invoice.userId.email],
-      subject: `Project payment summary - ${invoice.invoiceNumber}`,
-      html: `<p>Hello ${invoice.userId.name || "Customer"},</p><p>Your current project payment summary is attached.</p>`,
-      attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, content: pdf }],
-    });
+    // Wording: the "Project payment summary" template (helpers/emailDefinitions.js).
+    const result = await prepareTemplatedMail("invoice.project", invoice, pdf);
     if (result.suppressed) throw new Error("Email is disabled for this action");
     if (result.error) throw new Error("Final invoice email could not be sent");
     return res.status(200).json({ message: "Final invoice email ready for review", success: true, error: false });
