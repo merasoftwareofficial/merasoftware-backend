@@ -2,13 +2,26 @@
 
 ## Current browser contract
 
-Portal and external upload clients use staged, sequential file uploads. The
-existing form, confirmation screen and visual theme remain. The shared Modal
+Portal and external upload clients negotiate a mode before submission writes.
+The existing form, confirmation screen and visual theme remain. The shared Modal
 renders through a React portal into document.body so a transformed page ancestor
 cannot clip or misplace its fixed backdrop. Its scroll body uses a dynamic
 viewport height cap.
 
-UploadProvider owns the browser operation above page navigation:
+UploadProvider owns the browser operation above page navigation. First it reads
+GET on the session root with no-store. The authenticated, read-only response is
+{success:true,data:{protocol:1,mode:'legacy'|'staged'}}. Missing/invalid staging
+configuration selects legacy; an older backend's 404 also selects legacy.
+Other errors stop negotiation before any files are sent. The selected mode is
+pinned to the attempt, including all retries; a lost staged response never
+switches to legacy.
+
+Legacy mode uses the existing keyed multipart submit and progress endpoints.
+It shows actual total transfer %, then processing status and confirmed file
+counts. Completion waits for the existing server response/status. It cannot
+provide true per-file byte percentages or receipt-before-Drive completion.
+
+In staged mode:
 1. Preparing files: calculate each selected file's SHA-256 manifest.
 2. Connecting: POST the immutable manifest with a stable uploadId.
 3. Upload file 1 of N through N of N: one multipart XHR per file, with actual
@@ -23,13 +36,18 @@ was sent; a brief confirming stage still verifies receipt. No fabricated stages,
 time estimates or simulated percentages are used. Minimize and portal navigation
 retain the panel. Keep the browser open until Upload finished. Browser closure,
 reload continuation, mobile suspension and OS status-bar uploads are excluded.
-Retry retains the same identity and sends only files not acknowledged by status.
+Staged retry retains the same identity and sends only files not acknowledged by status.
+Legacy retry retains its original keyed submission identity.
 Account changes hide the previous account's panel and suppress its callback;
-navigation suppresses callbacks for the old route.
+navigation suppresses callbacks for the old route. Expanded progress reuses the
+shared Modal with opt-in centered placement on desktop/mobile. Minimize moves
+status to the corner and releases the dialog scroll lock. Escape/X minimize;
+backdrop clicks do not discard uploads. Other modals keep their default layout.
 
 ## Endpoints and ownership
 
 Portal (normal authenticated cookie):
+- GET /api/upload-sessions (capability negotiation, no reservation/write)
 - POST /api/upload-sessions?uploadId=UUID
 - GET /api/upload-sessions/:uploadId
 - POST /api/upload-sessions/:uploadId/files/:fileId
@@ -87,13 +105,17 @@ already deployed clients; their existing concurrency and cleanup behavior remain
 2. Set ENABLE_UPLOAD_WORKER=true and UPLOAD_STAGING_MAX_BYTES to an explicit
    positive integer byte capacity chosen from available database storage.
    Neither is guessed or set by this implementation. Missing configuration
-   rejects new staged sessions with 503 before receiving file bytes.
+   makes negotiation select legacy. Direct staged creation still returns 503.
+   Configuration is an opt-in, not a live Drive/worker health probe; verify
+   actual delivery before enabling staging in production.
 3. The API starts the worker after DB connection. Use an always-on API instance,
    or run node scripts/uploadWorker.js as an always-on background service with
    the same database, staging configuration and existing Drive credentials.
    A sleeping host cannot process jobs until it resumes. Multiple instances
    share Mongo leases and the storage budget; Drive slot limits are per process.
-4. Deploy/configure backend and verify worker readiness before the frontend.
+4. Deploy the backend correction before the frontend correction. Existing uploads
+   remain available without staging settings. Before enabling staged mode, verify
+   real worker readiness and Drive access.
    Check a test receipt followed by delivery=complete and staging budget release.
    Inspect [upload-worker] logs for retry/needs_review. Monitor budget, database
    capacity and jobs requiring review.
@@ -113,6 +135,8 @@ Tests use an isolated Mongo replica set, fake Drive responses and controlled HTT
 endpoints. Browser tests use real throttled XHR and actual existing portal CSS,
 including the actual upload modal beneath the tall transformed page ancestor.
 Coverage includes desktop/phone/landscape popup bounds, real file percentages,
-weighted totals, navigation/minimize, lost acknowledgements, retry, receipt
+weighted totals, exact centered expanded placement/corner minimize, disabled or
+invalid settings, older backends, pinned-mode retries, offline/reconnect,
+failed negotiation, lost session/file acknowledgements, receipt
 replay, external revocation and worker restart. The browser harness bundles only
 its focused components and reads existing CSS; it does not run npm run build.

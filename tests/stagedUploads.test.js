@@ -160,6 +160,7 @@ test('external staged HTTP receipt spends a single-use link once and respects re
   issueExternalUploadSession({res:{cookie(name,value){cookie=name+'='+value;}},linkId,customerId:f.ownerId,orderId:f.orderId,stage:SESSION_STAGE.ACCESS,authMode:AUTH_MODE.LINK});
   const app = express();
   app.use(cookieParser(),express.json());
+  app.get('/uploads',external.requireAccess,controller.capabilities);
   app.post('/uploads',external.requireAccess,external.reserveSingleUse,controller.begin);
   app.get('/uploads/:uploadId',external.requireAccess,controller.status);
   app.post('/uploads/:uploadId/files/:fileId',external.requireAccess,controller.authorizeFile,(req,res,next)=>{parsed++;next();},controller.parseFile,controller.receive);
@@ -168,6 +169,11 @@ test('external staged HTTP receipt spends a single-use link once and respects re
   await new Promise(resolve=>server.once('listening',resolve));
   const base = 'http://127.0.0.1:'+server.address().port+'/uploads';
   try {
+    const negotiate = await fetch(base,{headers:{cookie}});
+    assert.equal(negotiate.status,200);
+    assert.equal((await negotiate.json()).data.mode,'staged');
+    assert.equal((await Link.findById(linkId)).useCount,0);
+    assert.equal((await fetch(base)).status,401);
     const start = await fetch(base+'?uploadId='+f.uploadId,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({...f.manifest,planId:String(new mongoose.Types.ObjectId())})});
     assert.equal(start.status,200,JSON.stringify(await start.json()));
     const send = async fileId => {
@@ -190,6 +196,7 @@ test('external staged HTTP receipt spends a single-use link once and respects re
     assert.equal((await Request.findById(result.data.requestId)).deliveryStatus,'queued');
     assert.equal((await fetch(base+'/'+f.uploadId,{headers:{cookie}})).status,200);
     await Link.updateOne({_id:linkId},{$set:{status:'revoked'}});
+    assert.equal((await fetch(base,{headers:{cookie}})).status,401);
     const beforeParsed = parsed;
     assert.equal((await send(f.manifest.files[0].id)).status,401);
     assert.equal(parsed,beforeParsed);
@@ -221,4 +228,71 @@ test('Drive retry reuses the preallocated ID only after hash and size match', as
   drive.driveClient.permissions.create = async ()=>{throw new Error('Permission unavailable');};
   await assert.rejects(drive.uploadFileNow('file.txt',Buffer.from('abc'),'text/plain','folder',options),/Permission unavailable/);
   assert.equal(deleted,0,'Keep the tracked ID so worker recovery cannot create a duplicate');
+});
+
+test('capability negotiation is read-only and retains legacy mode for missing or invalid staging settings', async () => {
+  const controller = require('../controller/user/stagedUploadController');
+  const saved = {ENABLE_UPLOAD_WORKER:process.env.ENABLE_UPLOAD_WORKER,UPLOAD_STAGING_MAX_BYTES:process.env.UPLOAD_STAGING_MAX_BYTES};
+  const count = await Submission.countDocuments();
+  const inspect = async () => {
+    const res = {set(){return this;},json(value){this.body=value;return this;},status(value){this.code=value;return this;}};
+    await controller.capabilities({},res);
+    assert.equal(res.body.success,true);
+    assert.equal(res.body.data.protocol,1);
+    return res.body.data.mode;
+  };
+  try {
+    for (const capacity of [undefined,'','0','-1','invalid','1.5']) {
+      if (capacity === undefined) delete process.env.UPLOAD_STAGING_MAX_BYTES; else process.env.UPLOAD_STAGING_MAX_BYTES=capacity;
+      assert.equal(await inspect(),'legacy');
+    }
+    process.env.UPLOAD_STAGING_MAX_BYTES='67108864';
+    delete process.env.ENABLE_UPLOAD_WORKER;
+    assert.equal(await inspect(),'legacy');
+    process.env.ENABLE_UPLOAD_WORKER='true';
+    assert.equal(await inspect(),'staged');
+    assert.equal(await Submission.countDocuments(),count,'Negotiation cannot reserve storage or create a submission');
+  } finally {
+    for (const [key,value] of Object.entries(saved)) {if(value===undefined) delete process.env[key]; else process.env[key]=value;}
+  }
+});
+
+test('legacy HTTP upload still succeeds and replays once when all staging settings are absent', async () => {
+  const express = require('express');
+  const upload = require('../middleware/uploadFiles');
+  const controller = require('../controller/user/submitUpdateRequest');
+  const Drive = require('../helpers/googleDriveService');
+  const saved = {ENABLE_UPLOAD_WORKER:process.env.ENABLE_UPLOAD_WORKER,UPLOAD_STAGING_MAX_BYTES:process.env.UPLOAD_STAGING_MAX_BYTES};
+  const originals = {createDriveClient:Drive.prototype.createDriveClient,createFolder:Drive.prototype.createFolder,uploadFile:Drive.prototype.uploadFile};
+  let writes = 0;
+  Drive.prototype.createDriveClient = () => ({});
+  Drive.prototype.createFolder = async () => 'test-folder';
+  Drive.prototype.uploadFile = async () => ({id:'legacy-file-'+(++writes),link:'https://example.test/file'});
+  delete process.env.ENABLE_UPLOAD_WORKER;
+  delete process.env.UPLOAD_STAGING_MAX_BYTES;
+  const f = await fixture(1);
+  const app = express();
+  app.post('/submit',(req,res,next)=>{req.userId=String(f.ownerId);next();},upload.any(),controller);
+  const server = app.listen(0,'127.0.0.1');
+  await new Promise(resolve=>server.once('listening',resolve));
+  const send = async () => {
+    const form = new FormData();
+    form.append('instructions','[]');form.append('planId',String(f.orderId));form.append('serviceOrderId',String(f.orderId));
+    form.append('files',new Blob([Buffer.from('file-0')],{type:'text/plain'}),'test.txt');
+    const response = await fetch('http://127.0.0.1:'+server.address().port+'/submit?uploadId='+f.uploadId,{method:'POST',body:form});
+    return {status:response.status,body:await response.json()};
+  };
+  try {
+    const first = await send();
+    assert.equal(first.status,200,JSON.stringify(first.body));
+    assert.equal(first.body.success,true);
+    assert.deepEqual(await send(),first);
+    assert.equal(writes,1);
+    assert.equal((await Order.findById(f.orderId)).serviceAccessUsedInCycle,1);
+    assert.equal((await Request.findById(first.body.data.requestId)).deliveryStatus,'ready');
+  } finally {
+    Object.assign(Drive.prototype,originals);
+    for (const [key,value] of Object.entries(saved)) {if(value===undefined) delete process.env[key]; else process.env[key]=value;}
+    server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
+  }
 });

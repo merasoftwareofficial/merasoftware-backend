@@ -9,6 +9,11 @@ const wrap = handler => async (req, res) => {
   }
 };
 module.exports = {
+  capabilities: wrap(async (req, res) => {
+    let mode = 'legacy';
+    try { staged.configuration(); mode = 'staged'; } catch { /* Keep existing uploads available until staging is configured. */ }
+    return res.json({ success: true, data: { protocol: 1, mode } });
+  }),
   retryDelivery: wrap(async (req, res) => {
     if (req.userRole !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
     staged.configuration();
