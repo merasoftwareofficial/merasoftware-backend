@@ -7,6 +7,7 @@ const Link = require('../models/externalUploadLinkModel');
 const { assertProjectAcceptsUpload } = require('./projectUploadGate');
 const { UPLOAD_KIND, getUploadKind } = require('./uploadType');
 const { measureUpload } = require('./uploadTiming');
+const { assertUploadOrder } = require('./uploadOrderPolicy');
 
 const failure = (message, status = 409) => Object.assign(new Error(message), { status });
 function uploadIdentity(req) {
@@ -74,7 +75,7 @@ async function failSubmission(req, needsReview = false) {
 
 // Files stay on Drive; all related Mongo writes commit together. Never retry
 // an uncertain file creation automatically, and never delete possibly committed files.
-async function commitSubmission(req, { instructions, files }) {
+async function commitSubmission(req, { instructions, files, receipt = false }) {
   const attempt = req.uploadAttempt;
   const requestId = new mongoose.Types.ObjectId();
   let response;
@@ -85,6 +86,7 @@ async function commitSubmission(req, { instructions, files }) {
         throw failure('This order no longer accepts uploads', 400);
       }
       const kind = getUploadKind(current);
+      await assertUploadOrder(current, { fileCount: files.length, serviceOrderId: req.body.serviceOrderId });
       let remaining = null;
       if (kind === UPLOAD_KIND.PROJECT) {
         const refusal = await assertProjectAcceptsUpload(current);
@@ -118,7 +120,7 @@ async function commitSubmission(req, { instructions, files }) {
       }
       await measureUpload(req.uploadTiming, 'request_save', () => UpdateRequest.create([{
         _id: requestId, userId: req.userId, updatePlanId: current._id,
-        instructions, files, status: 'pending',
+        instructions, files, status: 'pending', deliveryStatus: receipt ? 'queued' : 'ready',
       }], { session }));
       if (req.externalUpload) {
         const { link, reservationId } = req.externalUpload;
@@ -134,10 +136,11 @@ async function commitSubmission(req, { instructions, files }) {
       response = { message: 'Update request submitted successfully', error: false, success: true,
         data: { requestId: String(requestId), updatesRemaining: remaining } };
       const finalized = await Submission.updateOne(attempt.filter, {
-        $set: { status: 'succeeded', phase: 'complete', completedFiles: files.length, result: response },
+        $set: { status: 'succeeded', phase: 'complete', completedFiles: files.length, result: response,
+          ...(receipt ? { delivery: 'queued', requestId, nextAttemptAt: new Date() } : {}) },
       }, { session });
       if (finalized.modifiedCount !== 1) throw failure('Upload submission changed before completion');
-    });
+    }, { writeConcern: { w: 'majority' } });
     return { response, requestId };
   } catch (error) {
     if (error.hasErrorLabel?.('UnknownTransactionCommitResult')) {

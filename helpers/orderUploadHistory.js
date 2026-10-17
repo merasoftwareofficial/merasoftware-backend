@@ -108,7 +108,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
 
   const requests = await updateRequestModel
     .find(query)
-    .select("_id userId updatePlanId status createdAt instructions files")
+    .select("_id userId updatePlanId status deliveryStatus createdAt instructions files")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -134,6 +134,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
       id: String(request._id),
       orderId: String(request.updatePlanId || ""),
       status: request.status,
+      deliveryStatus: request.deliveryStatus || 'ready',
       createdAt: request.createdAt,
       notes: (request.instructions || []).map((note) => ({
         text: note?.text || "",

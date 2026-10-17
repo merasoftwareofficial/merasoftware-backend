@@ -1,97 +1,118 @@
 # Upload request flow
 
-Implemented for the portal and external upload surfaces. No background jobs,
-service workers or mobile status-bar uploads. The browser must remain open.
+## Current browser contract
 
-## Concurrency and storage
+Portal and external upload clients use staged, sequential file uploads. The
+existing form, confirmation screen and visual theme remain. The shared Modal
+renders through a React portal into document.body so a transformed page ancestor
+cannot clip or misplace its fixed backdrop. Its scroll body uses a dynamic
+viewport height cap.
 
-`helpers/uploadConcurrency.js` runs at most three files per submission and six
-Drive upload/folder/cleanup pipelines per Node process. Multiple replicas each
-have their own six-slot limit. Results preserve selection order. On failure,
-workers stop taking new files, all in-flight work settles, and successfully
-created files are cleaned up before reporting failure. An unconfirmed cleanup
-marks a keyed submission `needs_review`; the UI does not offer an unsafe retry.
+UploadProvider owns the browser operation above page navigation:
+1. Preparing files: calculate each selected file's SHA-256 manifest.
+2. Connecting: POST the immutable manifest with a stable uploadId.
+3. Upload file 1 of N through N of N: one multipart XHR per file, with actual
+   upload byte events, current-file %, individual file rows and a byte-weighted
+   total %. A file is marked Uploaded only after durable acknowledgement.
+4. Confirming upload: POST complete after every file is received.
+5. Upload finished: the receipt transaction committed. Google Drive processing
+   continues on the server and is not included in browser upload progress.
 
-`GoogleDriveService` reuses SDK clients and folder lookup promises for five
-minutes, bounded to 16 clients/32 folders and keyed by credential path/folder
-name. Failed lookups are evicted. A Drive 404 invalidates the folder cache for
-the next request. File creation is not blindly retried. Deleting an already
-missing file is successful cleanup.
+XHR progress includes multipart framing. A displayed 100% means the request body
+was sent; a brief confirming stage still verifies receipt. No fabricated stages,
+time estimates or simulated percentages are used. Minimize and portal navigation
+retain the panel. Keep the browser open until Upload finished. Browser closure,
+reload continuation, mobile suspension and OS status-bar uploads are excluded.
+Retry retains the same identity and sends only files not acknowledged by status.
+Account changes hide the previous account's panel and suppress its callback;
+navigation suppresses callbacks for the old route.
 
-Per-file sharing requests are deliberately retained. Live folder inheritance
-and equivalent access have not been verified because local Drive credentials
-are unavailable. Do not remove these calls based only on a folder name/cache.
-The helper is shared with client documents, proposals and follow-up attachments.
+## Endpoints and ownership
 
-## Submission identity and consistency
+Portal (normal authenticated cookie):
+- POST /api/upload-sessions?uploadId=UUID
+- GET /api/upload-sessions/:uploadId
+- POST /api/upload-sessions/:uploadId/files/:fileId
+- POST /api/upload-sessions/:uploadId/complete
 
-New clients attach a stable random `uploadId` query parameter. The server hashes
-the instructions/order/file metadata and file bytes. An owner/scope/id unique
-index in `UploadSubmission` allows one active attempt. A changed payload with
-the same id gets 409. Same-data retries replay a successful result or return 202
-while the original request is processing. Known, cleaned failures can be retried
-using the same id and a new fenced attempt token.
+External scoped cookie: the same operations under /api/external-upload/uploads.
+State-changing external requests retain the allowed-origin and live link/consent
+checks. File identity and ownership are checked before multipart buffering. The
+server derives the external order/customer from the scoped session. A consumed
+single-use link may replay/read its own successful submission while its scoped
+cookie remains valid; revocation is still enforced.
 
-The final Mongo transaction saves the update request, spends the service/legacy
-allowance, consumes the external link, and saves the successful replay result
-together. Project uploads spend no allowance. A transaction touches the project
-order's `uploadRevision` to conflict with concurrent order changes. Service
-allowance is rechecked inside the transaction. Unknown commit results never
-trigger automatic deletion of possibly committed Drive files.
+The manifest fixes filename, type, size and content hash; changed data under the
+same identity is rejected. Shared file filtering and the 5 MiB/file cap remain.
+Order access, file limits and allowance policy share uploadOrderPolicy.js.
+Receipt acceptance rechecks policy and commits the UpdateRequest, allowance,
+single-use link consumption, replay result and durable delivery job together in
+one Mongo transaction. Projects spend no service allowance.
 
-These records track active HTTP requests; no process resumes work from them.
-After five minutes without progress, the status response reports `needs_review`.
-No automatic takeover/reupload occurs after a process crash. Successful records
-are retained for replay and are not automatically expired.
+## Durable staging and delivery
 
-Older clients without an id retain the prior response/allowance path and do not
-gain the new retry guarantee. Deploy the backend before the new frontend.
+UploadSubmission tracks receipt identity, immutable manifest and delivery state.
+StagedUploadFile stores each file's bytes in a separate document. An explicit
+UploadStorageBudget reserves the entire batch before accepting bytes.
+Incomplete sessions expire after 25 minutes; cleanup releases their bytes and
+matching external reservation. There is no TTL deletion of accepted payloads.
 
-## Progress and minimize
+The receipt stores deliveryStatus=queued and metadata without Drive links.
+Upload history says files will be available shortly. uploadWorker.js claims
+durable jobs with a two-minute lease, refreshed every ten seconds. It processes
+up to three files per job and shares the existing six-slot per-Node Drive gate.
+Each file gets a preallocated Drive ID persisted before creation. Uncertain
+creation retries reuse that ID; a 409 is accepted only when the remote hash and
+size match. Completed per-file results survive worker retries.
 
-`UploadProvider` owns the active browser upload above the router's page outlet.
-`XMLHttpRequest.upload` provides actual byte-transfer percentages. After those
-bytes are sent, the panel shows acknowledged Drive file counts and then final
-save status. It never treats 100% transfer as completed submission.
+The final fenced Mongo transaction publishes Drive links, sets deliveryStatus
+to ready, deletes staged bytes and releases the byte budget together. After
+eight failed attempts the job becomes needs_review; bytes and tracked IDs remain
+available for recovery. Admin-only POST
+/api/admin/upload-submissions/:submissionId/retry requeues such a job.
+Removed parent records trigger cleanup; failed remote deletion retains its
+references. Worker activity sends no email. Existing request-context notification
+preparation runs at receipt acceptance and is skipped on replay.
 
-Authenticated `GET /api/upload-progress/:uploadId` is owner-scoped. External
-`GET /api/external-upload/progress/:uploadId` requires the live scoped cookie,
-client consent/account eligibility and the same link. A used single-use link
-can read/replay its successful submission only; revoked/replaced links remain
-rejected. New keyed success keeps the scoped cookie for its original 15-minute
-lifetime so a lost response can be recovered. It grants no new submission after
-the link is consumed.
+GoogleDriveService retains its five-minute bounded client/folder caches and
+per-file sharing calls. Live folder permission inheritance has not been verified.
+The older multipart endpoint and keyed synchronous flow remain compatible for
+already deployed clients; their existing concurrency and cleanup behavior remain.
 
-Minimize keeps a compact status panel; portal navigation does not own the
-request. Reload, browser closure and mobile suspension are not supported
-continuation paths. A pending upload prompts before normal reload/closure.
-There is one active upload per browser app instance. File bytes live in memory
-until success/dismissal. The panel and completion callback are hidden from a
-different signed-in portal account. Page-specific completion callbacks only run
-on the original route, preventing stale page refreshes after navigation.
-Network errors read status before offering
-retry; unknown/review states expose a status check instead of a new submission.
+## Rollout requirements
 
-## Verification and deployment
+1. Use a Mongo replica set/Atlas deployment supporting transactions, as required
+   by the existing keyed flow. Allow sufficient data and index capacity for the
+   staging budget plus existing data and operational headroom.
+2. Set ENABLE_UPLOAD_WORKER=true and UPLOAD_STAGING_MAX_BYTES to an explicit
+   positive integer byte capacity chosen from available database storage.
+   Neither is guessed or set by this implementation. Missing configuration
+   rejects new staged sessions with 503 before receiving file bytes.
+3. The API starts the worker after DB connection. Use an always-on API instance,
+   or run node scripts/uploadWorker.js as an always-on background service with
+   the same database, staging configuration and existing Drive credentials.
+   A sleeping host cannot process jobs until it resumes. Multiple instances
+   share Mongo leases and the storage budget; Drive slot limits are per process.
+4. Deploy/configure backend and verify worker readiness before the frontend.
+   Check a test receipt followed by delivery=complete and staging budget release.
+   Inspect [upload-worker] logs for retry/needs_review. Monitor budget, database
+   capacity and jobs requiring review.
+5. No mobile/browser permission is needed. Existing backend Drive credentials
+   are still required. Production host availability, database free capacity and
+   real Drive access have not been verified locally.
 
-- `node --test tests/uploadFlow.test.js tests/uploadTiming.test.js tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js`
-- In the frontend: `node tests/upload-flow-browser.cjs` and `npm run build`.
-- Transaction tests use an isolated local Mongo replica set; browser checks use
-  controlled HTTP endpoints and real XHR, without client data or external writes.
-- Production Mongo must support transactions (replica set, such as Atlas).
-  There is no non-atomic fallback for keyed uploads. The submission unique index
-  must be created successfully; Mongoose initialization checks it on first claim.
-- Backend-first rollout, then frontend. Keep the existing timing flags enabled
-  while collecting new evidence. The prior samples were 4.65 seconds for one
-  file and 18.71 seconds for ten files. Repeat the same authorized uploads several
-  times after deployment; concurrency tests are not a live speed claim.
-- No hosting/database region changes were made: the 230–250 ms query samples
-  warrant checking actual regions before changing database architecture.
+## Focused verification
 
-Backups: `work106-upload-flow/` in each portal repository. Keep backups and
-unrelated existing email-editor/template changes out of upload commits.
+Backend:
+node --test tests/stagedUploads.test.js tests/uploadFlow.test.js tests/uploadTiming.test.js tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js
 
-Local verification: 30 backend tests and four browser scenarios passed. The
-browser scenarios cover byte/save progress with minimize and navigation, lost
-responses, same-identity retry and account changes. No live before/after upload
-comparison or live sharing-inheritance experiment has been performed.
+Frontend:
+node tests/upload-flow-browser.cjs
+
+Tests use an isolated Mongo replica set, fake Drive responses and controlled HTTP
+endpoints. Browser tests use real throttled XHR and actual existing portal CSS,
+including the actual upload modal beneath the tall transformed page ancestor.
+Coverage includes desktop/phone/landscape popup bounds, real file percentages,
+weighted totals, navigation/minimize, lost acknowledgements, retry, receipt
+replay, external revocation and worker restart. The browser harness bundles only
+its focused components and reads existing CSS; it does not run npm run build.

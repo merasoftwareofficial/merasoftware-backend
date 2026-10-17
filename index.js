@@ -108,6 +108,7 @@ async function startServer() {
     await connnectDB();
     console.log("Connected to DB");
     require('./helpers/portfolioWorkerService').startPortfolioWorkerService();
+    require('./helpers/uploadWorker').startUploadWorker();
     server.listen(PORT, () => {
       console.log("Server is running " + PORT);
     });

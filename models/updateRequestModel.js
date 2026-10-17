@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const updateRequestSchema = new mongoose.Schema({
+  deliveryStatus: { type: String, enum: ['queued', 'ready', 'needs_review'], default: 'ready' },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'user',

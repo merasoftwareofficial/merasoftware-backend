@@ -8,12 +8,6 @@ const userModel = require('../../models/userModel');
 const mongoose = require('mongoose');
 const path = require('path');
 const { ObjectId } = mongoose.Types;
-const {
-  MAX_LEGACY_UPDATE_FILES_PER_UPLOAD,
-  MAX_PROJECT_FILES_PER_UPLOAD,
-} = require('../../config/uploadLimits');
-const { UPLOAD_KIND, getUploadKind } = require('../../helpers/uploadType');
-const { assertProjectAcceptsUpload } = require('../../helpers/projectUploadGate');
 const { measureUpload } = require('../../helpers/uploadTiming');
 const { uploadBatch } = require('../../helpers/uploadConcurrency');
 const submission = require('../../helpers/uploadSubmission');
@@ -107,134 +101,10 @@ const submitCore = asyncHandler(async (req, res) => {
       success: false
     });
   }
-  // Which of the three kinds of upload is this? Asked once, from the one place that
-  // answers it (helpers/uploadType.js), because the rest of this controller then reads
-  // a DIFFERENT source of allowance per kind — and reading the wrong one is precisely
-  // the bug this replaces: a project has no catalogue product, so the legacy branch's
-  // `updatePlan.productId.updateCount` threw "Cannot read properties of null".
-  const uploadKind = getUploadKind(updatePlan);
-  const isServiceUpload = uploadKind === UPLOAD_KIND.SERVICE;
-  const isProjectUpload = uploadKind === UPLOAD_KIND.PROJECT;
+  const { isServiceUpload, isProjectUpload, isLegacyUpload } = await require('../../helpers/uploadOrderPolicy').assertUploadOrder(updatePlan, {
+    fileCount: (req.files || []).length, serviceOrderId: req.body.serviceOrderId,
+  });
 
-  if (isServiceUpload) {
-    // Allowance comes from the snapshot frozen on the order, never the catalogue.
-    const snapshot = updatePlan.servicePlanSnapshot || {};
-    if (String(req.body.serviceOrderId || '') !== String(updatePlan._id)) throw new Error('Selected service is required');
-    if (snapshot.capability !== 'upload_data' && snapshot.serviceBehavior !== 'portal_access_control') throw new Error('This service does not allow data upload');
-    if (updatePlan.servicePlanStatus !== 'active') throw new Error('This service is not active');
-    if (snapshot.limitScope !== 'unlimited' && Number(updatePlan.serviceAccessUsedInCycle || 0) >= Number(snapshot.portalAccessCount || 0)) throw new Error('Selected service upload limit is used');
-    if ((req.files || []).length > Number(snapshot.filesLimit || 0)) throw new Error(`This service allows up to ${snapshot.filesLimit} files per upload`);
-  } else if (isProjectUpload) {
-    // A project has NO allowance to check: portal access during development is unlimited,
-    // there is no plan template behind it and no counter to spend. What gates it is the
-    // project's own state — the same four conditions ProjectDetails.js uses to disable the
-    // button, enforced here too because this route is reachable directly.
-    const refusal = await measureUpload(timing, 'project_access_check', () => assertProjectAcceptsUpload(updatePlan));
-    if (refusal) {
-      return res.status(400).json({ message: refusal, error: true, success: false });
-    }
-    if ((req.files || []).length > MAX_PROJECT_FILES_PER_UPLOAD) {
-      throw new Error(`Up to ${MAX_PROJECT_FILES_PER_UPLOAD} files are allowed per upload`);
-    }
-  } else if ((req.files || []).length > MAX_LEGACY_UPDATE_FILES_PER_UPLOAD) {
-    throw new Error(`This plan allows up to ${MAX_LEGACY_UPDATE_FILES_PER_UPLOAD} files per upload`);
-  }
-
-  // Check if plan is closed
-  if (updatePlan.planStatus === 'closed') {
-    return res.status(400).json({
-      message: 'This plan has been closed and cannot accept updates',
-      error: true,
-      success: false
-    });
-  }
-
-  if (updatePlan.autoRenewalStatus === 'paused') {
-    return res.status(400).json({
-      message: 'This plan is paused because an invoice payment is overdue. Please clear the payment to request updates.',
-      error: true,
-      success: false
-    });
-  }
-
-  if (!updatePlan.isActive) {
-    return res.status(400).json({
-      message: 'This plan is not active and cannot accept updates',
-      error: true,
-      success: false
-    });
-  }
-  
-  // ── Legacy plan allowance ──────────────────────────────────────────────────────
-  // Everything below reads the CATALOGUE product (updatePlan.productId), which only a
-  // legacy website_updates plan has. Services answer from their snapshot above; projects
-  // have no product at all. Both are excluded here rather than each check restating a
-  // guard — the missing guard on the monthly-plan check below is what let a project read
-  // a null product and crash.
-  const isLegacyUpload = uploadKind === UPLOAD_KIND.LEGACY;
-
-  // Check if the user has updates remaining
-  if (isLegacyUpload && updatePlan.updatesUsed >= updatePlan.productId.updateCount) {
-    return res.status(400).json({
-      message: 'No updates remaining in this plan',
-      error: true,
-      success: false
-    });
-  }
-
-  // NEW: Check for monthly limited plans
-  if (isLegacyUpload && updatePlan.productId.isMonthlyLimitedPlan) {
-    // Use one effective limit source so validation and counters stay in sync.
-    const monthlyLimit =
-      updatePlan.currentMonthUpdatesLimit ||
-      updatePlan.productId.monthlyUpdateLimit ||
-      1;
-    const monthlyUsed = updatePlan.currentMonthUpdatesUsed || 0;
-
-    if (monthlyUsed >= monthlyLimit) {
-      const resetDate = updatePlan.monthlyLimitResetDate || updatePlan.currentMonthExpiryDate;
-      return res.status(400).json({
-        message: `You have used all ${monthlyLimit} updates for this month. Next reset on ${resetDate ? new Date(resetDate).toLocaleDateString('en-GB') : 'next renewal'}`,
-        error: true,
-        success: false
-      });
-    }
-
-    // Check if current month has expired
-    if (updatePlan.currentMonthExpiryDate && new Date() > new Date(updatePlan.currentMonthExpiryDate)) {
-      return res.status(400).json({
-        message: 'Your monthly period has expired. Please renew to continue.',
-        error: true,
-        success: false
-      });
-    }
-
-    // Check if yearly duration is exhausted
-    if (updatePlan.totalYearlyDaysRemaining !== undefined && updatePlan.totalYearlyDaysRemaining <= 0) {
-      return res.status(400).json({
-        message: 'Your yearly plan has ended. Please purchase a new plan.',
-        error: true,
-        success: false
-      });
-    }
-  }
-
-  // Check if the plan is still valid (for regular plans)
-  if (isLegacyUpload && !updatePlan.productId.isMonthlyRenewablePlan && !updatePlan.productId.isMonthlyLimitedPlan) {
-    const validityInDays = updatePlan.productId.validityPeriod;
-    const startDate = new Date(updatePlan.createdAt);
-    const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + validityInDays);
-
-    if (new Date() > endDate) {
-      return res.status(400).json({
-        message: 'Update plan has expired',
-        error: true,
-        success: false
-      });
-    }
-  }
-  
   // Initialize Google Drive service
   timing?.mark('validation_complete');
   const driveService = new GoogleDriveService(KEY_FILE_PATH, FOLDER_NAME, timing);

@@ -118,6 +118,7 @@ test('multipart upload reports each real controller/Drive stage and keeps respon
     '../../helpers/notificationService': { createUpdateRequestNotification: async () => {} },
     '../../models/userModel': {},
     '../../helpers/projectUploadGate': { assertProjectAcceptsUpload: async () => null },
+    '../../helpers/uploadOrderPolicy': { assertUploadOrder: async () => ({ isProjectUpload: true, isServiceUpload: false, isLegacyUpload: false }) },
     mongoose: { Types: { ObjectId: class { constructor(value) { this.value = value; } } } },
   });
   const app = express();

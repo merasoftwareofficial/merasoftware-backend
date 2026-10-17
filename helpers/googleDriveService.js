@@ -99,21 +99,31 @@ class GoogleDriveService {
   }
 
   // Upload file to Google Drive
-  async uploadFile(fileName, fileBuffer, mimeType, folderId, shouldStop = () => false) {
+  async uploadFile(fileName, fileBuffer, mimeType, folderId, shouldStop = () => false, options = {}) {
     return runDriveUpload(async () => {
       if (shouldStop()) return null;
-      return this.uploadFileNow(fileName, fileBuffer, mimeType, folderId);
+      return this.uploadFileNow(fileName, fileBuffer, mimeType, folderId, options);
     });
   }
 
-  async uploadFileNow(fileName, fileBuffer, mimeType, folderId) {
+  async generateFileId() {
+    return runDriveUpload(async () => {
+      const response = await this.driveClient.files.generateIds({ count: 1, space: 'drive' });
+      const id = response.data.ids?.[0];
+      if (!id) throw new Error('Drive did not provide a file identity');
+      return id;
+    });
+  }
+
+  async uploadFileNow(fileName, fileBuffer, mimeType, folderId, options = {}) {
     let createdFileId = null;
     try {
       console.log(`Starting upload for file: ${fileName}`);
       
       const fileMetadata = {
         name: fileName,
-        parents: [folderId]
+        parents: [folderId],
+        ...(options.id ? { id: options.id, appProperties: { uploadSha256: options.sha256 } } : {}),
       };
       
       const media = {
@@ -122,11 +132,17 @@ class GoogleDriveService {
       };
       
       console.log(`Uploading file to Google Drive in folder: ${folderId}`);
-      const response = await measureUpload(this.timing, 'drive_file_upload', () => this.driveClient.files.create({
+      let response;
+      try { response = await measureUpload(this.timing, 'drive_file_upload', () => this.driveClient.files.create({
         resource: fileMetadata,
         media: media,
         fields: 'id,name,webViewLink'
       }), { bytes: fileBuffer.length });
+      } catch (error) {
+        if (!options.id || Number(error.code || error.response?.status) !== 409) throw error;
+        response = await this.driveClient.files.get({ fileId: options.id, fields: 'id,name,webViewLink,size,appProperties' });
+        if (response.data.appProperties?.uploadSha256 !== options.sha256 || Number(response.data.size) !== fileBuffer.length) throw new Error('Drive file identity does not match the stored upload');
+      }
       createdFileId = response.data.id;
       
       console.log(`File uploaded with ID: ${response.data.id}`);
@@ -156,7 +172,7 @@ class GoogleDriveService {
       };
     } catch (error) {
       if (Number(error.code || error.response?.status) === 404) this.invalidateFolder();
-      if (createdFileId) {
+      if (createdFileId && !options.retainOnError) {
         await this.driveClient.files.delete({ fileId: createdFileId }).catch((cleanupError) => {
           error.uploadCleanupFailed = true;
           console.error('Error cleaning up incomplete Drive upload:', cleanupError.message);

@@ -5,6 +5,12 @@ router.patch('/admin/projects/:orderId/portfolio-source', require('../middleware
 router.get('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 router.post('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 const upload = require('../middleware/uploadFiles');
+const stagedUpload = require('../controller/user/stagedUploadController');
+router.post('/upload-sessions', require('../middleware/authToken'), stagedUpload.begin);
+router.get('/upload-sessions/:uploadId', require('../middleware/authToken'), stagedUpload.status);
+router.post('/upload-sessions/:uploadId/files/:fileId', require('../middleware/authToken'), stagedUpload.authorizeFile, stagedUpload.parseFile, stagedUpload.receive);
+router.post('/upload-sessions/:uploadId/complete', require('../middleware/authToken'), stagedUpload.complete);
+router.post('/admin/upload-submissions/:submissionId/retry', require('../middleware/authToken'), stagedUpload.retryDelivery);
 // const fs = require('fs');
 
 const userSignUpController = require("../controller/user/userSignUp")
@@ -164,6 +170,10 @@ router.post("/admin/clients/:customerId/upload-links/:linkId/revoke", authToken,
 router.post("/external-upload/exchange", externalUploadController.requireAllowedOrigin, externalUploadController.exchange);
 router.post("/external-upload/credentials", externalUploadController.requireAllowedOrigin, externalUploadController.verifyCredentials);
 router.get("/external-upload/session", externalUploadController.getSession);
+router.post('/external-upload/uploads', externalUploadController.requireAllowedOrigin, externalUploadController.requireAccess, externalUploadController.reserveSingleUse, stagedUpload.begin);
+router.get('/external-upload/uploads/:uploadId', externalUploadController.requireAccess, stagedUpload.status);
+router.post('/external-upload/uploads/:uploadId/files/:fileId', externalUploadController.requireAllowedOrigin, externalUploadController.requireAccess, stagedUpload.authorizeFile, stagedUpload.parseFile, stagedUpload.receive);
+router.post('/external-upload/uploads/:uploadId/complete', externalUploadController.requireAllowedOrigin, externalUploadController.requireAccess, stagedUpload.complete);
 router.get('/external-upload/progress/:uploadId', externalUploadController.requireAccess, require('../controller/user/getUploadProgress'));
 router.post(
   "/external-upload/submit",

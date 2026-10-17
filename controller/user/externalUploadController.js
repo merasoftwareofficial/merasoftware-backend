@@ -316,4 +316,5 @@ module.exports = {
   parseFiles,
   submit,
   applyExternalUploadIdentity,
+  releaseReservation,
 };
