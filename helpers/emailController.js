@@ -2,20 +2,13 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { EmailDraft, EmailTemplate, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
 const { byKey, eventKeys } = require('./emailCatalog');
 const userModel = require('../models/userModel');
+const { render, compose, withRequiredLinks } = require('./emailMarkup');
+const { resolveTemplate, systemTemplate, composeTemplate, LEGACY_BUILT_IN } = require('./emailTemplates');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
-const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const textHtml = text => `<div style="font-family:Arial,sans-serif;white-space:pre-wrap">${escapeHtml(text)}</div>`;
 function plainText(html = '') {
   return html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, '$2 ($1)').replace(/<\/(p|div|h[1-6]|tr)>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\n\s*\n\s*\n/g, '\n\n').trim();
-}
-function render(template, values) {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => String(values[key] ?? ''));
-}
-function withRequiredLinks(text, links = []) {
-  const missing = links.filter(link => !text.includes(link));
-  return missing.length ? `${text}\n\n${missing.join('\n')}` : text;
 }
 function applicationQuery(application) {
   return { event: { $in: eventKeys(application) } };
@@ -39,20 +32,35 @@ async function recordHistory(draft, decidedBy, required = false) {
     if (required) throw error;
   }
 }
+// The action's default template, or its built-in: the system template of a migrated action,
+// or the legacy code-built HTML (kept as is) of one not yet migrated.
 async function applyDefault(event, mail, values = {}) {
   const policy = await EmailPolicy.findOne({ event }).lean();
   if (policy?.mode === 'off') return null;
-  const template = policy?.defaultTemplate && await EmailTemplate.findOne({ _id: policy.defaultTemplate, event }).lean();
+  const chosen = policy?.defaultTemplate && await EmailTemplate.findOne({ _id: policy.defaultTemplate, event }).lean();
+  const template = chosen || await systemTemplate(event);
   const context = { subject: mail.subject, message: mail.text || plainText(mail.html), ...values };
-  if (!template) return { ...mail, text: withRequiredLinks(context.message, mail.requiredLinks) };
-  const text = withRequiredLinks(render(template.text, context), mail.requiredLinks);
-  return { ...mail, templateName: template.name, subject: render(template.subject, context), text, html: textHtml(text) };
+  if (!template) {
+    const text = withRequiredLinks(context.message, mail.requiredLinks);
+    return { ...mail, text, plain: text };
+  }
+  return { ...mail, ...composeTemplate(template, context, mail.blocks, mail.requiredLinks) };
+}
+/**
+ * What a reviewed text sends. Unchanged text keeps the prepared mail; edited text is filled
+ * with this mail's own values (so a reviewer may use the same {{variables}}) and rendered.
+ */
+function reviewedMail(draft, text) {
+  if (text === draft.text) return { text, html: draft.html, plain: draft.plain || draft.text };
+  const filled = render(text, draft.values, draft.blocks);
+  const mail = compose(filled, draft.blocks);
+  return { text: filled, html: mail.html, plain: mail.text };
 }
 function validateContent(subject, text) {
   if (typeof subject !== 'string' || !subject.trim() || subject.length > 300 || /[\r\n]/.test(subject)) throw new Error('Subject must be 1–300 characters on one line');
   if (typeof text !== 'string' || !text.trim() || text.length > 100000) throw new Error('Message must be 1–100000 characters');
 }
-async function prepareMail(event, mail, values) {
+async function prepareMail(event, mail, extraValues) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
   if (!scope || scope.closed || !byKey.has(event)) return suppressed();
@@ -63,6 +71,8 @@ async function prepareMail(event, mail, values) {
     const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
     if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
   }
+  // Migrated builders send their data as values/blocks; the lead form adds its own values.
+  const values = { ...(mail.values || {}), ...(extraValues || {}) };
   const content = await applyDefault(event, mail, values);
   if (!content) return suppressed();
   const to = (Array.isArray(content.to) ? content.to : [content.to]).filter(Boolean);
@@ -77,9 +87,10 @@ async function prepareMail(event, mail, values) {
     event, actor: scope.req.userId, source: `${scope.req.method} ${scope.req.originalUrl.split('?')[0]}`,
     application: byKey.get(event).application, dedupeKey: mail.dedupeKey,
     reference: mail.reference, requiredLinks: mail.requiredLinks,
-    baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values,
-    to, subject: content.subject, text: content.text, html: content.html || textHtml(content.text),
-    templateName: content.templateName || 'Built-in action template',
+    baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values, blocks: mail.blocks,
+    to, subject: content.subject, text: content.text, plain: content.plain,
+    html: content.html || compose(content.text, mail.blocks).html,
+    templateName: content.templateName || LEGACY_BUILT_IN,
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
@@ -163,13 +174,12 @@ async function decide(id, actor, decision, access = {}) {
   const text = withRequiredLinks(decision.text, policyDraft.requiredLinks);
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
-    const template = decision.templateId && await EmailTemplate.findOne({ _id: decision.templateId, event: policyDraft.event }).lean();
-    if (decision.templateId && !template) throw new Error('Choose a template for this action');
-    templateName = template ? template.name : 'Built-in action template';
+    const template = await resolveTemplate(policyDraft.event, decision.templateId);
+    templateName = template ? template.name : LEGACY_BUILT_IN;
   }
   const update = policyDraft.status === 'failed'
     ? { status: 'sending', failure: '' }
-    : { status: 'sending', subject: decision.subject.trim(), text, html: text === policyDraft.text ? policyDraft.html : textHtml(text), failure: '' };
+    : { status: 'sending', subject: decision.subject.trim(), text, ...reviewedMail(policyDraft, text), failure: '' };
   const attemptedAt = new Date();
   const sender = policyDraft.sender || `${process.env.FROM_NAME || 'Mera Software'} <${process.env.FROM_EMAIL}>`;
   const draft = await EmailDraft.findOneAndUpdate({ ...query, status: { $in: ['pending', 'failed'] } }, {
@@ -185,7 +195,7 @@ async function decide(id, actor, decision, access = {}) {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST', signal: AbortSignal.timeout(20000),
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': `email-draft-${draft._id}` },
-      body: JSON.stringify({ from: draft.sender, to: draft.to, subject: draft.subject, text: draft.text, html: draft.html, attachments: draft.attachments.map(a => ({ filename: a.filename, content: a.content })), headers: Object.fromEntries(draft.headers || []) }),
+      body: JSON.stringify({ from: draft.sender, to: draft.to, subject: draft.subject, text: draft.plain || draft.text, html: draft.html, attachments: draft.attachments.map(a => ({ filename: a.filename, content: a.content })), headers: Object.fromEntries(draft.headers || []) }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error('Email provider refused the message');
@@ -216,4 +226,4 @@ async function decide(id, actor, decision, access = {}) {
     throw error;
   }
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, plainText, render, validateContent, textHtml, withRequiredLinks, applicationQuery, draftAccess };
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess };

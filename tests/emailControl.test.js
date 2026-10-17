@@ -5,7 +5,8 @@ const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-const { requestMiddleware, queueMail, plainText, render } = require('../helpers/emailController');
+const { requestMiddleware, queueMail, plainText } = require('../helpers/emailController');
+const { render, compose } = require('../helpers/emailMarkup');
 const { EmailDraft, EmailPolicy, EmailTemplate, EmailHistory } = require('../models/emailControlModel');
 const userModel = require('../models/userModel');
 const authToken = require('../middleware/authToken');
@@ -41,6 +42,15 @@ before(async () => {
   const app = express(); app.use(express.json()); app.use(cookieParser()); app.use(requestMiddleware);
   app.use('/email-control', require('../routes/emailControl'));
   app.post('/lead', authToken, require('../controller/lead/createLead'));
+  const service = require('../helpers/emailService');
+  app.post('/project-created', authToken, async (req, res) => {
+    await service.sendProjectCreatedEmail(req.body.user, req.body.order, req.body.invoice);
+    res.json({ success: true });
+  });
+  app.post('/project-cancelled', authToken, async (req, res) => {
+    await service.sendProjectCancellationEmail(req.body.user, req.body.order, req.body.refunds, req.body.reason);
+    res.json({ success: true });
+  });
   app.post('/action', authToken, async (req, res) => {
     await queueMail('invoice.project', { reminderInvoice: req.body.reminderInvoice, to: ['client@example.test'], subject: 'Invoice', html: '<p>Original <a href="https://example.test/invoice">invoice</a></p>', attachments: [{ filename: 'invoice.pdf', content: Buffer.from('test-pdf') }] });
     res.status(req.body.fail ? 400 : 200).json({ success: !req.body.fail });
@@ -243,4 +253,90 @@ test('Outbox repairs an audit write failure from the accepted draft', async () =
   const result = await api('/email-control/outbox', admin, null, 'GET');
   assert.equal(result.data.summary.sent, 1); assert.ok(result.data.rows[0].sentAt);
   assert.equal(calls.length, 1);
+});
+
+const projectOrder = { totalAmount: 25000, projectSnapshot: { displayName: 'Business Website' }, installments: [], paidAmount: 0 };
+async function projectDraft(path, body) {
+  const result = await api(path, admin, body);
+  assert.equal(result.emailStatus, 'awaiting-review');
+  return EmailDraft.findById(result.emailDraftIds[0]).lean();
+}
+
+test('markup renders escaped branded HTML, drops empty optional lines and keeps values literal', () => {
+  const filled = render('Hello {{name}},\n**Offer:** {{offer}}\n{{table}}', { name: '<b>$&</b>', offer: '' }, { table: { html: '', text: '' } });
+  assert.equal(filled, 'Hello <b>$&</b>,');
+  assert.equal(render('{{constructor}}', {}), '');
+  const mail = compose('## Title\nHello **there** https://example.test/a?b=1\n- one\n- two\n\n{{table}}', { table: { html: '<table id="t"></table>', text: 'T' } });
+  assert.match(mail.html, /<h2[^>]*>Title<\/h2>/); assert.match(mail.html, /<strong>there<\/strong>/);
+  assert.match(mail.html, /<a href="https:\/\/example.test\/a\?b=1"/); assert.match(mail.html, /<li>one<\/li><li>two<\/li>/);
+  assert.match(mail.html, /<table id="t"><\/table>/); assert.match(mail.html, /Mera Software/);
+  assert.equal(mail.text, 'Title\n\nHello there https://example.test/a?b=1\n\n- one\n- two\n\nT');
+  assert.match(compose('<script>x</script>').html, /&lt;script&gt;/);
+});
+
+test('migrated action drafts from its system template with escaped values and no empty lines', async () => {
+  const record = await projectDraft('/project-created', { user: { name: 'Ravi <b>', email: 'ravi@example.test' }, order: projectOrder, invoice: { amount: 25000, invoiceNumber: 'INV-1' } });
+  assert.equal(record.subject, 'Your Project Has Started'); assert.equal(record.templateName, 'Standard');
+  assert.match(record.text, /^Hello Ravi <b>,/); assert.doesNotMatch(record.text, /Offer:|Received so far/);
+  assert.match(record.text, /\*\*Due now:\*\* ₹25,000 \(invoice INV-1\)/);
+  assert.match(record.html, /Hello Ravi &lt;b&gt;,/); assert.match(record.plain, /Due now: ₹25,000/);
+  assert.equal(await EmailTemplate.countDocuments({ event: 'sendProjectCreatedEmail', system: true }), 1);
+});
+
+test('section blocks render from action data and edited text keeps them', async () => {
+  const record = await projectDraft('/project-cancelled', { user: { name: 'Ravi', email: 'ravi@example.test' }, order: projectOrder, refunds: [{ method: 'upi', amount: 2500, referenceId: '<ref>' }], reason: '' });
+  assert.match(record.text, /^\{\{refundTable\}\}$/m); assert.doesNotMatch(record.text, /Reason:/);
+  assert.match(record.html, /Refund Details/); assert.match(record.html, /Reference: &lt;ref&gt;/);
+  const text = record.text.replace('Your project has been cancelled.', 'We have cancelled your project.');
+  await api(`/email-control/drafts/${record._id}/decision`, admin, { choice: 'send', subject: record.subject, text });
+  assert.match(calls[0].payload.html, /We have cancelled your project\./); assert.match(calls[0].payload.html, /Refund Details/);
+  assert.match(calls[0].payload.text, /Total Refunded: ₹2,500/); assert.doesNotMatch(calls[0].payload.text, /\{\{/);
+  const empty = await projectDraft('/project-cancelled', { user: { name: 'Ravi', email: 'ravi@example.test' }, order: projectOrder, refunds: [], reason: 'Changed plans' });
+  assert.doesNotMatch(empty.text, /refundTable/); assert.doesNotMatch(empty.html, /Refund Details/); assert.match(empty.text, /\*\*Reason:\*\* Changed plans/);
+});
+
+test('system template is editable, resettable and validated; custom templates cannot be reset', async () => {
+  const listing = await api('/email-control', admin, null, 'GET');
+  const system = listing.data.templates.find(row => row.event === 'sendProjectCreatedEmail' && row.system);
+  assert.ok(system); assert.equal(listing.data.catalog.sendProjectCreatedEmail.system, true);
+  assert.ok(listing.data.catalog.sendProjectCreatedEmail.variables.some(row => row.key === 'dueNow'));
+  await api('/email-control', admin, null, 'GET');
+  assert.equal(await EmailTemplate.countDocuments({ event: 'sendProjectCreatedEmail', system: true }), 1);
+  const edit = body => api(`/email-control/templates/${system._id}`, admin, { name: 'Standard', subject: 'Started: {{project}}', ...body }, 'PUT');
+  assert.equal((await edit({ text: 'Hi {{unknown}}' })).success, false);
+  assert.equal((await edit({ subject: '{{refundTable}}', text: 'x' })).success, false);
+  const cancelSystem = listing.data.templates.find(row => row.event === 'sendProjectCancellationEmail' && row.system);
+  assert.equal((await api(`/email-control/templates/${cancelSystem._id}`, admin, { name: 'Standard', subject: 'X', text: 'See {{refundTable}} below' }, 'PUT')).success, false);
+  assert.equal((await edit({ text: 'Hi {{name}}, {{project}} started.' })).success, true);
+  const record = await projectDraft('/project-created', { user: { name: 'Ravi', email: 'ravi@example.test' }, order: projectOrder });
+  assert.equal(record.subject, 'Started: Business Website'); assert.equal(record.text, 'Hi Ravi, Business Website started.');
+  const reset = await api(`/email-control/templates/${system._id}/reset`, admin, {});
+  assert.equal(reset.data.subject, 'Your Project Has Started'); assert.match(reset.data.text, /^Hello \{\{name\}\},/);
+  const custom = (await api('/email-control/templates', admin, { event: 'sendProjectCreatedEmail', name: 'Short', subject: 'Hi', text: 'Hello {{name}}' })).data;
+  assert.equal(custom.system, false);
+  assert.equal((await api(`/email-control/templates/${custom._id}/reset`, admin, {})).success, false);
+  const preview = await api('/email-control/templates/preview?application=portal', admin, { event: 'sendProjectCancellationEmail', subject: 'Cancelled {{project}}', text: '{{refundTable}}' });
+  assert.equal(preview.data.subject, 'Cancelled Business Website'); assert.match(preview.data.html, /Total Refunded/);
+});
+
+test('only an admin chooses a template; reviewers preview their edits', async () => {
+  const custom = (await api('/email-control/templates', admin, { event: 'sendProjectCreatedEmail', name: 'Short', subject: 'Short {{project}}', text: 'Hello {{name}}' })).data;
+  const record = await projectDraft('/project-created', { user: { name: 'Ravi', email: 'ravi@example.test' }, order: projectOrder });
+  const review = await api(`/email-control/drafts/${record._id}`, admin, null, 'GET');
+  assert.deepEqual(review.data.templateOptions.map(row => row.name), ['Standard', 'Short']);
+  assert.match(review.data.html, /Mera Software/);
+  const chosen = await api(`/email-control/drafts/${record._id}/preview`, admin, { templateId: custom._id });
+  assert.equal(chosen.data.subject, 'Short Business Website'); assert.equal(chosen.data.text, 'Hello Ravi'); assert.match(chosen.data.html, /Hello Ravi/);
+  const edited = await api(`/email-control/drafts/${record._id}/preview`, admin, { subject: 'X', text: 'Edited **text** for {{name}}' });
+  assert.match(edited.data.html, /Edited <strong>text<\/strong> for Ravi/);
+  await api(`/email-control/drafts/${record._id}/decision`, admin, { choice: 'send', subject: chosen.data.subject, text: chosen.data.text, templateId: custom._id });
+  assert.equal((await EmailHistory.findOne({ draftId: record._id })).templateName, 'Short');
+  const own = await api('/action', customer, {}); const id = own.emailDraftIds[0];
+  const customerView = await api(`/email-control/drafts/${id}`, customer, null, 'GET');
+  assert.equal(customerView.data.templateOptions, undefined);
+  assert.equal((await api(`/email-control/drafts/${id}/preview`, customer, { templateId: '' })).status, 403);
+  assert.equal((await api(`/email-control/drafts/${id}/decision`, customer, { choice: 'send', subject: 'X', text: 'Y', templateId: '' })).status, 403);
+  assert.equal((await api(`/email-control/drafts/${id}/preview`, customer, { subject: 'X', text: 'Own edit' })).success, true);
+  const legacy = await api(`/email-control/drafts/${(await draft())}`, admin, null, 'GET');
+  assert.deepEqual(legacy.data.templateOptions.map(row => row.id), ['']);
 });

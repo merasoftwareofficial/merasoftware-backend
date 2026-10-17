@@ -1,8 +1,31 @@
 const { indiaYear, formatIndiaDate, formatIndiaDateTime } = require('./dateTime');
 const { reviewTransport: resend, withEvent } = require('./emailController');
 const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation');
+const { buildTemplatedMail } = require('./emailTemplates');
 
 // Legacy builders only prepare review drafts; they cannot send mail.
+
+/**
+ * Prepares the review draft of an action migrated to editable templates: its wording lives
+ * in the action's template (helpers/emailTemplates.js), this only hands over the data.
+ */
+const sendTemplatedEmail = async (event, ...args) => {
+  try {
+    const mail = buildTemplatedMail(event, ...args);
+    if (!mail) {
+      console.warn(`No recipient email for ${event}`);
+      return false;
+    }
+    const { error, queued, suppressed } = await resend.emails.send(mail);
+    if (suppressed) return false;
+    if (queued) return true;
+    if (error) console.error(`Error preparing ${event} email:`, error);
+    return false;
+  } catch (error) {
+    console.error(`Error preparing ${event} email:`, error);
+    return false;
+  }
+};
 
 /**
  * Send notification to admins about new update request
@@ -885,116 +908,8 @@ const sendPaymentRejectionEmail = async (user, transaction, order, rejectionReas
  * @param {String} cancellationReason - Why the project was cancelled
  * @returns {Promise<Boolean>} - Success status
  */
-const sendProjectCancellationEmail = async (user, order, refunds = [], cancellationReason = '') => {
-  try {
-    if (!user || !user.email) {
-      console.warn('No user email found for sending project cancellation notification');
-      return false;
-    }
-
-    const METHOD_LABELS = {
-      wallet: 'Wallet',
-      upi: 'UPI',
-      cash: 'Cash',
-      bank_transfer: 'Bank Transfer',
-      cheque: 'Cheque',
-      combined: 'Combined',
-      demo: 'Demo Credit',
-    };
-
-    const refundTotal = refunds.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
-
-    const refundRows = refunds.map((entry) => {
-      const label = METHOD_LABELS[entry.method] || entry.method;
-      const note = entry.method === 'wallet'
-        ? 'Credited to your wallet'
-        : `Reference: ${entry.referenceId || 'N/A'}`;
-      return `
-        <tr>
-          <td style="padding: 8px 0; border-bottom: 1px solid #eee;"><strong>${label}</strong></td>
-          <td style="padding: 8px 0; border-bottom: 1px solid #eee; text-align: right;">₹${Number(entry.amount || 0).toLocaleString()}</td>
-          <td style="padding: 8px 0; border-bottom: 1px solid #eee; text-align: right; color: #666; font-size: 13px;">${note}</td>
-        </tr>
-      `;
-    }).join('');
-
-    const refundBlock = refunds.length > 0
-      ? `
-        <div style="background-color: #f0f9f4; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;">
-          <h3 style="margin-top: 0; color: #27ae60;">Refund Details</h3>
-          <table style="width: 100%; border-collapse: collapse;">
-            ${refundRows}
-            <tr>
-              <td style="padding: 10px 0;"><strong>Total Refunded</strong></td>
-              <td style="padding: 10px 0; text-align: right;"><strong>₹${refundTotal.toLocaleString()}</strong></td>
-              <td></td>
-            </tr>
-          </table>
-        </div>
-      `
-      : '';
-
-    const reasonBlock = cancellationReason
-      ? `
-        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0; color: #333;">Reason</h3>
-          <p style="margin: 0;">${cancellationReason}</p>
-        </div>
-      `
-      : '';
-
-    const emailData = {
-      from: `${process.env.FROM_NAME || 'Your Company'} <${process.env.FROM_EMAIL}>`,
-      to: [user.email],
-      subject: 'Project Cancelled',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <div style="background-color: #34495e; color: white; padding: 20px; text-align: center;">
-            <h1 style="margin: 0;">Project Cancelled</h1>
-          </div>
-
-          <div style="padding: 20px;">
-            <p>Hello ${user.name},</p>
-
-            <p>Your project has been cancelled. The details are below.</p>
-
-            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-              <h2 style="margin-top: 0; color: #333;">Project Details</h2>
-              <p><strong>Project:</strong> ${getOrderDisplayName(order)}</p>
-              <p><strong>Cancelled On:</strong> ${formatIndiaDateTime(Date.now())}</p>
-            </div>
-
-            ${reasonBlock}
-            ${refundBlock}
-
-            <p>If you have any questions about this cancellation or the refund, please contact our support team.</p>
-
-            <p>Best regards,<br>Mera Software Team</p>
-          </div>
-
-          <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
-          </div>
-        </div>
-      `
-    };
-
-    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
-    if (suppressed) return false;
-    if (queued) return true;
-
-    if (error) {
-      console.error('Error sending project cancellation email:', error);
-      return false;
-    }
-
-    console.log('Project cancellation email sent successfully to:', user.email, data);
-    return true;
-  } catch (error) {
-    console.error('Error sending project cancellation email:', error);
-    return false;
-  }
-};
+const sendProjectCancellationEmail = (user, order, refunds = [], cancellationReason = '') =>
+  sendTemplatedEmail('sendProjectCancellationEmail', user, order, refunds, cancellationReason);
 
 /**
  * Send project created email — the admin opened a new project for this customer
@@ -1004,92 +919,8 @@ const sendProjectCancellationEmail = async (user, order, refunds = [], cancellat
  * @param {Object} invoice - The first invoice (full amount, installment #1, or the FREE invoice)
  * @returns {Promise<Boolean>} - Success status
  */
-const sendProjectCreatedEmail = async (user, order, invoice) => {
-  try {
-    if (!user || !user.email) {
-      console.warn('No user email found for sending project created notification');
-      return false;
-    }
-
-    const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const money = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
-    const total = Number(order.totalAmount || order.price || 0);
-    const isFree = total === 0;
-    const offerTitle = order.projectSnapshot?.offer?.title;
-    const installments = Array.isArray(order.installments) ? order.installments : [];
-    const paidNow = Number(order.paidAmount || 0);
-
-    let paymentLine;
-    if (isFree) {
-      paymentLine = 'This project is <strong>FREE</strong> — nothing is due.';
-    } else if (order.isPartialPayment && installments.length) {
-      paymentLine = `Payable in ${installments.length} installments: ${installments.map((item) => money(item.amount)).join(' + ')}.`;
-    } else {
-      paymentLine = `One-time payment of ${money(total)}.`;
-    }
-    const paidLine = !isFree
-      ? (paidNow > 0
-          ? `<p><strong>Received so far:</strong> ${money(paidNow)}</p>`
-          : `<p><strong>Due now:</strong> ${money(invoice?.amount ?? total)}${invoice?.invoiceNumber ? ` (invoice ${escape(invoice.invoiceNumber)})` : ''}</p>`)
-      : '';
-
-    const emailData = {
-      from: `${process.env.FROM_NAME || 'Your Company'} <${process.env.FROM_EMAIL}>`,
-      to: [user.email],
-      subject: 'Your Project Has Started',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <div style="background-color: #27ae60; color: white; padding: 20px; text-align: center;">
-            <h1 style="margin: 0;">Your Project Has Started</h1>
-          </div>
-
-          <div style="padding: 20px;">
-            <p>Hello ${escape(user.name)},</p>
-
-            <p>We have created your project and work has begun. The details are below.</p>
-
-            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-              <h2 style="margin-top: 0; color: #333;">Project Details</h2>
-              <p><strong>Project:</strong> ${escape(getOrderDisplayName(order))}</p>
-              <p><strong>Price:</strong> ${isFree ? 'FREE' : money(total)}</p>
-              ${offerTitle ? `<p><strong>Offer:</strong> ${escape(offerTitle)}</p>` : ''}
-              <p><strong>Started On:</strong> ${formatIndiaDateTime(Date.now())}</p>
-            </div>
-
-            <div style="background-color: #f0f9f4; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;">
-              <h3 style="margin-top: 0; color: #27ae60;">Payment</h3>
-              <p style="margin-top: 0;">${paymentLine}</p>
-              ${paidLine}
-            </div>
-
-            <p>You can follow your project's progress from your account at any time.</p>
-
-            <p>Best regards,<br>Mera Software Team</p>
-          </div>
-
-          <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666;">
-            <p>© ${indiaYear(Date.now())} Mera Software. All rights reserved.</p>
-          </div>
-        </div>
-      `
-    };
-
-    const { data, error, queued, suppressed } = await resend.emails.send(emailData);
-    if (suppressed) return false;
-    if (queued) return true;
-
-    if (error) {
-      console.error('Error sending project created email:', error);
-      return false;
-    }
-
-    console.log('Project created email sent successfully to:', user.email, data);
-    return true;
-  } catch (error) {
-    console.error('Error sending project created email:', error);
-    return false;
-  }
-};
+const sendProjectCreatedEmail = (user, order, invoice) =>
+  sendTemplatedEmail('sendProjectCreatedEmail', user, order, invoice);
 
 /**
  * Send wallet recharge rejection email

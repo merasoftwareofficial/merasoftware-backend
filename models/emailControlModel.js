@@ -5,7 +5,11 @@ const templateSchema = new Schema({
   name: { type: String, required: true },
   subject: { type: String, required: true },
   text: { type: String, required: true },
+  // The editable copy of an action's built-in wording (helpers/emailTemplates.js). One per
+  // action; it can be reset to the original but never removed.
+  system: { type: Boolean, default: false },
 }, { timestamps: true });
+templateSchema.index({ event: 1, system: 1 }, { unique: true, partialFilterExpression: { system: true } });
 const policySchema = new Schema({
   event: { type: String, required: true, unique: true },
   mode: { type: String, enum: ['review', 'off'], default: 'review' },
@@ -21,10 +25,14 @@ const draftSchema = new Schema({
   baseSubject: String,
   baseText: String,
   values: { type: Map, of: String },
+  // Sections the action built itself (refund tables); templates place them by {{key}}.
+  blocks: { type: Map, of: new Schema({ html: String, text: String }, { _id: false }) },
   source: String,
   to: [String],
   subject: String,
+  // `text` is the reviewable template text; `plain` is the plain-text part that is sent.
   text: String,
+  plain: String,
   html: String,
   attachments: [{ _id: false, filename: String, content: String }],
   headers: { type: Map, of: String },
