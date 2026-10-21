@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "WhatsApp sender (Baileys). ESM, run by helpers/whatsappWorkerService.js as a child process; its packages are in the backend package.json."
+}

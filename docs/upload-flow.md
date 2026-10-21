@@ -17,9 +17,18 @@ pinned to the attempt, including all retries; a lost staged response never
 switches to legacy.
 
 Legacy mode uses the existing keyed multipart submit and progress endpoints.
-It shows actual total transfer %, then processing status and confirmed file
-counts. Completion waits for the existing server response/status. It cannot
-provide true per-file byte percentages or receipt-before-Drive completion.
+While the request body is sent it shows "Sending files to server — X%" (XHR
+transferPercent). Total % = files saved to Drive (completedFiles / totalFiles
+from GET upload-progress), labelled "Saving files — N of M", then "Finishing
+upload…" in the finalizing phase. Total reaches 100% only with the last saved
+file / success. Completion waits for the existing server response/status. It
+cannot provide true per-file byte percentages or receipt-before-Drive completion.
+Total % is file-count based (the server reports counts, not bytes).
+
+Change 2026-10-18 (fix111, frontend src/context/UploadContext.js executeLegacy/
+pollLegacy/label): before, the XHR transfer % was written to the Total bar, so it
+hit 100% as soon as bytes reached the server while Drive saving was still
+running file by file. No backend change.
 
 In staged mode:
 1. Preparing files: calculate each selected file's SHA-256 manifest.

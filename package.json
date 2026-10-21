@@ -2,6 +2,9 @@
   "name": "backend",
   "version": "1.0.0",
   "main": "index.js",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "test:email": "node --test tests/emailControl.test.js",
     "test:session": "node --test tests/sessionToken.test.js",
@@ -9,6 +12,7 @@
     "portfolio:worker": "node scripts/portfolioWorker.js",
     "portfolio:sync": "node scripts/portfolioWorker.js --once",
     "test:portfolio": "node --test tests/portfolio.test.js",
+    "test:whatsapp": "node --test whatsapp/tests/sender.test.js tests/whatsappQueue.test.js tests/whatsappControl.test.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:external-upload": "node --test tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js",
     "start": "node index.js",
@@ -20,6 +24,7 @@
   "dependencies": {
     "@google-cloud/storage": "^7.15.2",
     "@sendgrid/mail": "^8.1.4",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "archiver": "^7.0.1",
     "axios": "^1.8.1",
     "bcryptjs": "^2.4.3",
@@ -39,7 +44,9 @@
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.9",
     "pdfkit": "^0.16.0",
+    "pino": "10.4.0",
     "playwright": "^1.63.0",
+    "qrcode": "1.5.4",
     "resend": "^4.8.0",
     "sharp": "^0.33.5",
     "socket.io": "^4.8.1",

@@ -73,6 +73,7 @@ app.use(cookieParser())
 
 app.use("/api", require("./helpers/emailController").requestMiddleware)
 app.use("/api/email-control", require("./routes/emailControl"))
+app.use("/api/whatsapp-control", require("./routes/whatsappControl"))
 app.use("/api", router)
 
 app.use('/uploads', express.static('uploads'));
@@ -108,6 +109,7 @@ async function startServer() {
     await connnectDB();
     console.log("Connected to DB");
     require('./helpers/portfolioWorkerService').startPortfolioWorkerService();
+    require('./helpers/whatsappWorkerService').startWhatsappWorkerService();
     require('./helpers/uploadWorker').startUploadWorker();
     server.listen(PORT, () => {
       console.log("Server is running " + PORT);

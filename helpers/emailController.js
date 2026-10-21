@@ -4,6 +4,7 @@ const { byKey, eventKeys, isCustomerTriggered, customerEventKeys } = require('./
 const userModel = require('../models/userModel');
 const { render, compose, withRequiredLinks } = require('./emailMarkup');
 const { resolveTemplate, systemTemplate, composeTemplate, REVIEWED_NAME } = require('./emailTemplates');
+const { enqueueWhatsAppForEmail } = require('./whatsappQueue');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
@@ -231,6 +232,8 @@ async function decide(id, actor, decision, access = {}) {
       EmailDraft.updateOne({ _id: draft._id }, { $set: { status: 'sent', providerId: draft.providerId, sentAt: draft.sentAt, attempts: draft.attempts } }),
     ]);
     if (writes.every(write => write.status === 'rejected')) throw new Error('Provider accepted mail; recording its result needs recovery. Do not resend.');
+    // The same message goes out on WhatsApp. Not awaited: it can never delay or change this mail's result.
+    enqueueWhatsAppForEmail(draft).catch(error => console.error('[whatsapp] Could not queue this email for WhatsApp:', error.message));
     if (draft.reminderInvoice) {
       try {
         await require('../models/monthlyInvoiceModel').updateOne({ _id: draft.reminderInvoice }, { $inc: { remindersSent: 1 }, $set: { lastReminderDate: new Date() } });
