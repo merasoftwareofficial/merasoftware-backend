@@ -30,6 +30,10 @@ function fakeWhatsApp() {
       ev: { on: (name, fn) => { (listeners[name] ||= []).push(fn); } },
       emit: async (name, data) => { for (const fn of listeners[name] || []) await fn(data); },
       end() {}, logout: async () => {},
+      calls: [], // what was said to WhatsApp, in order
+      sendPresenceUpdate: async (type, to) => { socket.calls.push(['presence', type, to]); },
+      presenceSubscribe: async to => { socket.calls.push(['subscribe', to]); },
+      sendMessage: async (to, content) => { socket.calls.push(['message', to, content.text]); return { key: { id: 'msg-1' } }; },
     };
     sockets.push(socket);
     return socket;
@@ -91,4 +95,26 @@ it('after the number is unlinked from the phone, the old login is forgotten and 
   assert.ok(await until(() => wa.sockets.length === 3, 8000), 'reconnects for a new QR');
   assert.equal(wa.sockets[2].config.auth.creds.me, undefined, 'no leftover login');
   assert.equal((await State.findById(STATE_ID).lean()).connection, 'connecting');
+});
+
+it('shows "typing…" for the given time before the message, then goes offline; no typing time sends straight away', async () => {
+  const wa = fakeWhatsApp();
+  const waited = [];
+  const connection = createConnection({ Auth, State, logger: silent, makeSocket: wa.makeSocket, fetchVersion: wa.fetchVersion,
+    wait: async ms => { waited.push(ms); } });
+  open.push(connection);
+  connection.start();
+  await until(() => wa.sockets.length === 1);
+  await wa.sockets[0].emit('connection.update', { connection: 'open' });
+  const jid = '919876543210@s.whatsapp.net';
+  assert.equal(await connection.transport.send(jid, 'Hello', 4000), 'msg-1');
+  assert.deepEqual(wa.sockets[0].calls, [
+    ['presence', 'available', undefined], ['subscribe', jid], ['presence', 'composing', jid],
+    ['presence', 'paused', jid], ['message', jid, 'Hello'], ['presence', 'unavailable', undefined],
+  ]);
+  assert.deepEqual(waited, [4000]);
+
+  wa.sockets[0].calls.length = 0;
+  await connection.transport.send(jid, 'Hi', 0);
+  assert.deepEqual(wa.sockets[0].calls, [['message', jid, 'Hi']]);
 });

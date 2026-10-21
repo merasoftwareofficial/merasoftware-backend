@@ -42,6 +42,7 @@ const stateSchema = new mongoose.Schema({
   lastSentAt: Date,
   nextSendAt: Date, // persisted so a restart still waits out the gap
   messageCap: mongoose.Schema.Types.Mixed, // WhatsApp's new-chat quota, as WhatsApp reports it
+  settings: mongoose.Schema.Types.Mixed, // the admin's sending rules; checked by settings.js before saving
   lastError: String,
   heartbeatAt: Date,
 }, { timestamps: true, collection: 'whatsapp_state', versionKey: false });

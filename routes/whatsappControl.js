@@ -5,6 +5,7 @@ const userModel = require('../models/userModel');
 const { Queue, State, STATE_ID, QUEUE_STATUSES } = require('../whatsapp/src/models.js');
 const { dayKey } = require('../whatsapp/src/sender.js');
 const { loadConfig } = require('../whatsapp/src/config.js');
+const { RECOMMENDED, LIMITS, effectiveSettings, inQuietHours, settingsWarnings, validateSettings } = require('../whatsapp/src/settings.js');
 
 // The WhatsApp admin page (website /admin/whatsapp, through its /api/whatsapp proxy). Admins only:
 // the list holds customers' messages and the QR links the business number.
@@ -25,6 +26,9 @@ const handle = fn => async (req, res) => {
   catch (error) { res.status(error.status || 400).json({ success: false, message: error.message }); }
 };
 const setState = fields => State.updateOne({ _id: STATE_ID }, { $set: fields }, { upsert: true });
+const savedSettings = async () => effectiveSettings((await State.findById(STATE_ID).select('settings').lean())?.settings);
+const maxAgeMs = settings => settings.maxAgeHours * 3_600_000;
+const settingsReply = settings => ({ settings, recommended: RECOMMENDED, limits: LIMITS, warnings: settingsWarnings(settings) });
 
 router.get('/status', handle(async () => {
   const config = loadConfig();
@@ -33,6 +37,7 @@ router.get('/status', handle(async () => {
     Queue.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
   ]);
   const now = new Date();
+  const settings = effectiveSettings(state?.settings);
   return {
     enabled: process.env.ENABLE_WHATSAPP === 'true',
     workerRunning: !!state?.heartbeatAt && now - state.heartbeatAt < WORKER_SILENT_MS,
@@ -42,7 +47,11 @@ router.get('/status', handle(async () => {
     paused: !!state?.paused,
     unlinkRequested: !!state?.logoutRequested,
     sentToday: state?.day === dayKey(now, config.timeZone) ? state.sentToday : 0,
-    dailyLimit: config.dailyLimit,
+    dailyLimit: settings.dailyLimit,
+    minGapSec: settings.minGapSec,
+    maxAgeHours: settings.maxAgeHours,
+    quietNow: inQuietHours(settings, now, config.timeZone),
+    quietTo: settings.quietTo,
     nextSendAt: state?.nextSendAt && state.nextSendAt > now ? state.nextSendAt : null,
     lastSentAt: state?.lastSentAt || null,
     lastError: state?.lastError || null,
@@ -56,7 +65,7 @@ router.get('/queue', handle(async req => {
   if (status !== 'all' && !QUEUE_STATUSES.includes(status)) throw new Error('Unknown status');
   const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
   const filter = status === 'all' ? {} : { status };
-  const retryAfter = new Date(Date.now() - loadConfig().maxAgeMs);
+  const retryAfter = new Date(Date.now() - maxAgeMs(await savedSettings()));
   const [rows, total] = await Promise.all([
     Queue.find(filter).sort({ createdAt: -1 }).skip((page - 1) * PAGE_SIZE).limit(PAGE_SIZE)
       .select('to email event application text status attempts lastError sentAt createdAt').lean(),
@@ -73,15 +82,28 @@ router.post('/resume', handle(async () => { await setState({ paused: false }); r
 // The worker sees this, unlinks the device and shows a new QR.
 router.post('/unlink', handle(async () => { await setState({ logoutRequested: true }); return { unlinkRequested: true }; }));
 
-// Back into the queue: it waits its turn and keeps the 30-second gap like every other message.
+// Back into the queue: it waits its turn and keeps the gap like every other message.
 router.post('/queue/:id/retry', handle(async req => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new Error('Unknown message');
+  const settings = await savedSettings();
   const { modifiedCount } = await Queue.updateOne(
-    { _id: req.params.id, status: 'failed', createdAt: { $gt: new Date(Date.now() - loadConfig().maxAgeMs) } },
+    { _id: req.params.id, status: 'failed', createdAt: { $gt: new Date(Date.now() - maxAgeMs(settings)) } },
     { $set: { status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null }, $unset: { expiresAt: 1 } },
   );
-  if (!modifiedCount) throw Object.assign(new Error('Only a failed message from the last 24 hours can be sent again.'), { status: 409 });
+  if (!modifiedCount) throw Object.assign(new Error(`Only a failed message from the last ${settings.maxAgeHours} hours can be sent again.`), { status: 409 });
   return { status: 'pending' };
+}));
+
+// Sending rules (ban safety). The worker reads them before every message, so a save applies at once.
+router.get('/settings', handle(async () => settingsReply(await savedSettings())));
+router.post('/settings', handle(async req => {
+  const settings = validateSettings(req.body);
+  await setState({ settings });
+  return settingsReply(settings);
+}));
+router.post('/settings/reset', handle(async () => {
+  await setState({ settings: { ...RECOMMENDED } });
+  return settingsReply({ ...RECOMMENDED });
 }));
 
 module.exports = router;

@@ -1,11 +1,12 @@
 import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
+import { setTimeout as sleep } from 'node:timers/promises';
 import QRCode from 'qrcode';
 import { STATE_ID } from './models.js';
 import { clearAuthState, useMongoAuthState } from './mongoAuthState.js';
 
 // The live WhatsApp Web link. It only sends: incoming messages are ignored and never marked read.
 // makeSocket / fetchVersion are Baileys' own; tests pass fakes to play WhatsApp's side.
-export function createConnection({ Auth, State, logger, makeSocket = makeWASocket, fetchVersion = fetchLatestBaileysVersion }) {
+export function createConnection({ Auth, State, logger, makeSocket = makeWASocket, fetchVersion = fetchLatestBaileysVersion, wait = sleep }) {
   let sock = null;
   let connected = false;
   let running = false;
@@ -121,10 +122,26 @@ export function createConnection({ Auth, State, logger, makeSocket = makeWASocke
         const [result] = (await sock.onWhatsApp(to)) || [];
         return result?.exists ? result.jid : null;
       },
-      async send(jid, text) {
+      // typingMs > 0: shows "typing…" in the chat for that long first. WhatsApp only shows it while the
+      // account is online, so it goes online for the message and offline again after. A typing hiccup never stops the message.
+      async send(jid, text, typingMs = 0) {
         if (!sock) throw new Error('WhatsApp is not connected');
-        const message = await sock.sendMessage(jid, { text });
-        return message?.key?.id;
+        const socket = sock;
+        const presence = (type, to) => socket.sendPresenceUpdate(type, to).catch(error => logger.warn({ err: error }, `presence ${type} failed`));
+        if (typingMs > 0) {
+          await presence('available');
+          await socket.presenceSubscribe(jid).catch(() => {});
+          await presence('composing', jid);
+          await wait(typingMs);
+          await presence('paused', jid);
+          if (sock !== socket) throw new Error('WhatsApp disconnected while typing');
+        }
+        try {
+          const message = await socket.sendMessage(jid, { text });
+          return message?.key?.id;
+        } finally {
+          if (typingMs > 0) await presence('unavailable');
+        }
       },
     },
   };

@@ -7,8 +7,12 @@ import { Auth, Lock, Queue, State, STATE_ID } from '../src/models.js';
 import { createSender, dayKey } from '../src/sender.js';
 import { createLease } from '../src/lease.js';
 import { useMongoAuthState } from '../src/mongoAuthState.js';
+import { RECOMMENDED, effectiveSettings, inQuietHours, settingsWarnings, validateSettings } from '../src/settings.js';
 
-const config = { minGapMs: 30_000, jitterMs: 15_000, dailyLimit: 3, maxAttempts: 3, retryDelayMs: 300_000, maxAgeMs: 24 * 60 * 60_000, timeZone: 'Asia/Kolkata' };
+const config = { timeZone: 'Asia/Kolkata' };
+// The admin's sending rules for these tests: a small daily limit, no typing wait and no quiet hours unless a test turns them on.
+const rules = { ...RECOMMENDED, dailyLimit: 3, typing: false, quietHours: false };
+const setRules = changes => State.updateOne({ _id: STATE_ID }, { $set: { settings: { ...rules, ...changes } } }, { upsert: true });
 let mongo;
 let clock;
 const now = () => new Date(clock);
@@ -21,9 +25,9 @@ function fakeWhatsApp({ missing = [], failWith = null } = {}) {
     connected: true,
     isConnected() { return this.connected; },
     async resolve(to) { return missing.includes(to) ? null : `${to}@s.whatsapp.net`; },
-    async send(jid, text) {
+    async send(jid, text, typingMs) {
       if (failWith) throw new Error(failWith);
-      sent.push({ jid, text });
+      sent.push({ jid, text, typingMs });
       return `id-${sent.length}`;
     },
   };
@@ -42,6 +46,7 @@ after(async () => {
 beforeEach(async () => {
   clock = Date.parse('2026-10-20T06:00:00Z');
   await Promise.all([Queue.deleteMany({}), State.deleteMany({}), Auth.deleteMany({}), Lock.deleteMany({})]);
+  await setRules({});
 });
 
 describe('sender', () => {
@@ -52,7 +57,7 @@ describe('sender', () => {
     await enqueue('919876543211', 'second');
 
     assert.equal((await sender.step()).reason, 'sent');
-    assert.deepEqual(wa.sent, [{ jid: '919876543210@s.whatsapp.net', text: 'first' }]);
+    assert.deepEqual(wa.sent, [{ jid: '919876543210@s.whatsapp.net', text: 'first', typingMs: 0 }]);
 
     advance(29_999);
     assert.equal((await sender.step()).reason, 'gap');
@@ -102,7 +107,7 @@ describe('sender', () => {
     const wa = fakeWhatsApp();
     const sender = createSender({ Queue, State, transport: wa, config, now });
     await enqueue('919876543210', 'x');
-    await State.create({ _id: STATE_ID, paused: true });
+    await State.updateOne({ _id: STATE_ID }, { paused: true });
     assert.equal((await sender.step()).reason, 'paused');
     await State.updateOne({ _id: STATE_ID }, { paused: false });
     wa.connected = false;
@@ -176,6 +181,59 @@ describe('sender', () => {
     assert.equal(wa.sent.length, 0);
   });
 
+  it('stops for quiet hours at night (India time) and sends again in the morning', async () => {
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now });
+    await setRules({ quietHours: true, quietFrom: 22, quietTo: 8 });
+    clock = Date.parse('2026-10-20T17:00:00Z'); // 22:30 in India
+    await enqueue('919876543210', 'night');
+    assert.equal((await sender.step()).reason, 'quiet-hours');
+    clock = Date.parse('2026-10-21T02:29:00Z'); // 07:59
+    assert.equal((await sender.step()).reason, 'quiet-hours');
+    clock = Date.parse('2026-10-21T02:30:00Z'); // 08:00
+    assert.equal((await sender.step()).reason, 'sent');
+    assert.equal(wa.sent.length, 1);
+  });
+
+  it('types for longer on longer messages, never past the longest typing time', async () => {
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0.5 });
+    await setRules({ typing: true, typingMinSec: 2, typingMaxSec: 8 });
+    await enqueue('919876543210', 'x'.repeat(250));
+    await enqueue('919876543211', 'x'.repeat(5000));
+    await sender.step();
+    advance(60_000);
+    await sender.step();
+    assert.deepEqual(wa.sent.map(m => m.typingMs), [2000 + 2000 + 500, 8000]);
+  });
+
+  it('a rule saved on the admin page applies to the very next message, without a restart', async () => {
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    await enqueue('919876543210', 'a');
+    await enqueue('919876543211', 'b');
+    await sender.step();
+    await setRules({ dailyLimit: 1 });
+    advance(60_000);
+    assert.equal((await sender.step()).reason, 'daily-limit');
+    await setRules({ dailyLimit: 5, minGapSec: 120 });
+    await sender.step(); // sends b
+    await enqueue('919876543212', 'c');
+    advance(119_000);
+    assert.equal((await sender.step()).reason, 'gap');
+  });
+
+  it('with nothing saved, the recommended rules apply', async () => {
+    await State.updateOne({ _id: STATE_ID }, { $unset: { settings: 1 } });
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    await enqueue('919876543210', 'a');
+    await sender.step();
+    assert.equal(wa.sent[0].typingMs, RECOMMENDED.typingMinSec * 1000);
+    const state = await State.findById(STATE_ID).lean();
+    assert.equal(state.nextSendAt.getTime() - clock, RECOMMENDED.minGapSec * 1000);
+  });
+
   it('counts the day in India time', () => {
     assert.equal(dayKey(new Date('2026-10-20T18:29:00Z'), 'Asia/Kolkata'), '2026-10-20');
     assert.equal(dayKey(new Date('2026-10-20T18:30:00Z'), 'Asia/Kolkata'), '2026-10-21');
@@ -220,5 +278,40 @@ describe('session stored in MongoDB', () => {
     await restarted.state.keys.set({ 'pre-key': { 7: null } });
     assert.equal((await restarted.state.keys.get('pre-key', ['7']))[7], null);
     assert.ok(initAuthCreds().noiseKey); // fresh login creds still come from Baileys
+  });
+});
+
+describe('settings', () => {
+  it('accepts the recommended rules and refuses anything outside the safe limits, in plain words', () => {
+    assert.deepEqual(validateSettings({ ...RECOMMENDED, extra: 'ignored' }), { ...RECOMMENDED });
+    assert.throws(() => validateSettings({ ...RECOMMENDED, minGapSec: 29 }), /Gap between messages must be a whole number from 30 to 600/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, dailyLimit: 301 }), /from 1 to 300/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, jitterSec: 1.5 }), /whole number/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, typing: 'yes' }), /on or off/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, maxAttempts: undefined }), /Tries per message/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, typingMinSec: 9, typingMaxSec: 8 }), /cannot be more than/);
+    assert.throws(() => validateSettings({ ...RECOMMENDED, quietFrom: 8, quietTo: 8 }), /same hour/);
+    assert.doesNotThrow(() => validateSettings({ ...RECOMMENDED, quietHours: false, quietFrom: 8, quietTo: 8 }));
+    assert.throws(() => validateSettings(null), /all the sending rules/);
+  });
+
+  it('fills anything missing or broken in the saved rules with the recommended value', () => {
+    assert.deepEqual(effectiveSettings(undefined), RECOMMENDED);
+    assert.deepEqual(effectiveSettings({ dailyLimit: 100, minGapSec: 5 }), { ...RECOMMENDED, dailyLimit: 100 });
+  });
+
+  it('warns when quiet hours are as long as the time a message may wait', () => {
+    assert.deepEqual(settingsWarnings(RECOMMENDED), []);
+    assert.match(settingsWarnings({ ...RECOMMENDED, quietFrom: 20, quietTo: 12, maxAgeHours: 16 })[0], /Quiet hours last 16 hours/);
+    assert.deepEqual(settingsWarnings({ ...RECOMMENDED, quietHours: false, maxAgeHours: 1 }), []);
+  });
+
+  it('quiet hours work across midnight and within one day', () => {
+    const at = hhmm => new Date(`2026-10-20T${hhmm}:00+05:30`);
+    const night = { ...RECOMMENDED, quietFrom: 22, quietTo: 8 };
+    assert.deepEqual(['21:59', '22:00', '03:00', '07:59', '08:00'].map(t => inQuietHours(night, at(t), 'Asia/Kolkata')), [false, true, true, true, false]);
+    const afternoon = { ...RECOMMENDED, quietFrom: 13, quietTo: 15 };
+    assert.deepEqual(['12:59', '13:00', '14:59', '15:00'].map(t => inQuietHours(afternoon, at(t), 'Asia/Kolkata')), [false, true, true, false]);
+    assert.equal(inQuietHours({ ...night, quietHours: false }, at('03:00'), 'Asia/Kolkata'), false);
   });
 });

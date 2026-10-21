@@ -6,12 +6,14 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { Queue, State, STATE_ID } = require('../whatsapp/src/models.js');
+const { RECOMMENDED } = require('../whatsapp/src/settings.js');
 const userModel = require('../models/userModel');
 const nativeFetch = global.fetch;
 let db, server, base, admin, customer;
 const cookie = user => `token=${jwt.sign({ _id: String(user._id), role: user.roles[0] }, process.env.TOKEN_SECRET_KEY)}`;
-async function api(path, user = admin, method = 'GET') {
-  const response = await nativeFetch(base + path, { method, headers: user ? { Cookie: cookie(user) } : {} });
+async function api(path, user = admin, method = 'GET', body) {
+  const headers = { ...(user ? { Cookie: cookie(user) } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) };
+  const response = await nativeFetch(base + path, { method, headers, ...(body ? { body: JSON.stringify(body) } : {}) });
   return { status: response.status, ...await response.json() };
 }
 const hoursAgo = hours => new Date(Date.now() - hours * 60 * 60_000);
@@ -38,7 +40,7 @@ beforeEach(async () => {
 after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 
 test('only a signed-in admin can open anything', async () => {
-  for (const [path, method] of [['/status', 'GET'], ['/queue', 'GET'], ['/pause', 'POST'], ['/unlink', 'POST']]) {
+  for (const [path, method] of [['/status', 'GET'], ['/queue', 'GET'], ['/pause', 'POST'], ['/unlink', 'POST'], ['/settings', 'GET'], ['/settings', 'POST'], ['/settings/reset', 'POST']]) {
     assert.equal((await api(path, null, method)).status, 401, path);
     assert.equal((await api(path, customer, method)).status, 403, path);
   }
@@ -54,7 +56,7 @@ test('status shows the link, the QR only while waiting for a scan, today\'s coun
   assert.equal(data.workerRunning, true);
   assert.equal(data.qr, 'data:image/png;base64,AAA');
   assert.equal(data.sentToday, 0, 'yesterday\'s count is not today\'s');
-  assert.equal(data.dailyLimit, 150);
+  assert.equal(data.dailyLimit, RECOMMENDED.dailyLimit, 'nothing saved yet, so the recommended limit');
   assert.equal(data.counts.pending, 1);
   assert.equal(data.counts.skipped, 1);
   assert.equal(data.counts.sent, 0);
@@ -106,4 +108,39 @@ test('send again puts only a failed message from the last 24 hours back in the q
   assert.deepEqual([row.status, row.attempts, row.lastError, row.expiresAt], ['pending', 0, null, undefined]);
   for (const id of [old._id, sent._id, fresh._id]) assert.equal((await api(`/queue/${id}/retry`, admin, 'POST')).status, 409);
   assert.equal((await api('/queue/not-an-id/retry', admin, 'POST')).status, 400);
+});
+
+test('sending rules: recommended until saved, a save is checked and stored, reset brings back the recommended rules', async () => {
+  let { data } = await api('/settings');
+  assert.deepEqual(data.settings, RECOMMENDED);
+  assert.deepEqual(data.recommended, RECOMMENDED);
+  assert.deepEqual(data.limits.dailyLimit, [1, 300]);
+  assert.deepEqual(data.warnings, []);
+
+  const mine = { ...RECOMMENDED, dailyLimit: 80, minGapSec: 45, quietFrom: 20, quietTo: 12, maxAgeHours: 12 };
+  ({ data } = await api('/settings', admin, 'POST', mine));
+  assert.deepEqual(data.settings, mine);
+  assert.match(data.warnings[0], /will expire/);
+  assert.deepEqual((await State.findById(STATE_ID).lean()).settings, mine);
+  ({ data } = await api('/status'));
+  assert.equal(data.dailyLimit, 80);
+  assert.equal(data.minGapSec, 45);
+
+  const refused = await api('/settings', admin, 'POST', { ...mine, minGapSec: 10 });
+  assert.equal(refused.status, 400);
+  assert.match(refused.message, /Gap between messages must be a whole number from 30 to 600/);
+  assert.equal((await State.findById(STATE_ID).lean()).settings.minGapSec, 45, 'a refused save changes nothing');
+
+  ({ data } = await api('/settings/reset', admin, 'POST'));
+  assert.deepEqual(data.settings, RECOMMENDED);
+  assert.deepEqual((await State.findById(STATE_ID).lean()).settings, RECOMMENDED);
+});
+
+test('send again follows the saved "drop a message after" hours', async () => {
+  await State.create({ _id: STATE_ID, settings: { ...RECOMMENDED, maxAgeHours: 1 } });
+  const row = await Queue.create({ to: '919876543210', text: 'x', status: 'failed', createdAt: hoursAgo(2) });
+  assert.equal((await api('/queue?status=failed')).data.rows[0].canRetry, false);
+  const refused = await api(`/queue/${row._id}/retry`, admin, 'POST');
+  assert.equal(refused.status, 409);
+  assert.match(refused.message, /last 1 hours/);
 });
