@@ -12,8 +12,10 @@ const { markProjectInvoicePaid, buildLineItemsFromOrder } = require("../../helpe
 const { syncProjectFinalInvoice } = require("../../helpers/projectFinalInvoice");
 const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
 const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
-const { findLiveWebsiteOffer } = require("../../helpers/websiteOffers");
 const { sendProjectCreatedEmail } = require("../../helpers/emailService");
+const { resolveProjectPricing } = require('../../helpers/projectPricing');
+const { buildInstallments } = require('../../helpers/projectInstallments');
+const { createHash } = require('node:crypto');
 
 const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
 
@@ -32,29 +34,6 @@ const CATEGORY_LABELS = {
 };
 
 const DEFAULT_STARTING_NODE_TITLE = "Project Started";
-
-// Default progress-gate thresholds (node-system %, admin-editable per project — Layer B):
-// installment #1 (advance) has no threshold (always due at creation, gates nothing);
-// 2-installment split: #2 due at 90% progress; 3-installment split: #2 at 50%, #3 at 90%.
-const DEFAULT_PROGRESS_THRESHOLDS = {
-  2: [null, 90],
-  3: [null, 50, 90],
-};
-
-const buildInstallments = (totalAmount, installmentCount) => {
-  const count = Number(installmentCount) === 3 ? 3 : 2;
-  const splits = count === 3 ? [30, 30, 40] : [50, 50];
-  const thresholds = DEFAULT_PROGRESS_THRESHOLDS[count];
-
-  return splits.map((percentage, index) => ({
-    installmentNumber: index + 1,
-    percentage,
-    amount: Math.round((totalAmount * percentage) / 100),
-    paid: false,
-    paymentStatus: "none",
-    progressThreshold: thresholds[index],
-  }));
-};
 
 const adminCreateProjectOrderController = async (req, res) => {
   try {
@@ -83,6 +62,18 @@ const adminCreateProjectOrderController = async (req, res) => {
         error: true,
         success: false,
       });
+    }
+
+    let creationKey, creationHash;
+    if (req.body.creationKey) {
+      if (!/^[a-zA-Z0-9-]{16,80}$/.test(req.body.creationKey)) return res.status(400).json({ success: false, message: 'Invalid project request key' });
+      creationKey = `${req.userId}:${req.body.creationKey}`;
+      creationHash = createHash('sha256').update(JSON.stringify({ customerId, body: req.body })).digest('hex');
+      const existing = await orderModel.findOne({ projectCreationKey: creationKey });
+      if (existing) {
+        if (existing.projectCreationHash !== creationHash || !existing.projectCreationComplete) return res.status(409).json({ success: false, message: 'This creation request already exists. Refresh the client projects before trying again.' });
+        return res.status(200).json({ success: true, error: false, message: 'Project was already created', data: existing });
+      }
     }
 
     const {
@@ -118,10 +109,10 @@ const adminCreateProjectOrderController = async (req, res) => {
       });
     }
 
-    const finalPrice = Number(sellingPrice);
-    if (!Number.isFinite(finalPrice) || finalPrice < 0) {
+    let finalPrice = Number(sellingPrice);
+    if (!Number.isFinite(finalPrice) || finalPrice < 0 || Math.round(finalPrice * 100) / 100 !== finalPrice) {
       return res.status(400).json({
-        message: "Selling price must be zero or more",
+        message: "Selling price must be zero or more, with at most two decimal places",
         error: true,
         success: false,
       });
@@ -158,21 +149,11 @@ const adminCreateProjectOrderController = async (req, res) => {
       : null;
 
     let offer = null;
-    if (offerSlug) {
-      offer = await findLiveWebsiteOffer(String(offerSlug));
-      if (!offer) {
-        return res.status(400).json({
-          message: "The selected offer is no longer live on the website",
-          error: true,
-          success: false,
-        });
-      }
-    }
 
     // Base price and feature prices are never trusted from the request body —
     // both are re-derived server-side from their source collections.
     const basePriceEntry = await categoryBasePriceModel.findOne({ category }).lean();
-    const basePrice = basePriceEntry?.basePrice || 0;
+    let basePrice = basePriceEntry?.basePrice || 0;
 
     const requestedIds = Array.isArray(requestedFeatureIds)
       ? requestedFeatureIds.filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -182,27 +163,39 @@ const adminCreateProjectOrderController = async (req, res) => {
     // directly, not only through the admin form that applies the same filter client-side.
     const featureDocs = requestedIds.length
       ? await productModel
-          .find({ _id: { $in: requestedIds }, ...featureCatalogueFilter(category) })
+          .find({ _id: { $in: requestedIds }, isHidden: { $ne: true }, retiredAt: null, archivedAt: null, ...featureCatalogueFilter(category) })
           .select("serviceName sellingPrice price isQuantityBased compatibleWith")
           .lean()
       : [];
+    if (requestedIds.length !== new Set(requestedIds).size || requestedIds.length !== featureDocs.length || !Array.isArray(requestedFeatureIds) || requestedIds.length !== requestedFeatureIds.length) {
+      return res.status(400).json({ success: false, error: true, message: 'An additional feature is unavailable for this category. Refresh the feature list.' });
+    }
 
     // Only a quantity-based feature may be bought more than once — decided by the
     // catalogue flag the admin sets in the Features form, never by the feature's name.
     const clientProjectFeatures = featureDocs.map((feature) => {
-      const unitPrice = feature.sellingPrice || feature.price || 0;
-      const requestedQuantity = Number(featureQuantities[String(feature._id)]) || 1;
+      const unitPrice = feature.sellingPrice ?? feature.price ?? 0;
+      const rawQuantity = featureQuantities[String(feature._id)];
+      const requestedQuantity = rawQuantity === undefined ? 1 : Number(rawQuantity);
+      if (feature.isQuantityBased && (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 1000)) throw Object.assign(new Error('Feature quantity must be a whole number between 1 and 1000'), { statusCode: 400 });
       const quantity = feature.isQuantityBased ? Math.max(1, requestedQuantity) : 1;
       return {
         featureId: feature._id,
         name: feature.serviceName,
         unitPrice,
-        price: unitPrice * quantity,
+        price: Math.round(unitPrice * quantity * 100) / 100,
         quantity,
       };
     });
     const featuresTotal = clientProjectFeatures.reduce((sum, feature) => sum + (feature.price || 0), 0);
-    const referenceTotal = basePrice + featuresTotal;
+    let referenceTotal = basePrice + featuresTotal;
+    const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal });
+    if (commercial) {
+      finalPrice = commercial.finalPrice;
+      basePrice = commercial.basePrice;
+      referenceTotal = commercial.referenceTotal;
+      offer = commercial.agreement.offer;
+    }
 
     const isPartialPayment = !isFree && paymentType === "partial";
     // A project order must never be born `approved` without a real payment recorded. When admin
@@ -213,6 +206,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     // FREE project: there is nothing to pay, so it is fully settled and approved from birth.
     const startsApproved = shouldRecordPayment || isFree;
     const orderData = {
+      ...(creationKey ? { projectCreationKey: creationKey, projectCreationHash: creationHash } : {}),
       userId: customerId,
       price: finalPrice,
       totalAmount: finalPrice,
@@ -224,7 +218,7 @@ const adminCreateProjectOrderController = async (req, res) => {
       remainingAmount: finalPrice,
       paymentComplete: isFree,
       projectSnapshot: {
-        displayName: projectName?.trim() || CATEGORY_LABELS[category],
+        displayName: projectName?.trim() || commercial?.agreement.package?.name || offer?.title || CATEGORY_LABELS[category],
         category,
         startingNodeTitle: resolvedStartingNodeTitle,
         totalPages: totalPages || undefined,
@@ -232,10 +226,11 @@ const adminCreateProjectOrderController = async (req, res) => {
         referenceTotal,
         finalPrice,
         features: clientProjectFeatures,
+        ...(commercial ? { salesAgreement: commercial.agreement } : {}),
         ...(offer ? { offer: { slug: offer.slug, title: offer.title } } : {}),
       },
       orderItems: [
-        { id: `project:${category}`, name: `${CATEGORY_LABELS[category]} (Base)`, type: "main", quantity: 1, originalPrice: basePrice, finalPrice: basePrice },
+        { id: `project:${category}`, name: commercial?.agreement.package?.name || offer?.title || `${CATEGORY_LABELS[category]} (Base)`, type: "main", quantity: 1, originalPrice: basePrice, finalPrice: basePrice },
         // originalPrice is the PER-UNIT price: downloadInvoice.js prints originalPrice x quantity,
         // so putting the already-multiplied total here would bill quantity twice over.
         // Same convention as createOrder.js's feature line items.
@@ -331,15 +326,18 @@ const adminCreateProjectOrderController = async (req, res) => {
         order.currentInstallment = 2;
         await order.save();
       }
-      await syncProjectFinalInvoice(order);
-    } else if (isFree) {
-      await syncProjectFinalInvoice(order);
     }
+    // The statement is a summary, not a second payable bill. Make it available even before payment.
+    await syncProjectFinalInvoice(order);
 
     // Queues the "project started" mail; the response then carries its draft id and the admin
     // panel shows the same Send / Don't Send review popup project cancellation already shows.
     // Best-effort: the builder never throws, so a mail problem never undoes a created project.
     await sendProjectCreatedEmail(client, order, createdInvoices[0]);
+    if (creationKey) {
+      order.projectCreationComplete = true;
+      await order.save();
+    }
 
     return res.status(201).json({
       message: "Project created successfully",
@@ -349,8 +347,8 @@ const adminCreateProjectOrderController = async (req, res) => {
     });
   } catch (error) {
     console.error("Error creating project for client:", error);
-    return res.status(error.statusCode || 500).json({
-      message: error.message || "Failed to create project for client",
+    return res.status(error.code === 11000 ? 409 : error.statusCode || 500).json({
+      message: error.code === 11000 ? 'This request already exists. Refresh client projects before retrying.' : error.message || "Failed to create project for client",
       error: true,
       success: false,
     });

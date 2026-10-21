@@ -12,7 +12,7 @@ const unavailable = (message) => {
   return error;
 };
 
-const fetchLiveWebsiteOffers = async () => {
+const fetchWebsiteCatalogue = async () => {
   const origin = process.env.PORTFOLIO_WEBSITE_URL;
   const secret = process.env.PORTFOLIO_INTEGRATION_SECRET || "";
   if (!origin || secret.length < 32) {
@@ -23,6 +23,7 @@ const fetchLiveWebsiteOffers = async () => {
   try {
     response = await fetch(new URL("/api/offers/live", origin), {
       headers: { Authorization: `Bearer ${secret}` },
+      cache: 'no-store', redirect: 'error',
       signal: AbortSignal.timeout(10000),
     });
   } catch {
@@ -31,10 +32,13 @@ const fetchLiveWebsiteOffers = async () => {
   if (!response.ok) throw unavailable("The website did not return its offers");
 
   const result = await response.json();
-  return (Array.isArray(result?.offers) ? result.offers : [])
+  if (!Array.isArray(result?.offers)) throw unavailable("The website returned an invalid offers response");
+  const offers = (Array.isArray(result.catalogueOffers) ? result.catalogueOffers : result.offers)
     .filter((offer) => offer && typeof offer.slug === "string" && typeof offer.title === "string")
-    .map((offer) => ({ slug: offer.slug, title: offer.title, endsAt: offer.endsAt || null }));
+    .map((offer) => ({ ...offer, endsAt: offer.endsAt || null }));
+  return { offers };
 };
+const fetchLiveWebsiteOffers = async () => (await fetchWebsiteCatalogue()).offers.filter(offer => (!offer.status || offer.status === 'published') && Date.parse(offer.endsAt) > Date.now());
 
 // The offer a project may be attached to — re-checked server-side at create time, because an
 // offer listed in the form a minute ago may have been archived or expired since.
@@ -43,4 +47,4 @@ const findLiveWebsiteOffer = async (slug) => {
   return offers.find((offer) => offer.slug === slug) || null;
 };
 
-module.exports = { fetchLiveWebsiteOffers, findLiveWebsiteOffer };
+module.exports = { fetchWebsiteCatalogue, fetchLiveWebsiteOffers, findLiveWebsiteOffer };

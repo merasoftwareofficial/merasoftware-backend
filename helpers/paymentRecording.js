@@ -18,17 +18,26 @@ const getOrderTotal = (order) =>
 // or a free project), the difference is shown as its own negative "Discount" line — so the items
 // always add up to the order's price instead of an unexplained gap between items and total.
 const buildLineItemsFromOrder = (order) => {
+  const agreement = order?.projectSnapshot?.salesAgreement;
+  if (agreement?.version === 1) {
+    const items = [{ name: agreement.package?.name || agreement.offer?.title || 'Project scope', price: Number(agreement.regularPrice) }];
+    if (agreement.offerDiscount > 0) items.push({ name: `Offer benefit (${agreement.offer?.title || 'Offer'})`, price: -Number(agreement.offerDiscount) });
+    for (const extra of agreement.extras || []) items.push({ name: `${extra.name}${extra.quantity > 1 ? ` × ${extra.quantity}` : ''}`, price: Number(extra.price) });
+    if (agreement.adminDiscount > 0) items.push({ name: `Additional admin discount: ${agreement.discountReason}`, price: -Number(agreement.adminDiscount) });
+    return items;
+  }
   if (Array.isArray(order?.orderItems) && order.orderItems.length > 0) {
     const items = order.orderItems.map((item) => ({
       name: item.name,
       price: Number(item.finalPrice ?? item.originalPrice ?? 0),
     }));
     const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
-    const discount = Math.round(itemsTotal - getOrderTotal(order));
+    const discount = Math.round((itemsTotal - getOrderTotal(order)) * 100) / 100;
     if (discount > 0) {
       const offerTitle = order?.projectSnapshot?.offer?.title;
       items.push({ name: offerTitle ? `Discount (${offerTitle})` : "Discount", price: -discount });
     }
+    if (discount < 0) items.push({ name: 'Agreed price adjustment', price: -discount });
     return items;
   }
   return [{ name: getOrderDisplayName(order, "Project"), price: getOrderTotal(order) }];

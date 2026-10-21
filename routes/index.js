@@ -190,6 +190,9 @@ router.get("/admin/delete-order/:orderId/scan", authToken, scanDeleteOrderContro
 router.delete("/admin/delete-order/:orderId", authToken, deleteOrderController);
 router.post("/admin/clients/:customerId/create-project", authToken, adminCreateProjectOrderController);
 router.get("/admin/website-offers", authToken, adminWebsiteOffersController);
+router.get('/admin/sales-packages', authToken, require('../controller/order/salesPackagesController').adminRead);
+router.patch('/admin/sales-packages', authToken, require('../controller/order/salesPackagesController').adminSave);
+router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
 router.post("/admin/clients/:customerId/documents", authToken, upload.any(), uploadClientDocumentController);
 router.get("/admin/clients/:customerId/documents", authToken, getAdminClientDocumentsController);
 router.get("/admin/clients/:customerId/credentials", authToken, getClientCredentialsController);

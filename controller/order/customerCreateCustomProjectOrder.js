@@ -1,3 +1,4 @@
+const { buildInstallments } = require("../../helpers/projectInstallments");
 const mongoose = require("mongoose");
 const productModel = require("../../models/productModel");
 const orderModel = require("../../models/orderProductModel");
@@ -48,22 +49,6 @@ const DEFAULT_PROGRESS_THRESHOLDS = {
   3: [null, 50, 90],
 };
 
-const buildInstallments = (totalAmount, installmentCount) => {
-  const count = Number(installmentCount) === 3 ? 3 : 2;
-  const splits = count === 3 ? [30, 30, 40] : [50, 50];
-  const thresholds = DEFAULT_PROGRESS_THRESHOLDS[count];
-
-  return splits.map((percentage, index) => ({
-    installmentNumber: index + 1,
-    percentage,
-    amount: Math.round((totalAmount * percentage) / 100),
-    paid: false,
-    paymentStatus: "none",
-    // Installment #1 is due immediately; later ones staggered 30 days apart.
-    dueDate: new Date(Date.now() + index * 30 * 24 * 60 * 60 * 1000),
-    progressThreshold: thresholds[index],
-  }));
-};
 
 const customerCreateCustomProjectOrder = async (req, res) => {
   try {
@@ -146,7 +131,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
     // catalogue flag the admin sets in the Features form, never by the feature's name.
     // Identical to the mapping in adminCreateProjectOrder.js.
     const clientProjectFeatures = featureDocs.map((feature) => {
-      const unitPrice = feature.sellingPrice || feature.price || 0;
+      const unitPrice = feature.sellingPrice ?? feature.price ?? 0;
       const requestedQuantity = Number(featureQuantities[String(feature._id)]) || 1;
       const quantity = feature.isQuantityBased ? Math.max(1, requestedQuantity) : 1;
       return {

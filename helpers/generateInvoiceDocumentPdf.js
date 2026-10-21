@@ -44,6 +44,33 @@ const STATUS_TEXT = {
 };
 const statusText = (status) => STATUS_TEXT[status] || "DUE";
 
+const renderSalesAgreement = (doc, order, initialY) => {
+  const agreement = order?.projectSnapshot?.salesAgreement;
+  if (!agreement) return initialY;
+  let y = initialY;
+  const line = (text, bold = false) => {
+    const options = { width: 500 };
+    doc.fontSize(bold ? 11 : 10).fillColor(bold ? '#0f172a' : '#475569');
+    const height = doc.heightOfString(String(text), options) + 6;
+    if (y + height > 710) { doc.addPage(); y = 48; }
+    doc.text(String(text), 48, y, options); y += height;
+  };
+  line(agreement.package?.name || 'Agreed project scope', true);
+  if (agreement.offer) line(`Offer applied: ${agreement.offer.title}`);
+  line(`Regular scope: ${money(agreement.regularPrice)}`);
+  if (agreement.offerDiscount > 0) line(`Offer benefit: - ${money(agreement.offerDiscount)}`);
+  for (const item of agreement.extras || []) line(`${item.name}${item.quantity > 1 ? ` x ${item.quantity}` : ''}: ${money(item.price)}`);
+  if (agreement.adminDiscount > 0) line(`Additional admin discount: - ${money(agreement.adminDiscount)} (${agreement.discountReason})`);
+  line('Included work', true);
+  for (const item of agreement.scope || []) line(`- ${item}`);
+  if (agreement.terms?.length) {
+    line('Agreed terms', true);
+    for (const item of agreement.terms) line(`- ${item}`);
+  }
+  if (y > 570) { doc.addPage(); y = 48; }
+  return y + 12;
+};
+
 // Statement layout — carried over verbatim from the admin-only generator this replaces, so
 // the document an admin has always downloaded is unchanged. Only its reach is new.
 const renderStatement = (doc, { invoice, order, customer, transactions }) => {
@@ -61,6 +88,10 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
   y += 17;
   doc.fontSize(10).fillColor("#475569").text(`Customer: ${customer?.name || "Customer"} · ${customer?.email || ""}`, 48, y);
   y += 34;
+  y = renderSalesAgreement(doc, order, y);
+  if (!order?.projectSnapshot?.salesAgreement && order?.projectSnapshot?.offer?.title) {
+    doc.fontSize(10).text(`Offer: ${order.projectSnapshot.offer.title}`, 48, y); y += 22;
+  }
   doc.fillColor("#0f172a").fontSize(12).text(isService ? "Contracted total" : "Project total", 48, y).text(totalText(total), 420, y, { align: "right" });
   y += 22;
   doc.fillColor("#047857").text("Received", 48, y).text(money(paid), 420, y, { align: "right" });

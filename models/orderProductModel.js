@@ -265,6 +265,8 @@ const projectSnapshotSchema = new mongoose.Schema({
     basePrice: Number,
     referenceTotal: Number,
     finalPrice: Number,
+    // Frozen package/offer agreement; never re-read current catalogue prices for old work.
+    salesAgreement: { type: mongoose.Schema.Types.Mixed, default: undefined },
     features: [{
         featureId: { type: mongoose.Schema.Types.ObjectId, ref: 'product' },
         name: String,
@@ -291,6 +293,9 @@ const projectSnapshotSchema = new mongoose.Schema({
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
+    projectCreationKey: { type: String, unique: true, sparse: true },
+    projectCreationHash: String,
+    projectCreationComplete: { type: Boolean, default: false },
     // Transaction fence for project uploads racing order-state changes.
     uploadRevision: { type: Number, default: 0 },
     userId: {
