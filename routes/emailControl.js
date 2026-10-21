@@ -9,6 +9,7 @@ const { withRequiredLinks } = require('../helpers/emailMarkup');
 const { catalogFor, sampleContext, validateTemplateVariables, systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor } = require('../helpers/emailTemplates');
 const { verifyWebsiteAccess } = require('../helpers/websiteEmailAccess');
 const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
+const { messageText } = require('../helpers/whatsappQueue');
 const router = express.Router();
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(async (req, res, next) => {
@@ -152,8 +153,9 @@ router.post('/templates/preview', handle(async (req, res) => {
   const fields = templateFromEditor(req.body.event, req.body);
   validateContent(fields.subject, fields.text); validateTemplateVariables(req.body.event, fields.subject, fields.text);
   const { values, blocks } = sampleContext(req.body.event);
-  const { subject, text, html } = composeTemplate(fields, values, blocks);
-  res.json({ success: true, data: { subject, text, html } });
+  const { subject, text, html, plain } = composeTemplate(fields, values, blocks);
+  // The same mail as WhatsApp would send it, built by the queue's own function.
+  res.json({ success: true, data: { subject, text, html, whatsapp: messageText({ subject, plain }) } });
 }));
 router.get('/drafts/:id', handle(async (req, res) => {
   const draft = await loadDraft(req);

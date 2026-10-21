@@ -336,6 +336,7 @@ test('system template is editable, resettable and validated; custom templates ca
   assert.equal((await api(`/email-control/templates/${custom._id}/reset`, admin, {})).success, false);
   const preview = await api('/email-control/templates/preview?application=portal', admin, { event: 'sendProjectCancellationEmail', subject: 'Cancelled {{project}}', text: '{{refundTable}}' });
   assert.equal(preview.data.subject, 'Cancelled Business Website'); assert.match(preview.data.html, /Total Refunded/);
+  assert.match(preview.data.whatsapp, /^\*Cancelled Business Website\*\n\n/); assert.match(preview.data.whatsapp, /Total Refunded/); assert.doesNotMatch(preview.data.whatsapp, /</);
 });
 
 test('only an admin chooses a template; reviewers preview their edits', async () => {
