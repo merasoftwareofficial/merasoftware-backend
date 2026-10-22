@@ -27,6 +27,9 @@ const activateAfterProjectServices = async ({ projectOrderId, actorId, now = new
       }
     }
     await service.save();
+    if (service.paymentPolicy) {
+      await require('../models/invoiceModel').updateMany({ orderId: service._id, serviceCycleNumber: 1, invoiceType: 'project', status: { $in: ['unpaid', 'partially_paid'] } }, { $set: { dueDate: require('./offerPaymentPolicy').paymentDueDate(service.paymentPolicy, now) } });
+    }
   }
   return services.length;
 };

@@ -29,6 +29,7 @@ if (cronsEnabled) {
   fileCleanupScheduler.scheduleCleanup();
   scheduleAutoRenewal();
   scheduleServicePlanRenewals();
+  require('./cron/offerPaymentReminderCron').scheduleOfferPaymentReminders();
   scheduleChessCleanup();
   console.log('File cleanup scheduler initialized');
   console.log('Auto-renewal scheduler initialized');

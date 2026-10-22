@@ -13,6 +13,10 @@ const resolveRenewalPrice = (service) => {
 const processServicePlanRenewals = async (now = new Date()) => {
   const dueServices = await orderModel.find({ isServicePlan: true, servicePlanStatus: 'active', serviceNextBillingDate: { $lte: now } });
   for (const service of dueServices) {
+    if (service.paymentPolicy) {
+      await require('../helpers/offerServiceRenewal').advanceOfferServiceCycle(service._id, now);
+      continue;
+    }
     // New fixed-tenure services must complete every contracted cycle. Old records
     // without serviceTotalCycles retain their pre-existing auto-renew behaviour.
     if (isFixedTenureService(service) && isFinalCycle(service, service.serviceCurrentCycleNumber)) {

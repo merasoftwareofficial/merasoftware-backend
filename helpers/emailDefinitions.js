@@ -880,4 +880,11 @@ const definitions = {
   },
 };
 
+definitions['offer.payment.reminder'] = {
+  ...definitions['invoice.reminder'],
+  build(invoice, reminderMessage) {
+    const mail = definitions['invoice.reminder'].build(invoice, reminderMessage);
+    return mail ? { ...mail, reminderInvoice: undefined } : null;
+  },
+};
 module.exports = { definitions, refundTable };

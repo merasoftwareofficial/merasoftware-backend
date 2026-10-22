@@ -183,6 +183,14 @@ const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [
     if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions });
     else renderInvoice(doc, { invoice, order, customer });
 
+    const paymentLines = order?.paymentPolicy ? require('./offerPaymentPolicy').policyLines(order) : [];
+    if (paymentLines.length) {
+      doc.moveDown();
+      doc.fontSize(11).fillColor('#111827').text('Agreed payment terms');
+      doc.fontSize(10).fillColor('#374151');
+      for (const line of paymentLines) doc.text(line, { width: 500 });
+    }
+
     doc.end();
   });
 

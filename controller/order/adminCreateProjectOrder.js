@@ -204,8 +204,9 @@ const adminCreateProjectOrderController = async (req, res) => {
     // later. Only when a payment IS recorded at creation time (shouldRecordPayment) is the order
     // born approved, right below where that payment actually gets settled. The one exception is a
     // FREE project: there is nothing to pay, so it is fully settled and approved from birth.
-    const startsApproved = shouldRecordPayment || isFree;
+    const startsApproved = shouldRecordPayment || isFree || require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(commercial?.paymentPolicy);
     const orderData = {
+      paymentPolicy: commercial?.paymentPolicy || null,
       ...(creationKey ? { projectCreationKey: creationKey, projectCreationHash: creationHash } : {}),
       userId: customerId,
       price: finalPrice,
@@ -263,7 +264,8 @@ const adminCreateProjectOrderController = async (req, res) => {
       // #1 now; settleInstallmentInvoice creates #2/#3 when they are actually due.
       const installment = order.installments[0];
       const invoiceNumber = await generateInvoiceNumber();
-      const dueDate = installment.dueDate || invoiceDate;
+      const dueDate = commercial?.paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(commercial.paymentPolicy, invoiceDate) : installment.dueDate || invoiceDate;
+      if (commercial?.paymentPolicy) order.installments[0].dueDate = dueDate;
       const invoice = await invoiceModel.create({
         userId: customerId,
         orderId: order._id,
@@ -290,7 +292,7 @@ const adminCreateProjectOrderController = async (req, res) => {
         amountPaid: 0,
         status: isFree ? "paid" : "unpaid",
         invoiceDate,
-        dueDate: invoiceDate,
+        dueDate: commercial?.paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(commercial.paymentPolicy, invoiceDate) : invoiceDate,
         ...(isFree ? { paidDate: invoiceDate } : {}),
         lineItems,
       });
@@ -328,6 +330,7 @@ const adminCreateProjectOrderController = async (req, res) => {
       }
     }
     // The statement is a summary, not a second payable bill. Make it available even before payment.
+    if (commercial?.paymentPolicy && isPartialPayment) await order.save();
     await syncProjectFinalInvoice(order);
 
     // Queues the "project started" mail; the response then carries its draft id and the admin

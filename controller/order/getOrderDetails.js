@@ -182,6 +182,7 @@ const getOrderDetails = async (req, res) => {
 
         const responseData = {
             ...orderData,
+            paymentAccess: order.paymentPolicy ? await require('../../helpers/offerPaymentPolicy').getPaymentAccess(order) : null,
             orderState,
             lifecycleTimeline,
             // When the order reached the state it is in now — powers the "since" on a status badge.

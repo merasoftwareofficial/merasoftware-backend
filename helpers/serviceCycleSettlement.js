@@ -9,8 +9,9 @@ const settleServiceCycle = async ({ orderId, invoice, now = new Date() }) => {
   if (invoice.status !== "paid") return service;
 
   const cycleNumber = Number(invoice.serviceCycleNumber || service.serviceCurrentCycleNumber || 1);
+  const preservesActiveCycle = !!service.paymentPolicy && cycleNumber <= Number(service.serviceCurrentCycleNumber || 1);
   const awaitingActivation = service.servicePlanStatus === "pending_activation";
-  const cycle = getCycleDates(service, cycleNumber, now);
+  const cycle = preservesActiveCycle ? { start: service.serviceCurrentCycleStart, end: service.serviceCurrentCycleEnd } : getCycleDates(service, cycleNumber, now);
   const history = Array.isArray(service.serviceCycleHistory) ? service.serviceCycleHistory : [];
   const historyIndex = history.findIndex((entry) => Number(entry.cycleNumber) === cycleNumber);
   const entry = {
@@ -26,15 +27,20 @@ const settleServiceCycle = async ({ orderId, invoice, now = new Date() }) => {
   else history.push(entry);
 
   service.serviceCycleHistory = history;
-  service.serviceCurrentCycleNumber = cycleNumber;
-  service.serviceCompletedCycles = Math.max(Number(service.serviceCompletedCycles || 0), cycleNumber);
-  service.serviceCurrentCycleStart = cycle.start;
-  service.serviceCurrentCycleEnd = cycle.end;
-  service.serviceAccessUsedInCycle = 0;
+  service.serviceCompletedCycles = service.paymentPolicy ? history.length : Math.max(Number(service.serviceCompletedCycles || 0), cycleNumber);
+  if (!preservesActiveCycle) {
+    service.serviceCurrentCycleNumber = cycleNumber;
+    service.serviceCurrentCycleStart = cycle.start;
+    service.serviceCurrentCycleEnd = cycle.end;
+    service.serviceAccessUsedInCycle = 0;
+  }
   // A paid final cycle remains active until its contracted end date. The scheduler
   // marks it expired when that date arrives; no extra invoice is created.
-  service.servicePlanStatus = awaitingActivation ? "pending_activation" : "active";
-  service.serviceNextBillingDate = awaitingActivation ? null : cycle.end;
+  if (service.orderVisibility !== 'cancelled' && !['expired', 'inactive', 'cancelled'].includes(service.servicePlanStatus)
+      && !(preservesActiveCycle && service.servicePlanStatus === 'paused' && cycleNumber < Number(service.serviceCurrentCycleNumber))) {
+    service.servicePlanStatus = awaitingActivation ? "pending_activation" : "active";
+    if (!preservesActiveCycle) service.serviceNextBillingDate = awaitingActivation ? null : cycle.end;
+  }
 
   if (cycleNumber === 1) {
     service.paidAmount = Number(invoice.amountPaid || invoice.amount || 0);

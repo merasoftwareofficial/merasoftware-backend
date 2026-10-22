@@ -43,6 +43,11 @@ const assertProjectAcceptsUpload = async (order) => {
     return "This project is awaiting payment approval. Uploads open once it is approved.";
   }
 
+  if (order.paymentPolicy) {
+    const access = await require('./offerPaymentPolicy').getPaymentAccess(order);
+    return access.allowed ? null : access.reason;
+  }
+
   const dueUnpaid = await invoiceModel
     .countDocuments(getDueUnpaidInvoiceFilter(order))
     .catch(() => 0);

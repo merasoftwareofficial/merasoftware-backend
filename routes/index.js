@@ -299,6 +299,7 @@ router.post("/create-order", authToken, createOrder)
 // Service Plan purchase — standalone, or as an add-on attached to a project.
 // Single service: wallet, UPI or combined. Bulk: wallet only (doc 55 §10).
 router.post("/customer/service-plan-order", authToken, customerCreateServicePlanOrder)
+router.get('/customer/service-plan-offers/:planId', authToken, require('../controller/order/servicePlanOffers'))
 router.post("/customer/custom-project-order", authToken, customerCreateCustomProjectOrder)
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)
 router.post("/customer/service-plan/stop-renewal", authToken, stopServiceRenewal)

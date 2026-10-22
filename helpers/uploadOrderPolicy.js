@@ -15,6 +15,13 @@ async function assertUploadOrder(order, { fileCount, serviceOrderId }) {
     if (String(serviceOrderId || '') !== String(order._id)) reject('Selected service is required');
     if (s.capability !== 'upload_data' && s.serviceBehavior !== 'portal_access_control') reject('This service does not allow data upload');
     if (order.servicePlanStatus !== 'active') reject('This service is not active');
+    if (order.orderVisibility === 'cancelled' || order.orderVisibility === 'payment-rejected') reject('This service cannot accept uploads');
+    if (order.paymentPolicy) {
+      if (order.orderVisibility === 'pending-approval') reject('This service is awaiting payment approval');
+      if (order.servicePlanEndDate && new Date(order.servicePlanEndDate) <= new Date()) reject('This service has expired');
+      const access = await require('./offerPaymentPolicy').getPaymentAccess(order);
+      if (!access.allowed) reject(access.reason);
+    }
     if (s.limitScope !== 'unlimited' && Number(order.serviceAccessUsedInCycle || 0) >= Number(s.portalAccessCount || 0)) reject('Selected service upload limit is used');
     if (fileCount > Math.min(limits.MAX_SERVICE_FILES_PER_UPLOAD, Number(s.filesLimit || 0))) reject('Too many files for the selected service');
   } else if (isProjectUpload) {

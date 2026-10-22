@@ -82,7 +82,7 @@ const customerCreateServicePlanOrder = async (req, res) => {
       });
     }
 
-    if (plan.isHidden) {
+    if (plan.isHidden || plan.retiredAt || plan.archivedAt) {
       return res.status(400).json({
         message: "This plan is not available for purchase",
         error: true,
@@ -172,6 +172,24 @@ const customerCreateServicePlanOrder = async (req, res) => {
     }
 
     const startDate = new Date();
+    const paymentPolicy = await require('../../helpers/serviceOfferPolicy').resolveServiceOffer(plan, req.body);
+    const deferred = require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(paymentPolicy);
+    if (req.body.deferPayment && !deferred) throw new Error('The selected offer does not allow deferred payment');
+    let purchaseKey, purchaseHash;
+    if (req.body.deferPayment) {
+      if (typeof req.body.purchaseKey !== 'string' || !/^[a-f\d-]{36}$/i.test(req.body.purchaseKey)) throw new Error('A purchase identifier is required. Refresh and retry.');
+      purchaseKey = `${userId}:${req.body.purchaseKey}`;
+      purchaseHash = require('node:crypto').createHash('sha256').update(JSON.stringify({ planId: String(plan._id), offer: req.body.offerQuoteKey, linkedProjectOrderId: linkedOrder ? String(linkedOrder._id) : null, billingSelection })).digest('hex');
+      const previous = await orderModel.findOne({ serviceOfferPurchaseKey: purchaseKey });
+      if (previous) {
+        if (previous.serviceOfferPurchaseHash !== purchaseHash) throw new Error('This purchase identifier belongs to different selections');
+        const bill = await require('../../models/invoiceModel').findOne({ orderId: previous._id, serviceCycleNumber: 1, invoiceType: 'project' });
+        if (!bill) throw new Error('Previous purchase needs review; no duplicate purchase was created');
+        return res.status(200).json({ success: true, data: { orderId: previous._id, invoiceId: bill._id, finalPrice: previous.totalAmount, paymentPending: bill.status !== 'paid' } });
+      }
+    }
+    // Validate payment evidence before any order/invoice write, including no-offer purchases.
+    if (!req.body.deferPayment && (!paymentDetails?.transactionId)) throw new Error('Payment details are required');
 
     // Order shape (snapshot, validity window, first cycle) comes from the shared
     // helper so this path and the bulk path stay identical on everything except
@@ -190,17 +208,36 @@ const customerCreateServicePlanOrder = async (req, res) => {
     const endDate = orderData.servicePlanEndDate;
 
     const order = new orderModel(orderData);
-    await order.save();
+    order.paymentPolicy = paymentPolicy;
+    if (purchaseKey) { order.serviceOfferPurchaseKey = purchaseKey; order.serviceOfferPurchaseHash = purchaseHash; }
+    if (deferred) order.orderVisibility = 'approved'; // Work permission, never payment verification.
+    if (!req.body.deferPayment) {
+      const buyer = await userModel.findById(userId).select('walletBalance');
+      if (Math.max(0, finalPrice - Number(buyer?.walletBalance || 0)) > 0 && !paymentDetails.upiTransactionId) throw new Error('UPI transaction ID is required for the amount not covered by wallet');
+    }
+    if (!req.body.deferPayment) await order.save();
 
     // SSOT invoice — created unpaid, then settled by whatever the customer pays below.
-    const invoice = await createProjectInvoice({
+    const invoiceData = {
       customerId: userId,
       orderId: order._id,
       amount: finalPrice,
       lineItems: [{ name: plan.serviceName, price: finalPrice }],
       invoiceDate: new Date(),
+      dueDate: paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(paymentPolicy, startDate) : undefined,
       serviceCycleNumber: 1,
-    });
+    };
+    let invoice;
+    if (req.body.deferPayment) {
+      await require('mongoose').connection.transaction(async session => {
+        await order.save({ session });
+        invoice = await createProjectInvoice({ ...invoiceData, session });
+      });
+    } else invoice = await createProjectInvoice(invoiceData);
+    if (req.body.deferPayment) {
+      await require('../../helpers/serviceBillingStatement').syncServiceBillingStatement(order);
+      return res.status(201).json({ success: true, message: 'Service created with the agreed payment terms', data: { orderId: order._id, invoiceId: invoice._id, finalPrice, walletPaid: 0, upiPending: 0, paymentPending: true, dueDate: invoice.dueDate } });
+    }
 
     // ----- Payment. The wallet/UPI split is decided HERE, server-side, from the
     // customer's real balance — the client never tells us how much came from

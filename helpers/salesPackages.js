@@ -54,6 +54,7 @@ function validatePackage(raw) {
 }
 function offerEligible(offer, category, packageId, now = Date.now()) {
   return !!offer && offer.status === 'published' && Date.parse(offer.endsAt) > now
+    && (!offer.targets || offer.targets.includes('projects'))
     && Array.isArray(offer.applicableCategories) && offer.applicableCategories.includes(category)
     && (!offer.packageIds?.length || (!!packageId && offer.packageIds.includes(packageId)));
 }

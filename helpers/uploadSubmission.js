@@ -92,7 +92,7 @@ async function commitSubmission(req, { instructions, files, receipt = false }) {
         const refusal = await assertProjectAcceptsUpload(current);
         if (refusal) throw failure(refusal, 400);
         // Touch the order so competing order changes conflict with this commit.
-        await Order.updateOne({ _id: current._id }, { $inc: { uploadRevision: 1 } }, { session });
+        await Order.updateOne({ _id: current._id }, { $inc: { uploadRevision: 1, ...(current.paymentPolicy ? { paymentPolicyUploads: 1 } : {}) } }, { session });
       } else if (kind === UPLOAD_KIND.SERVICE) {
         const snapshot = current.servicePlanSnapshot || {};
         if (current.servicePlanStatus !== 'active'

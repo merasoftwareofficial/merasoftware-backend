@@ -1,5 +1,6 @@
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { readPackages, quotePackage, offerEligible, calculateBenefit, money, fail } = require('./salesPackages');
+const { freezePaymentPolicy } = require('./offerPaymentPolicy');
 
 // Resolve the commercial agreement before writing an order, invoice or payment.
 async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal }) {
@@ -33,6 +34,7 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
   // Recheck at the final decision point, including requests crossing the deadline.
   if (quote.offer && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
   return {
+    paymentPolicy: freezePaymentPolicy(quote.offer, now),
     finalPrice: calculatedTotal,
     referenceTotal: money(quote.regularPrice + extrasTotal),
     basePrice: quote.regularPrice,

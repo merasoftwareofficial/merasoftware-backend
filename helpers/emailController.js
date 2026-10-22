@@ -25,6 +25,7 @@ async function recordHistory(draft, decidedBy, required = false) {
   try {
     await EmailHistory.updateOne({ draftId: draft._id }, { $set: {
       application: byKey.get(draft.event).application, event: draft.event, actor: draft.actor,
+      ...(draft.dedupeKey ? { dedupeKey: draft.dedupeKey } : {}),
       ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject, status: draft.status,
       providerId: draft.providerId, failure: draft.failure, expiresAt: draft.expiresAt, sentAt: draft.sentAt,
       source: draft.source, sender: draft.sender, templateName: draft.templateName,
@@ -69,9 +70,10 @@ async function prepareMail(event, mail, extraValues) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
   if (!scope || scope.closed || !byKey.has(event)) return suppressed();
+  if (scope.system && event !== 'offer.payment.reminder') return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';
   if (publicIntake && !['website.subscription.confirm', 'website.subscription.manage'].includes(event)) return suppressed();
-  if (!publicIntake) {
+  if (!publicIntake && !scope.system) {
     if (!scope.req.userId) return suppressed();
     const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
     if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
@@ -84,6 +86,10 @@ async function prepareMail(event, mail, extraValues) {
   if (!to.length || to.some(address => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return suppressed();
   validateContent(content.subject, content.text);
   if (mail.dedupeKey) {
+    if (scope.system) {
+      const permanent = await EmailHistory.findOne({ dedupeKey: mail.dedupeKey }).lean();
+      if (permanent) return { data: null, error: null, queued: true, draftId: String(permanent.draftId) };
+    }
     const previous = await EmailDraft.findOne({ dedupeKey: mail.dedupeKey }).lean();
     if (previous) return { data: null, error: null, queued: true, draftId: String(previous._id) };
   }
@@ -250,4 +256,25 @@ async function decide(id, actor, decision, access = {}) {
     throw error;
   }
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess };
+// Only this named event is allowed outside a user request. Explicit offer
+// reminder settings opt it in; all existing background builders stay suppressed.
+async function sendScheduledOfferReminder(invoice, customer, offset) {
+  const event = 'offer.payment.reminder';
+  const mail = require('./emailTemplates').buildTemplatedMail(event,
+    { ...invoice.toObject?.() || invoice, userId: customer, amount: Math.max(0, invoice.amount - Number(invoice.amountPaid || 0)) },
+    'Your agreed offer payment is pending. Please pay the outstanding amount.');
+  if (!mail) return;
+  mail.dedupeKey = `offer-reminder:${invoice._id}:${offset}`;
+  const scope = { system: true, closed: false, ids: [], req: { method: 'CRON', originalUrl: '/offer-payment-reminders', userId: null } };
+  const result = await requestScope.run(scope, () => queueMail(event, mail));
+  if (!result.draftId) return;
+  const draft = await EmailDraft.findOneAndUpdate({ _id: result.draftId, status: 'staged' }, { $set: { status: 'pending' } }, { new: true }) || await EmailDraft.findById(result.draftId);
+  if (!draft || ['sent', 'sending', 'skipped'].includes(draft.status) || draft.expiresAt <= new Date()) return;
+  await recordHistory(draft, null, true);
+  // Re-read money immediately before sending; never remind a settled/cancelled bill.
+  const fresh = await require('../models/invoiceModel').findById(invoice._id).lean();
+  const order = fresh && await require('../models/orderProductModel').findById(fresh.orderId).select('orderVisibility servicePlanStatus').lean();
+  if (!fresh || !['unpaid', 'partially_paid', 'overdue'].includes(fresh.status) || !order || order.orderVisibility === 'cancelled') return;
+  return decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
+}
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder };

@@ -101,6 +101,9 @@ const submitCore = asyncHandler(async (req, res) => {
       success: false
     });
   }
+  if (updatePlan.paymentPolicy && !req.uploadAttempt) {
+    return res.status(400).json({ success: false, error: true, message: 'An upload identifier is required for this offer. Refresh the upload form and retry.' });
+  }
   const { isServiceUpload, isProjectUpload, isLegacyUpload } = await require('../../helpers/uploadOrderPolicy').assertUploadOrder(updatePlan, {
     fileCount: (req.files || []).length, serviceOrderId: req.body.serviceOrderId,
   });

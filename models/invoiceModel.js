@@ -6,6 +6,7 @@ const invoiceLineItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
+  paymentPolicyKey: { type: String, unique: true, sparse: true },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "user",

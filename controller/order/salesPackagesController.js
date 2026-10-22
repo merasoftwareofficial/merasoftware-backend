@@ -15,7 +15,7 @@ const handle = fn => async (req, res) => {
 const adminRead = handle(async (req, res) => {
   await requireAdmin(req);
   const { offers } = await fetchWebsiteCatalogue();
-  const plans = await Product.find({ category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null }).select('_id serviceName servicePlan.purchaseType').lean();
+  const plans = await Product.find({ category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null }).select('_id serviceName servicePlan.purchaseType servicePlan.capability').lean();
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans } });
 });
 const adminSave = handle(async (req, res) => {

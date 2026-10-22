@@ -1,0 +1,126 @@
+{
+  "purpose": "Approved offer payment-policy implementation",
+  "createdAt": "2026-10-22T08:36:09.900Z",
+  "repo": "E:/Allprojects/backend",
+  "initialStatus": "?? backup/\n",
+  "files": [
+    {
+      "file": "models/orderProductModel.js",
+      "sha256": "7f78fc2ef912687eea67a8ab14d857d5f3507d0d8192adb43f62ca6dbabeaf57"
+    },
+    {
+      "file": "helpers/projectPricing.js",
+      "sha256": "4de2da0de9d522fe2b474d9b74e971c14a104d12e26de6aba607353c6f05bef4"
+    },
+    {
+      "file": "helpers/projectUploadGate.js",
+      "sha256": "947c93f0ecb1c2514afa245f1f957b18a0f5e26da0e7684e81a4f86d5825b9e9"
+    },
+    {
+      "file": "helpers/uploadOrderPolicy.js",
+      "sha256": "dac82f9825580cb6bf8cecbcd759e3c5d621c7d9a09d1bf51032333244d5f858"
+    },
+    {
+      "file": "helpers/uploadSubmission.js",
+      "sha256": "33961c3182617ffcceac2d3e6f6320807221d5bd6e16a6147c52ec73bcb92ec1"
+    },
+    {
+      "file": "helpers/serviceCycleSettlement.js",
+      "sha256": "3e9d9e9d85833a725844ce8898a521d0073c317f892d1229dfa8f10c692f32f7"
+    },
+    {
+      "file": "helpers/generateInvoiceDocumentPdf.js",
+      "sha256": "68506625fbeba4be3a2934293de9f98480c38134c2b843bad680947fd667a82f"
+    },
+    {
+      "file": "helpers/emailController.js",
+      "sha256": "9d061dd8040bbcc7bbb6bf24bd8399657734b63151a84e50727f2bd6740404e7"
+    },
+    {
+      "file": "helpers/emailCatalog.js",
+      "sha256": "d67560f6474cb6a1b72fa3f3f6074c077402e2aa848f95d80b99dcbeae239ea2"
+    },
+    {
+      "file": "helpers/emailDefinitions.js",
+      "sha256": "172bdf6bdb82e4ddf530598f733ea5889df9ff8fbcca6e391d6e0f2fdfa1c848"
+    },
+    {
+      "file": "helpers/orderSummary.js",
+      "sha256": "a36ad94b35fb82ce4359acdd41410e44f9e9a0f3cc0d8b024c6859608602aded"
+    },
+    {
+      "file": "controller/order/adminCreateProjectOrder.js",
+      "sha256": "7670d8989e824b8142fc043d80331d03ee469f6338001f56b04caf7a50785415"
+    },
+    {
+      "file": "controller/order/customerCreateServicePlanOrder.js",
+      "sha256": "3fba8789e705e9637298d972e32d4d58fd231ca84b003a2e06f41507027dfdbd"
+    },
+    {
+      "file": "controller/order/getOrderDetails.js",
+      "sha256": "9fffa658659c1529d0f8825f7b55718a14bb3a1afeef52031996d70de9cd690f"
+    },
+    {
+      "file": "controller/order/salesPackagesController.js",
+      "sha256": "95087e2c3ec4fdebaf460ae7f49eea47e9897a4730c6882ada94469b25143458"
+    },
+    {
+      "file": "controller/user/submitUpdateRequest.js",
+      "sha256": "73ec22b5951e456f338f9eb9de71a3713bf5c251bc931741bc2739bf07860f82"
+    },
+    {
+      "file": "cron/servicePlanRenewalCron.js",
+      "sha256": "3283d3fb74fd27f3b941227d200df529d8e36ecdb86f1ffb701f32f26224523e"
+    },
+    {
+      "file": "index.js",
+      "sha256": "9433d635ee497e24e6740ed5c7e1f2a8df63f006f9bd0ea75ae741fbd63f8241"
+    },
+    {
+      "file": "routes/index.js",
+      "sha256": "84dd3bf2ad1254779f21a78fee097e99d61b50cead87c0ca47d757932be21b27"
+    },
+    {
+      "file": "docs/sales-packages.md",
+      "sha256": "7419f311ddb89fa3ae2a6a7de807e6de2e9d1ea74bea058ae2a1706f3832e399"
+    },
+    {
+      "file": "helpers/salesPackages.js",
+      "sha256": "37d9866cbb5c760e37613f6e12c493d11b96fed9ba48db69be0e73623ed48999"
+    },
+    {
+      "file": "helpers/serviceLifecycle.js",
+      "sha256": "7d7ab01ea10b17ad8e00411987c54f51344ec01f44fed6f84228bc714bc282ff"
+    },
+    {
+      "file": "helpers/paymentRecording.js",
+      "sha256": "bed15e82f7e82172219bfc9fe26199621fc3cb0c2dc3a61218f08c331225d6b0"
+    },
+    {
+      "file": "models/invoiceModel.js",
+      "sha256": "c869e013df8362ee7b1ef8d39fabe1c36377cbe35f9bfe84f687aaee00193f03"
+    },
+    {
+      "file": "helpers/serviceBillingStatement.js",
+      "sha256": "711d0dc9676a8f548619cfc3c88f4e5bc8b98a332c724036ec7b07c7c3ebcc21"
+    },
+    {
+      "file": "routes/emailControl.js",
+      "sha256": "10688cedc2dcedff6ec48cd605471eb5ffd7315399186d22b850494720337c38"
+    },
+    {
+      "file": "models/emailControlModel.js",
+      "sha256": "252f7510b2945f29c4765c2f31eddf37e60a362b65fa1cb306a122e417856fed"
+    }
+  ],
+  "newFiles": [
+    "controller/order/servicePlanOffers.js",
+    "cron/offerPaymentReminderCron.js",
+    "helpers/offerPaymentPolicy.js",
+    "helpers/offerProjectInvoices.js",
+    "helpers/offerServiceRenewal.js",
+    "helpers/serviceOfferPolicy.js",
+    "tests/offerPaymentPolicy.test.js"
+  ],
+  "workingStatus": "Incomplete: stopped for pre-existing invoice index conflict found by explicit clean-database index initialization. No deployment or live data changes."
+}

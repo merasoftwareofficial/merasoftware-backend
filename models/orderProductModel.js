@@ -298,6 +298,11 @@ const orderSchema = new mongoose.Schema({
     projectCreationComplete: { type: Boolean, default: false },
     // Transaction fence for project uploads racing order-state changes.
     uploadRevision: { type: Number, default: 0 },
+    // Frozen offer terms; operational counters remain separate from this agreement.
+    paymentPolicy: { type: mongoose.Schema.Types.Mixed, default: null, immutable: true },
+    paymentPolicyUploads: { type: Number, default: 0, min: 0 },
+    serviceOfferPurchaseKey: { type: String, unique: true, sparse: true },
+    serviceOfferPurchaseHash: String,
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'user',

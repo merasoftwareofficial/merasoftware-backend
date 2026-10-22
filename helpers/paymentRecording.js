@@ -190,13 +190,16 @@ const createProjectInvoice = async ({
   invoiceDate = new Date(),
   dueDate,
   invoiceType = "project",
+  session = null,
+  paymentPolicyKey,
 }) => {
   const invoiceNumber = await generateInvoiceNumber();
-  return invoiceModel.create({
+  const data = {
     userId: customerId,
     orderId,
     invoiceNumber,
     invoiceType,
+    ...(paymentPolicyKey ? { paymentPolicyKey } : {}),
     amount,
     status: "unpaid",
     invoiceDate,
@@ -204,7 +207,8 @@ const createProjectInvoice = async ({
     ...(installmentNumber ? { installmentNumber } : {}),
     ...(serviceCycleNumber ? { serviceCycleNumber } : {}),
     lineItems,
-  });
+  };
+  return session ? (await invoiceModel.create([data], { session }))[0] : invoiceModel.create(data);
 };
 
 module.exports = {

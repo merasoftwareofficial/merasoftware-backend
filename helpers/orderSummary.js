@@ -10,6 +10,7 @@ const ORDER_SUMMARY_FIELDS = [
   // project/plan and to read its real state: without isServicePlan a service is classified by its
   // category and answered from progress, which is how a paused service came to read "Completed".
   "isServicePlan servicePlanStatus",
+  "paymentPolicy paymentPolicyUploads",
   // What the service is ALLOWED, and how much of it is spent. Both are written on the order at
   // purchase (helpers/servicePlanPurchase.js) and maintained there — servicePlanSnapshot is
   // frozen, serviceAccessUsedInCycle is incremented by submitUpdateRequest.js and reset each

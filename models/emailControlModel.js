@@ -52,6 +52,7 @@ const draftSchema = new Schema({
 }, { timestamps: true });
 // Small permanent audit records; draft content and attachments still expire.
 const historySchema = new Schema({
+  dedupeKey: { type: String, unique: true, sparse: true },
   draftId: { type: Schema.Types.ObjectId, required: true, unique: true },
   application: { type: String, enum: ['website', 'portal'], required: true, index: true },
   event: String, actor: Schema.Types.ObjectId, decidedBy: Schema.Types.ObjectId,
