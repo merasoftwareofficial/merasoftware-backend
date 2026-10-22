@@ -1,12 +1,6 @@
-const categoryBasePriceModel = require("../../models/categoryBasePriceModel");
+const { saveProjectCategory } = require("../../helpers/projectCategories");
 
-const PROJECT_CATEGORIES = [
-  "standard_websites",
-  "dynamic_websites",
-  "cloud_software_development",
-  "app_development",
-];
-
+// Create a project category ({ creating: true, category, label, ... }) or update the fields sent.
 const updateCategoryBasePriceController = async (req, res) => {
   try {
     if (req.userRole !== "admin") {
@@ -17,46 +11,18 @@ const updateCategoryBasePriceController = async (req, res) => {
       });
     }
 
-    const { category, basePrice, description, startingNodeTitle } = req.body;
-
-    if (!PROJECT_CATEGORIES.includes(category)) {
-      return res.status(400).json({
-        message: "Invalid category",
-        error: true,
-        success: false,
-      });
-    }
-
-    const numericBasePrice = Number(basePrice);
-    if (!Number.isFinite(numericBasePrice) || numericBasePrice < 0) {
-      return res.status(400).json({
-        message: "Base price must be a non-negative number",
-        error: true,
-        success: false,
-      });
-    }
-
-    const updated = await categoryBasePriceModel.findOneAndUpdate(
-      { category },
-      {
-        category,
-        basePrice: numericBasePrice,
-        description: description || "",
-        startingNodeTitle: (startingNodeTitle || "").trim(),
-      },
-      { new: true, upsert: true }
-    );
+    const data = await saveProjectCategory(req.body, req.userId);
 
     return res.json({
-      message: "Category base price saved",
+      message: req.body?.creating === true ? "Project category created" : "Project category saved",
       success: true,
       error: false,
-      data: updated,
+      data,
     });
   } catch (error) {
-    console.error("Error updating category base price:", error);
-    return res.status(500).json({
-      message: error.message || "Failed to update category base price",
+    if (!error.statusCode) console.error("Error saving project category:", error);
+    return res.status(error.statusCode || 500).json({
+      message: error.statusCode ? error.message : "Failed to save project category",
       error: true,
       success: false,
     });

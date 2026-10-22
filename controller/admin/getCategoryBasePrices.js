@@ -1,12 +1,6 @@
-const categoryBasePriceModel = require("../../models/categoryBasePriceModel");
+const { listProjectCategories, categoryUsage } = require("../../helpers/projectCategories");
 
-const PROJECT_CATEGORIES = [
-  "standard_websites",
-  "dynamic_websites",
-  "cloud_software_development",
-  "app_development",
-];
-
+// Admin list of every project category (archived included) with where each one is used.
 const getCategoryBasePricesController = async (req, res) => {
   try {
     if (req.userRole !== "admin") {
@@ -17,23 +11,22 @@ const getCategoryBasePricesController = async (req, res) => {
       });
     }
 
-    const existing = await categoryBasePriceModel.find().lean();
-    const existingByCategory = new Map(existing.map((entry) => [entry.category, entry]));
-
-    const data = PROJECT_CATEGORIES.map((category) => (
-      existingByCategory.get(category) || { category, basePrice: 0, description: "", startingNodeTitle: "" }
-    ));
+    const [categories, usage] = await Promise.all([listProjectCategories(), categoryUsage()]);
+    const data = categories.map((entry) => ({
+      ...entry,
+      usage: usage[entry.category] || { projects: 0, features: 0, packages: 0 },
+    }));
 
     return res.json({
-      message: "Category base prices",
+      message: "Project categories",
       success: true,
       error: false,
       data,
     });
   } catch (error) {
-    console.error("Error fetching category base prices:", error);
+    console.error("Error fetching project categories:", error);
     return res.status(500).json({
-      message: error.message || "Failed to fetch category base prices",
+      message: error.message || "Failed to fetch project categories",
       error: true,
       success: false,
     });

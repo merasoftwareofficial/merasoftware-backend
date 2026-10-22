@@ -260,6 +260,8 @@ const installmentSchema = new mongoose.Schema({
 const projectSnapshotSchema = new mongoose.Schema({
     displayName: { type: String, trim: true },
     category: { type: String, trim: true },
+    // Category name at creation (helpers/projectCategories.js), so a later rename never relabels old work.
+    categoryLabel: { type: String, trim: true },
     startingNodeTitle: { type: String, trim: true },
     totalPages: Number,
     basePrice: Number,

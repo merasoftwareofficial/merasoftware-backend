@@ -40,7 +40,8 @@ const plainButtons = message => text(message).replace(/\[\[(.+?)\|\|(.+?)\]\]/g,
 });
 // Update requests belong to a plan or a client project; both name themselves the same way.
 const planName = updateRequest => getOrderDisplayName(updateRequest?.updatePlanId, 'Website plan');
-const category = order => getOrderCategory(order, 'Service').split('_').join(' ');
+// The category name frozen on the project (helpers/projectCategories.js); plans fall back to their key.
+const category = order => order?.projectSnapshot?.categoryLabel || getOrderCategory(order, 'Service').split('_').join(' ');
 const planType = product => (product?.isMonthlyLimitedPlan ? 'Monthly Limited Plan' : product?.isMonthlyRenewablePlan ? 'Yearly Renewable Plan' : 'Regular Update Plan');
 
 // Details several actions share; the same key always means the same thing.

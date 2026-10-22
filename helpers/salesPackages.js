@@ -1,8 +1,8 @@
 const { createHash } = require('node:crypto');
 const Catalogue = require('../models/salesCatalogueModel');
 const Product = require('../models/productModel');
+const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
 
-const CATEGORIES = ['standard_websites', 'dynamic_websites', 'cloud_software_development', 'app_development'];
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -31,7 +31,7 @@ const cleanText = (value, max, label) => {
 };
 function validatePackage(raw) {
   if (!raw || !safeId(raw.id)) fail('Use a safe lowercase package ID');
-  if (!CATEGORIES.includes(raw.category)) fail('Choose a project category');
+  if (typeof raw.category !== 'string' || !KEY_PATTERN.test(raw.category)) fail('Choose a project category');
   if (!['draft', 'published', 'archived'].includes(raw.status)) fail('Choose a package status');
   const amount = (value, label) => {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 10000000 || Math.abs(money(value) - value) > 0.000001) fail(`Enter a valid ${label} with at most two decimal places`);
@@ -87,6 +87,9 @@ async function savePackage(raw, creating, offers) {
   const existing = await readPackages();
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
+  // An archived category keeps its old packages, but only an archived package may stay in it.
+  const category = await getProjectCategory(item.category);
+  if (!category || (category.status !== 'active' && item.status !== 'archived')) fail('Choose an active project category');
   if (item.linkedPlanIds.length) {
     const count = await Product.countDocuments({ _id: { $in: item.linkedPlanIds }, category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null });
     if (count !== item.linkedPlanIds.length) fail('A referenced service is unavailable. Select active portal services.');
@@ -104,4 +107,4 @@ async function savePackage(raw, creating, offers) {
   if (!result.matchedCount) fail('Package changed; refresh the catalogue and try again', 409);
   return item;
 }
-module.exports = { DEFAULT_PACKAGES, CATEGORIES, money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage };
+module.exports = { DEFAULT_PACKAGES, money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage };

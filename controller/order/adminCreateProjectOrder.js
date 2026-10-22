@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const userModel = require("../../models/userModel");
 const productModel = require("../../models/productModel");
 const orderModel = require("../../models/orderProductModel");
-const categoryBasePriceModel = require("../../models/categoryBasePriceModel");
+const { requireCategoryForNewProject } = require("../../helpers/projectCategories");
 const invoiceModel = require("../../models/invoiceModel");
 const generateInvoiceNumber = require("../../helpers/generateInvoiceNumber");
 const { initializeProjectTimeline } = require("../../helpers/projectNodeService");
@@ -18,20 +18,6 @@ const { buildInstallments } = require('../../helpers/projectInstallments');
 const { createHash } = require('node:crypto');
 
 const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
-
-const PROJECT_CATEGORIES = [
-  "standard_websites",
-  "dynamic_websites",
-  "cloud_software_development",
-  "app_development",
-];
-
-const CATEGORY_LABELS = {
-  standard_websites: "Standard Website",
-  dynamic_websites: "Dynamic Website",
-  cloud_software_development: "Cloud Software",
-  app_development: "App Development",
-};
 
 const DEFAULT_STARTING_NODE_TITLE = "Project Started";
 
@@ -99,15 +85,9 @@ const adminCreateProjectOrderController = async (req, res) => {
       });
     }
 
-    const resolvedStartingNodeTitle = startingNodeTitle?.trim() || DEFAULT_STARTING_NODE_TITLE;
-
-    if (!PROJECT_CATEGORIES.includes(category)) {
-      return res.status(400).json({
-        message: "Invalid project category",
-        error: true,
-        success: false,
-      });
-    }
+    // Active category from the SSOT (helpers/projectCategories.js); an archived or unknown one is refused.
+    const categoryEntry = await requireCategoryForNewProject(category);
+    const resolvedStartingNodeTitle = startingNodeTitle?.trim() || categoryEntry.startingNodeTitle || DEFAULT_STARTING_NODE_TITLE;
 
     let finalPrice = Number(sellingPrice);
     if (!Number.isFinite(finalPrice) || finalPrice < 0 || Math.round(finalPrice * 100) / 100 !== finalPrice) {
@@ -152,8 +132,7 @@ const adminCreateProjectOrderController = async (req, res) => {
 
     // Base price and feature prices are never trusted from the request body —
     // both are re-derived server-side from their source collections.
-    const basePriceEntry = await categoryBasePriceModel.findOne({ category }).lean();
-    let basePrice = basePriceEntry?.basePrice || 0;
+    let basePrice = categoryEntry.basePrice || 0;
 
     const requestedIds = Array.isArray(requestedFeatureIds)
       ? requestedFeatureIds.filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -219,7 +198,8 @@ const adminCreateProjectOrderController = async (req, res) => {
       remainingAmount: finalPrice,
       paymentComplete: isFree,
       projectSnapshot: {
-        displayName: projectName?.trim() || commercial?.agreement.package?.name || offer?.title || CATEGORY_LABELS[category],
+        displayName: projectName?.trim() || commercial?.agreement.package?.name || offer?.title || categoryEntry.label,
+        categoryLabel: categoryEntry.label,
         category,
         startingNodeTitle: resolvedStartingNodeTitle,
         totalPages: totalPages || undefined,
@@ -231,7 +211,7 @@ const adminCreateProjectOrderController = async (req, res) => {
         ...(offer ? { offer: { slug: offer.slug, title: offer.title } } : {}),
       },
       orderItems: [
-        { id: `project:${category}`, name: commercial?.agreement.package?.name || offer?.title || `${CATEGORY_LABELS[category]} (Base)`, type: "main", quantity: 1, originalPrice: basePrice, finalPrice: basePrice },
+        { id: `project:${category}`, name: commercial?.agreement.package?.name || offer?.title || `${categoryEntry.label} (Base)`, type: "main", quantity: 1, originalPrice: basePrice, finalPrice: basePrice },
         // originalPrice is the PER-UNIT price: downloadInvoice.js prints originalPrice x quantity,
         // so putting the already-multiplied total here would bill quantity twice over.
         // Same convention as createOrder.js's feature line items.

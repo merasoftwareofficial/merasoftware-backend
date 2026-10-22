@@ -302,6 +302,7 @@ router.post("/customer/service-plan-order", authToken, customerCreateServicePlan
 router.get('/customer/service-plan-offers/:planId', authToken, require('../controller/order/servicePlanOffers'))
 router.post("/customer/custom-project-order", authToken, customerCreateCustomProjectOrder)
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)
+router.get("/customer/project-categories", authToken, require('../controller/order/getCustomerProjectCategories'))
 router.post("/customer/service-plan/stop-renewal", authToken, stopServiceRenewal)
 router.post("/validate-update-plan", authToken, validateUpdatePlan)
 router.post("/toggle-update-plan", authToken, toggleUpdatePlan)

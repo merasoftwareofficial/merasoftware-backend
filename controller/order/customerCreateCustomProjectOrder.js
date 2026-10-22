@@ -2,7 +2,7 @@ const { buildInstallments } = require("../../helpers/projectInstallments");
 const mongoose = require("mongoose");
 const productModel = require("../../models/productModel");
 const orderModel = require("../../models/orderProductModel");
-const categoryBasePriceModel = require("../../models/categoryBasePriceModel");
+const { requireCategoryForNewProject } = require("../../helpers/projectCategories");
 const { initializeProjectTimeline } = require("../../helpers/projectNodeService");
 // SSOT: every project order gets an unpaid invoice at creation, via the same shared
 // helper used by adminCreateProjectOrder.js and approveProjectOrder.js — so "invoice
@@ -21,20 +21,6 @@ const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
 
 // Customer describes a private project instead of buying a catalogue product.
 // Its order owns the complete frozen scope in projectSnapshot.
-
-const PROJECT_CATEGORIES = [
-  "standard_websites",
-  "dynamic_websites",
-  "cloud_software_development",
-  "app_development",
-];
-
-const CATEGORY_LABELS = {
-  standard_websites: "Static Website",
-  dynamic_websites: "Dynamic Website",
-  cloud_software_development: "Cloud Software",
-  app_development: "Mobile App",
-};
 
 const PAYMENT_TYPES = ["full", "partial", "decide_later"];
 
@@ -77,13 +63,18 @@ const customerCreateCustomProjectOrder = async (req, res) => {
       paymentDetails,
     } = req.body;
 
-    if (!category || !PROJECT_CATEGORIES.includes(category)) {
-      return res.status(400).json({
-        message: "Valid project category is required",
+    // Same customer rule as getCustomerCategoryBasePrice.js: active, opened to customers and priced.
+    let categoryEntry;
+    try {
+      categoryEntry = await requireCategoryForNewProject(category, { customer: true });
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        message: error.statusCode ? error.message : "Failed to check the project category",
         error: true,
         success: false,
       });
     }
+    const categoryLabel = categoryEntry.label;
 
     if (!PAYMENT_TYPES.includes(paymentType)) {
       return res.status(400).json({
@@ -106,8 +97,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
     }
 
     // ----- Price is re-derived server-side; nothing money-related is trusted from the body -----
-    const basePriceEntry = await categoryBasePriceModel.findOne({ category }).lean();
-    const basePrice = basePriceEntry?.basePrice || 0;
+    const basePrice = categoryEntry.basePrice;
 
     const requestedIds = Array.isArray(requestedFeatureIds)
       ? requestedFeatureIds.filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -158,7 +148,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
     }
 
     const startingNodeTitle =
-      basePriceEntry?.startingNodeTitle?.trim() || DEFAULT_STARTING_NODE_TITLE;
+      categoryEntry.startingNodeTitle || DEFAULT_STARTING_NODE_TITLE;
 
     const isPartialPayment = paymentType === "partial";
 
@@ -178,7 +168,8 @@ const customerCreateCustomProjectOrder = async (req, res) => {
       projectProgress: 0,
       messages: [],
       projectSnapshot: {
-        displayName: CATEGORY_LABELS[category],
+        displayName: categoryLabel,
+        categoryLabel,
         category,
         startingNodeTitle,
         basePrice,
@@ -189,7 +180,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
       orderItems: [
         {
           id: `project:${category}`,
-          name: `${CATEGORY_LABELS[category]} (Base)`,
+          name: `${categoryLabel} (Base)`,
           type: "main",
           quantity: 1,
           originalPrice: basePrice,
@@ -234,7 +225,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
     // the payment settles instantly (wallet) marks it paid/partially_paid right below, and any UPI
     // remainder settles it further when admin approves (transactionApprovalController).
     const lineItems = [
-      { name: `${CATEGORY_LABELS[category]} (Base)`, price: basePrice },
+      { name: `${categoryLabel} (Base)`, price: basePrice },
       ...clientProjectFeatures.map((feature) => ({ name: feature.name, price: feature.price })),
     ];
     const invoiceDate = new Date();

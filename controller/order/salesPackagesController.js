@@ -3,6 +3,7 @@ const User = require('../../models/userModel');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
 const { catalogueWithQuotes, savePackage, fail } = require('../../helpers/salesPackages');
+const { listProjectCategories } = require('../../helpers/projectCategories');
 
 async function requireAdmin(req) {
   const user = await User.findById(req.userId).select('roles');
@@ -16,7 +17,9 @@ const adminRead = handle(async (req, res) => {
   await requireAdmin(req);
   const { offers } = await fetchWebsiteCatalogue();
   const plans = await Product.find({ category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null }).select('_id serviceName servicePlan.purchaseType servicePlan.capability').lean();
-  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans } });
+  // Project categories come from the SSOT so the website offer/package editors never hardcode them.
+  const categories = (await listProjectCategories()).map(({ category, label, status, sortOrder }) => ({ category, label, status, sortOrder }));
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans, categories } });
 });
 const adminSave = handle(async (req, res) => {
   await requireAdmin(req);
