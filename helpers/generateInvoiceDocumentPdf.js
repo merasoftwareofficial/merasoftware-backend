@@ -61,6 +61,7 @@ const renderSalesAgreement = (doc, order, initialY) => {
   if (agreement.offerDiscount > 0) line(`Offer benefit: - ${money(agreement.offerDiscount)}`);
   for (const item of agreement.extras || []) line(`${item.name}${item.quantity > 1 ? ` x ${item.quantity}` : ''}: ${money(item.price)}`);
   if (agreement.adminDiscount > 0) line(`Additional admin discount: - ${money(agreement.adminDiscount)} (${agreement.discountReason})`);
+  if (agreement.priceAdjustment) line(`${agreement.adjustmentLabel}: ${agreement.priceAdjustment < 0 ? '- ' : '+ '}${money(Math.abs(agreement.priceAdjustment))}`);
   line('Included work', true);
   for (const item of agreement.scope || []) line(`- ${item}`);
   if (agreement.terms?.length) {

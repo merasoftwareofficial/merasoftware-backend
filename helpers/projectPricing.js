@@ -23,12 +23,15 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     quote = { regularPrice, ...calculateBenefit(regularPrice, offer), offer, terms: offer.resolvedTerms || [] };
     scope = offer.inclusions || [];
   }
-  const adminDiscount = body.adminDiscount === undefined ? 0 : Number(body.adminDiscount);
-  if (!Number.isFinite(adminDiscount) || adminDiscount < 0 || money(adminDiscount) !== adminDiscount) fail('Enter a valid additional admin discount');
-  const discountReason = String(body.discountReason || '').trim();
-  if (adminDiscount > 0 && (!discountReason || discountReason.length > 500)) fail('Explain the additional admin discount');
-  const calculatedTotal = money(quote.finalPrice + extrasTotal - adminDiscount);
-  if (calculatedTotal < 0) fail('Additional discount exceeds the project amount');
+  // The offer never locks the selling price. Any difference from the calculated price is an
+  // explicit signed adjustment whose label is printed for the client on the agreement/invoice.
+  const priceAdjustment = body.priceAdjustment === undefined ? 0 : Number(body.priceAdjustment);
+  if (!Number.isFinite(priceAdjustment) || money(priceAdjustment) !== priceAdjustment) fail('Enter a valid price adjustment');
+  const adjustmentLabel = priceAdjustment === 0 ? '' : String(body.adjustmentLabel || '').trim();
+  if (priceAdjustment !== 0 && (!adjustmentLabel || adjustmentLabel.length > 120)) fail('Enter a label for the price adjustment (shown on the invoice)');
+  const calculatedTotal = money(quote.finalPrice + extrasTotal + priceAdjustment);
+  if (calculatedTotal < 0) fail('Price adjustment exceeds the project amount');
+  // Still catches a feature/offer price that changed while the form was open.
   if (money(Number(body.sellingPrice)) !== calculatedTotal) fail('Project price changed. Review the current package and extras before creating it.', 409);
   const now = new Date();
   // Recheck at the final decision point, including requests crossing the deadline.
@@ -39,10 +42,10 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     referenceTotal: money(quote.regularPrice + extrasTotal),
     basePrice: quote.regularPrice,
     agreement: {
-      version: 1, agreedAt: now, currency: 'INR',
+      version: 2, agreedAt: now, currency: 'INR',
       package: packageItem ? { id: packageItem.id, name: packageItem.name, category: packageItem.category, description: packageItem.description, linkedPlanIds: packageItem.linkedPlanIds, quoteKey: packageQuoteKey } : null,
       regularPrice: quote.regularPrice, offerDiscount: quote.discountAmount, packagePrice: quote.finalPrice,
-      extrasTotal, adminDiscount, discountReason, finalPrice: calculatedTotal,
+      extrasTotal, priceAdjustment, adjustmentLabel, finalPrice: calculatedTotal,
       scope: [...scope], terms: [...quote.terms],
       extras: features.map(item => ({ name: item.name, quantity: item.quantity, unitPrice: item.unitPrice, price: item.price })),
       offer: quote.offer ? {

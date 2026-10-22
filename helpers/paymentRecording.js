@@ -19,11 +19,13 @@ const getOrderTotal = (order) =>
 // always add up to the order's price instead of an unexplained gap between items and total.
 const buildLineItemsFromOrder = (order) => {
   const agreement = order?.projectSnapshot?.salesAgreement;
-  if (agreement?.version === 1) {
+  if (agreement?.version === 1 || agreement?.version === 2) {
     const items = [{ name: agreement.package?.name || agreement.offer?.title || 'Project scope', price: Number(agreement.regularPrice) }];
     if (agreement.offerDiscount > 0) items.push({ name: `Offer benefit (${agreement.offer?.title || 'Offer'})`, price: -Number(agreement.offerDiscount) });
     for (const extra of agreement.extras || []) items.push({ name: `${extra.name}${extra.quantity > 1 ? ` × ${extra.quantity}` : ''}`, price: Number(extra.price) });
+    // v1 stored a discount-only adminDiscount; v2 stores a signed priceAdjustment with a client-facing label.
     if (agreement.adminDiscount > 0) items.push({ name: `Additional admin discount: ${agreement.discountReason}`, price: -Number(agreement.adminDiscount) });
+    if (agreement.priceAdjustment) items.push({ name: agreement.adjustmentLabel, price: Number(agreement.priceAdjustment) });
     return items;
   }
   if (Array.isArray(order?.orderItems) && order.orderItems.length > 0) {

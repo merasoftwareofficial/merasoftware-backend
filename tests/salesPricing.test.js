@@ -45,6 +45,14 @@ test('invoice rows reconcile paise, upward adjustments and separate offer/admin 
   assert.equal(items.reduce((sum, item) => sum + item.price, 0), 749.5);
   assert(items.some(item => item.name.startsWith('Offer benefit')));
   assert(items.some(item => item.name.startsWith('Additional admin discount')));
+  for (const priceAdjustment of [501, -199.5]) {
+    const v2 = buildLineItemsFromOrder({ projectSnapshot: { salesAgreement: {
+      version: 2, regularPrice: 10000, offerDiscount: 9301, offer: { title: 'Starter' },
+      extras: [{ name: 'Extra design', price: 100.5, quantity: 1 }], priceAdjustment, adjustmentLabel: 'Client label',
+    } } });
+    assert.equal(v2.reduce((sum, item) => sum + item.price, 0), 799.5 + priceAdjustment);
+    assert.deepEqual(v2.at(-1), { name: 'Client label', price: priceAdjustment });
+  }
 });
 test('final PDF renderer includes saved package, benefit, scope and terms across pages', async () => {
   const printed = [];
@@ -66,7 +74,8 @@ test('final PDF renderer includes saved package, benefit, scope and terms across
   await sandbox.module.exports.generateInvoiceDocumentPdf({ invoice: { invoiceType: 'project_final', amount: 699, amountPaid: 0 }, order: { projectSnapshot: { salesAgreement: {
     package: { name: 'Saved Starter' }, regularPrice: 10000, offerDiscount: 9301, offer: { title: 'Saved Offer' },
     scope: ['Included website'], terms: Array.from({ length: 45 }, (_, i) => `Agreed term ${i + 1}`), extras: [],
+    priceAdjustment: 501, adjustmentLabel: 'Extra custom work',
   } } }, customer: { name: 'Fixture' } });
-  for (const text of ['Saved Starter', 'Offer applied: Saved Offer', 'Offer benefit: - Rs 9,301', '- Included website', '- Agreed term 45', 'Rs 699']) assert(printed.includes(text), text);
+  for (const text of ['Saved Starter', 'Offer applied: Saved Offer', 'Offer benefit: - Rs 9,301', 'Extra custom work: + Rs 501', '- Included website', '- Agreed term 45', 'Rs 699']) assert(printed.includes(text), text);
   assert(printed.includes('[page]'));
 });

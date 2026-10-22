@@ -225,21 +225,47 @@ test('package catalogue: three starter prices, category eligibility, immutable a
   assert.equal(await orderModel.countDocuments(), 1);
 });
 
-test('tampered price/category/quote and unexplained discount are refused before writes', async () => {
+test('tampered price/category/quote and unlabelled adjustment are refused before writes', async () => {
   const catalog = await api('/admin/sales-packages', null, 'GET');
   const starter = catalog.data.packages[0];
   const base = { sellingPrice: 699, packageId: starter.id, packageQuoteKey: starter.quoteKey };
+  // A price that does not equal quote + adjustment means the quote moved under the form.
   assert.equal((await create({ ...base, sellingPrice: 1 })).status, 409);
+  assert.equal((await create({ ...base, sellingPrice: 1200, priceAdjustment: 500, adjustmentLabel: 'Stale' })).status, 409);
   assert.equal((await create({ ...base, category: 'dynamic_websites' })).status, 400);
   assert.equal((await create({ ...base, packageQuoteKey: 'stale' })).status, 409);
-  assert.equal((await create({ ...base, sellingPrice: 599, adminDiscount: 100 })).status, 400);
+  assert.equal((await create({ ...base, sellingPrice: 599, priceAdjustment: -100 })).status, 400);
+  assert.equal((await create({ ...base, sellingPrice: 599, priceAdjustment: -100, adjustmentLabel: 'x'.repeat(121) })).status, 400);
+  assert.equal((await create({ ...base, sellingPrice: 0, priceAdjustment: -700, adjustmentLabel: 'Too much' })).status, 400);
+  assert.equal((await create({ ...base, sellingPrice: 599.999, priceAdjustment: -99.999, adjustmentLabel: 'Paise' })).status, 400);
   assert.equal(await orderModel.countDocuments(), 0);
   assert.equal(await invoiceModel.countDocuments(), 0);
-  const valid = await create({ ...base, sellingPrice: 599, adminDiscount: 100, discountReason: 'Approved sample adjustment' });
+  const valid = await create({ ...base, sellingPrice: 599, priceAdjustment: -100, adjustmentLabel: 'Loyal client discount' });
   assert.equal(valid.status, 201, valid.message);
   const invoice = await invoiceModel.findOne({ orderId: valid.data._id }).lean();
   assert.equal(invoice.lineItems.reduce((sum, item) => sum + item.price, 0), 599);
-  assert.match(invoice.lineItems.at(-1).name, /Additional admin discount/);
+  assert.deepEqual([invoice.lineItems.at(-1).name, invoice.lineItems.at(-1).price], ['Loyal client discount', -100]);
+});
+
+test('offer price never locks the selling price: labelled upward and downward adjustments are frozen', async () => {
+  const raised = await create({ sellingPrice: 1200, paymentType: 'full', offerSlug: 'page', offerQuoteKey: 'starter-v1', priceAdjustment: 501, adjustmentLabel: 'Extra custom work' });
+  assert.equal(raised.status, 201, raised.message);
+  const order = await orderModel.findById(raised.data._id).lean();
+  const agreement = order.projectSnapshot.salesAgreement;
+  assert.equal(agreement.version, 2);
+  assert.deepEqual([agreement.offerDiscount, agreement.priceAdjustment, agreement.adjustmentLabel, agreement.finalPrice], [9301, 501, 'Extra custom work', 1200]);
+  assert.equal('adminDiscount' in agreement, false);
+  assert.equal(order.totalAmount, 1200);
+  const invoice = await invoiceModel.findOne({ orderId: order._id, invoiceType: 'project' }).lean();
+  assert.equal(invoice.amount, 1200);
+  assert.deepEqual(invoice.lineItems.map(item => [item.name, item.price]), [
+    ['Business Growth Starter', 10000], ['Offer benefit (Business Growth Starter)', -9301], ['Extra custom work', 501],
+  ]);
+  const lowered = await create({ sellingPrice: 500, paymentType: 'full', offerSlug: 'page', offerQuoteKey: 'starter-v1', priceAdjustment: -199, adjustmentLabel: 'Festive goodwill' });
+  assert.equal(lowered.status, 201, lowered.message);
+  // An unlabelled zero adjustment stores no label at all.
+  const plain = await create({ sellingPrice: 699, paymentType: 'full', offerSlug: 'page', offerQuoteKey: 'starter-v1', priceAdjustment: 0, adjustmentLabel: 'ignored' });
+  assert.equal((await orderModel.findById(plain.data._id).lean()).projectSnapshot.salesAgreement.adjustmentLabel, '');
 });
 
 test('archived package cannot create new projects or reappear as a default', async () => {
@@ -315,11 +341,13 @@ if (process.env.TEST_SALES_BROWSER === '1') test('actual package editor, admin p
     await page.goto(base+'/project-form');await page.locator('select').first().selectOption('standard_websites');
     await page.getByLabel('Showcase package',{exact:true}).selectOption('browser-package');
     const selling=page.locator('input[placeholder="e.g. 12000"]');await page.waitForFunction(()=>document.querySelector('input[placeholder="e.g. 12000"]')?.value==='699');
-    assert.equal(await selling.getAttribute('readonly'),'');
+    assert.equal(await selling.getAttribute('readonly'),null);
+    await selling.fill('1200');await page.getByLabel('Adjustment label',{exact:true}).fill('Extra custom work');
+    await page.getByText('Price adjustment: +₹501 (calculated ₹699)',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Next: Payment Settings',exact:true}).click();await page.getByRole('button',{name:'Just Add Project, Let Client Pay the Bill',exact:true}).click();
     await page.locator('button[type="submit"]').click();await page.waitForFunction(()=>document.body.dataset.created==='true');
     assert.equal(await orderModel.countDocuments(),1);assert.equal(await orderModel.countDocuments({isServicePlan:true}),0);
-    await page.goto(base+'/client-agreement');await page.getByRole('heading',{name:'Browser Package',exact:true}).waitFor();await page.getByText('Offer applied: Business Growth Starter',{exact:true}).waitFor();
+    await page.goto(base+'/client-agreement');await page.getByRole('heading',{name:'Browser Package',exact:true}).waitFor();await page.getByText('Offer applied: Business Growth Starter',{exact:true}).waitFor();await page.getByText('Extra custom work',{exact:true}).waitFor();await page.getByText('₹1,200',{exact:true}).waitFor();
     for(const width of [390,1440]){await page.setViewportSize({width,height:900});await page.screenshot({path:path.join(folder,`client-${width}.png`),fullPage:true});}
     assert.deepEqual(errors,[]);console.log('Sales browser evidence: '+folder);
   } finally {if(browser)await browser.close();}
@@ -334,7 +362,7 @@ test('package related-plan references do not purchase a service; extras and disc
   let starter = catalog.data.packages[0];
   assert.equal((await api('/admin/sales-packages', { item: { ...starter, linkedPlanIds: [String(plan._id)] }, creating: false }, 'PATCH')).status, 200);
   catalog = await api('/admin/sales-packages', null, 'GET'); starter = catalog.data.packages[0];
-  const created = await create({ sellingPrice: 850, packageId: starter.id, packageQuoteKey: starter.quoteKey, featureIds: [String(feature._id)], featureQuantities: { [String(feature._id)]: 2 }, adminDiscount: 50, discountReason: 'Sample client discount' });
+  const created = await create({ sellingPrice: 850, packageId: starter.id, packageQuoteKey: starter.quoteKey, featureIds: [String(feature._id)], featureQuantities: { [String(feature._id)]: 2 }, priceAdjustment: -50, adjustmentLabel: 'Sample client discount' });
   assert.equal(created.status, 201, created.message);
   const order = await orderModel.findById(created.data._id).lean();
   assert.equal(order.projectSnapshot.salesAgreement.extrasTotal, 201);
