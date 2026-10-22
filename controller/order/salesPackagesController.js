@@ -36,7 +36,9 @@ const integrationRead = handle(async (req, res) => {
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) fail('Unauthorized integration', 401);
   const { offers } = await fetchWebsiteCatalogue();
   const packages = await catalogueWithQuotes(offers);
+  // Category names for the public package cards; only active categories, key and name only.
+  const categories = (await listProjectCategories()).filter(entry => entry.status === 'active').map(({ category, label }) => ({ category, label }));
   // Service references are admin-only; public packages never expose internal notes/IDs.
-  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, ...item }) => item) } });
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, ...item }) => item), categories } });
 });
 module.exports = { adminRead, adminSave, integrationRead };

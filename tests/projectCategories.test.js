@@ -19,7 +19,7 @@ const authToken = require('../middleware/authToken');
 const { listProjectCategories, requireCategoryForNewProject } = require('../helpers/projectCategories');
 const { savePackage, DEFAULT_PACKAGES } = require('../helpers/salesPackages');
 
-let db, server, base, admin, customer;
+let db, server, base, admin, customer, app;
 const cookie = (user) => `token=${jwt.sign({ _id: String(user._id), role: user.roles[0] }, process.env.TOKEN_SECRET_KEY)}`;
 async function call(path, { user = admin, body, method = body ? 'POST' : 'GET' } = {}) {
   const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Cookie: cookie(user) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -35,7 +35,7 @@ before(async () => {
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
     { name: 'Customer', email: 'customer@example.test', roles: ['customer'] },
   ]);
-  const app = express(); app.use(express.json()); app.use(cookieParser()); app.use(requestMiddleware);
+  app = express(); app.use(express.json()); app.use(cookieParser()); app.use(requestMiddleware);
   app.get('/admin/category-base-prices', authToken, require('../controller/admin/getCategoryBasePrices'));
   app.post('/admin/category-base-prices', authToken, require('../controller/admin/updateCategoryBasePrice'));
   app.get('/customer/project-categories', authToken, require('../controller/order/getCustomerProjectCategories'));
@@ -159,6 +159,82 @@ test('packages need an active category; an archived package may stay in an archi
   await assert.rejects(savePackage({ ...item, name: 'Renamed' }, false, []), /active project category/);
   await savePackage({ ...item, status: 'archived' }, false, []);
   await assert.rejects(savePackage({ ...item, id: 'unknown-cat', category: 'not_a_category' }, true, []), /active project category/);
+});
+
+// Opt-in like the sales browser test: the real Project Categories page against this isolated backend.
+if (process.env.TEST_SALES_BROWSER === '1') test('Project Categories page: list, create, locked rules and archive in the browser', { timeout: 120000 }, async () => {
+  const fs = require('node:fs'); const os = require('node:os');
+  const { build } = require('../../merasoftware/node_modules/esbuild');
+  const { chromium } = require('../../merasoftware/node_modules/playwright');
+  const frontend = path.resolve(__dirname, '../../frontend/src');
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'mera-categories-browser-'));
+  const fixtureApi = { categoryBasePrices: { url: `${base}/admin/category-base-prices`, method: 'get' }, updateCategoryBasePrice: { url: `${base}/admin/category-base-prices`, method: 'post' }, logout_user: { url: `${base}/logout`, method: 'get' } };
+  // Only the app shell is stubbed (layout, redux, router, session utils); the page, hook and APIs are real.
+  const stubs = {
+    common: `export default ${JSON.stringify(fixtureApi)};`,
+    layout: 'export default ({ children }) => children;',
+    redux: 'export const useSelector = () => null; export const useDispatch = () => () => {};',
+    router: 'export const useNavigate = () => () => {};',
+    slice: 'export const logout = () => ({ type: "logout" });',
+    util: 'export default { clearAll() {}, clearUserData() {} };',
+  };
+  const routes = [[/^\.\.\/common$/, 'common'], [/AdminLayout$/, 'layout'], [/^react-redux$/, 'redux'], [/^react-router-dom$/, 'router'], [/userSlice$/, 'slice'], [/(cookieManager|storageService)$/, 'util']];
+  const shell = { name: 'shell-stubs', setup(b) {
+    for (const [filter, name] of routes) b.onResolve({ filter }, () => ({ path: name, namespace: 'stub' }));
+    b.onLoad({ filter: /.*/, namespace: 'stub' }, args => ({ contents: stubs[args.path], loader: 'js', resolveDir: frontend }));
+  } };
+  const entry = `import React from 'react';import{createRoot}from'react-dom/client';import Page from './pages/AdminCategoryBasePricePage';createRoot(document.getElementById('app')).render(<Page/>);`;
+  await build({ stdin: { contents: entry, loader: 'jsx', resolveDir: frontend }, bundle: true, loader: { '.js': 'jsx' }, outfile: path.join(folder, 'page.js'), platform: 'browser', jsx: 'automatic', plugins: [shell] });
+  // The portal's own Tailwind (react-scripts' nested v3, same as the real build) so screenshots show the real layout.
+  const tailwindBin = path.resolve(frontend, '../node_modules/react-scripts/node_modules/tailwindcss/lib/cli.js');
+  await new Promise((resolve, reject) => execFile(process.execPath, [tailwindBin, '-c', path.resolve(frontend, '../tailwind.config.js'), '-i', path.join(frontend, 'index.css'), '--content', path.join(folder, 'page.js'), '-o', path.join(folder, 'page.css')], { cwd: path.resolve(frontend, '..') }, error => (error ? reject(error) : resolve())));
+  // Served by the same isolated server as the API, so the admin cookie applies without CORS.
+  app.get('/categories-page', (req, res) => res.send('<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/categories-page.css"></head><body><main id="app"></main><script src="/categories-page.js"></script></body></html>'));
+  app.get('/categories-page.css', (req, res) => res.sendFile(path.join(folder, 'page.css')));
+  app.get('/categories-page.js', (req, res) => res.sendFile(path.join(folder, 'page.js')));
+  await save({ category: 'standard_websites', basePrice: 2500 });
+  await save({ category: 'dynamic_websites', basePrice: 15000 });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    await context.addCookies([{ name: 'token', value: cookie(admin).slice(6), url: base }]);
+    const page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`${base}/categories-page`);
+    await page.getByText('standard_websites', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Not configured', { exact: true }).count(), 2, 'cloud and app have no stored price');
+
+    // Create: the key follows the name, and a new category starts admin-only.
+    await page.getByRole('button', { name: 'Add Category' }).click();
+    await page.getByLabel('Category name').fill('SEO Services');
+    assert.equal(await page.getByLabel('Key').inputValue(), 'seo_services');
+    await page.getByLabel('Base price (₹)').fill('5000');
+    await page.getByLabel('Starting node title').fill('SEO audit started');
+    await page.getByRole('button', { name: 'Create category' }).click();
+    await page.getByText('seo_services', { exact: true }).waitFor();
+    const created = await CategoryModel.findOne({ category: 'seo_services' }).lean();
+    assert.deepEqual([created.label, created.basePrice, created.customerSelectable, created.status, created.startingNodeTitle], ['SEO Services', 5000, false, 'active', 'SEO audit started']);
+
+    // Locked categories cannot be archived or hidden from customers; the key is read-only on edit.
+    await page.getByText('standard_websites', { exact: true }).click();
+    assert.equal(await page.getByLabel('Status').isDisabled(), true);
+    assert.equal(await page.getByLabel('Key').isDisabled(), true);
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    // Archive an unlocked category: it disappears until "Show archived" is ticked.
+    await page.getByText('cloud_software_development', { exact: true }).click();
+    await page.getByLabel('Status').selectOption('archived');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByText('cloud_software_development', { exact: true }).waitFor({ state: 'detached' });
+    await page.getByText('Show archived (1)').click();
+    await page.getByText('cloud_software_development', { exact: true }).waitFor();
+    assert.equal((await CategoryModel.findOne({ category: 'cloud_software_development' }).lean()).status, 'archived');
+    for (const width of [390, 1280]) { await page.setViewportSize({ width, height: 900 }); await page.screenshot({ path: path.join(folder, `categories-${width}.png`), fullPage: true }); }
+    assert.deepEqual(errors, []);
+    console.log(`Categories browser evidence: ${folder}`);
+  } finally {
+    if (browser) await browser.close();
+  }
 });
 
 test('label backfill: dry run writes nothing; apply fills only missing labels and keeps updatedAt', async () => {
