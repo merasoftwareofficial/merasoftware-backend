@@ -16,7 +16,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:external-upload": "node --test tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test:website-preview": "node --test tests/websitePreview.test.js"
   },
   "author": "",
   "license": "ISC",

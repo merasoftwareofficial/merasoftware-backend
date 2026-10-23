@@ -1,6 +1,15 @@
 const express = require('express')
 
 const router = express.Router()
+const websitePreview = require('../controller/order/websitePreview');
+const previewAuth = require('../middleware/authToken');
+router.get('/projects/:projectId/website-preview', previewAuth, websitePreview.state);
+router.patch('/projects/:projectId/website-preview', previewAuth, websitePreview.settings);
+router.post('/projects/:projectId/website-preview/uploads', previewAuth, websitePreview.begin);
+router.post('/projects/:projectId/website-preview/uploads/:versionId/tokens', previewAuth, websitePreview.batch);
+router.post('/projects/:projectId/website-preview/grant', previewAuth, websitePreview.grant);
+router.post('/projects/:projectId/website-preview/cleanup', previewAuth, websitePreview.cleanup);
+router.post('/website-preview-service/:action', websitePreview.integration);
 router.patch('/admin/projects/:orderId/portfolio-source', require('../middleware/authToken'), require('../controller/order/portfolioSettings'));
 router.get('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 router.post('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
