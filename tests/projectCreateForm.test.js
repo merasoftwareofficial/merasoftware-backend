@@ -17,6 +17,7 @@ const invoiceModel = require('../models/invoiceModel');
 const transactionModel = require('../models/transactionModel');
 const categoryBasePriceModel = require('../models/categoryBasePriceModel');
 const authToken = require('../middleware/authToken');
+const { seedStarterPackages } = require('./fixtures/salesPackages');
 
 const nativeFetch = global.fetch;
 let db, server, base, admin, customer, websiteCalls, app;
@@ -60,6 +61,7 @@ before(async () => {
   const salesController = require('../controller/order/salesPackagesController');
   app.get('/admin/sales-packages', authToken, salesController.adminRead);
   app.patch('/admin/sales-packages', authToken, salesController.adminSave);
+  app.patch('/admin/sales-packages/offer-links', authToken, salesController.adminLinkOffer);
   app.get('/integration/sales-packages', salesController.integrationRead);
   app.post('/admin/projects/:orderId/approval', authToken, require('../controller/order/approveProjectOrder'));
   app.post('/admin/clients/:customerId/recharge-wallet', authToken, require('../controller/user/adminRechargeWallet'));
@@ -71,6 +73,7 @@ before(async () => {
 beforeEach(async () => {
   websiteCalls = 0;
   await Promise.all([orderModel.deleteMany({}), invoiceModel.deleteMany({}), transactionModel.deleteMany({}), EmailDraft.deleteMany({}), require('../models/salesCatalogueModel').deleteMany({}), require('../models/productModel').deleteMany({})]);
+  await seedStarterPackages(require('../models/salesCatalogueModel'));
 });
 after(async () => {
   global.fetch = nativeFetch;
@@ -268,7 +271,7 @@ test('offer price never locks the selling price: labelled upward and downward ad
   assert.equal((await orderModel.findById(plain.data._id).lean()).projectSnapshot.salesAgreement.adjustmentLabel, '');
 });
 
-test('archived package cannot create new projects or reappear as a default', async () => {
+test('archived package cannot create new projects and stays archived', async () => {
   const catalog = await api('/admin/sales-packages', null, 'GET');
   const starter = catalog.data.packages[0];
   assert.equal((await api('/admin/sales-packages', { item: { ...starter, status: 'archived' }, creating: false }, 'PATCH')).status, 200);
@@ -287,6 +290,38 @@ test('package management requires portal admin; integration requires shared secr
   const catalog = await allowed.json();
   assert.equal(catalog.data.packages.length, 3);
   assert.equal('linkedPlanIds' in catalog.data.packages[0], false);
+});
+
+test('no built-in packages: an empty catalogue lists nothing and the first save adds only that package', async () => {
+  await require('../models/salesCatalogueModel').deleteMany({});
+  assert.deepEqual((await api('/admin/sales-packages', null, 'GET')).data.packages, []);
+  const { STARTER_PACKAGES } = require('./fixtures/salesPackages');
+  const item = { ...STARTER_PACKAGES[0], id: 'own-package', offerSlug: '' };
+  assert.equal((await api('/admin/sales-packages', { item, creating: true }, 'PATCH')).status, 200);
+  assert.deepEqual((await api('/admin/sales-packages', null, 'GET')).data.packages.map(row => row.id), ['own-package']);
+});
+
+test('offer and package links are one record: either editor shows the other side, one offer per package', async () => {
+  const link = (offerSlug, packageIds) => api('/admin/sales-packages/offer-links', { offerSlug, packageIds }, 'PATCH');
+  const offerOf = async () => Object.fromEntries((await api('/admin/sales-packages', null, 'GET')).data.packages.map(row => [row.id, row.offerSlug]));
+  // Offer side: ticking moves a package from another offer; unticking clears only this offer's packages.
+  assert.equal((await link('diwali', ['starter'])).status, 200);
+  assert.deepEqual(await offerOf(), { starter: 'diwali', 'starter-plus': 'page', 'starter-complete': 'page' });
+  const catalog = await api('/admin/sales-packages', null, 'GET');
+  assert.equal(catalog.data.packages.find(row => row.id === 'starter').quote.offer.slug, 'diwali');
+  assert.equal((await link('page', ['starter-plus'])).status, 200);
+  assert.deepEqual(await offerOf(), { starter: 'diwali', 'starter-plus': 'page', 'starter-complete': '' });
+  // Package side: saving a package with an offer is what the offer editor reads back.
+  const complete = catalog.data.packages.find(row => row.id === 'starter-complete');
+  assert.equal((await api('/admin/sales-packages', { item: { ...complete, offerSlug: 'diwali', quote: undefined, quoteKey: undefined }, creating: false }, 'PATCH')).status, 200);
+  assert.deepEqual(await offerOf(), { starter: 'diwali', 'starter-plus': 'page', 'starter-complete': 'diwali' });
+  // Refused without any write: unknown offer, unknown package, package outside the offer's categories.
+  assert.equal((await link('missing', ['starter'])).status, 400);
+  assert.equal((await link('page', ['nope'])).status, 400);
+  const seo = { ...complete, id: 'other-cat', category: 'dynamic_websites', offerSlug: '', quote: undefined, quoteKey: undefined };
+  await require('../models/salesCatalogueModel').updateOne({ _id: 'packages' }, { $set: { 'packages.other-cat': seo } });
+  assert.equal((await link('page', ['starter-plus', 'other-cat'])).status, 400);
+  assert.deepEqual(await offerOf(), { starter: 'diwali', 'starter-plus': 'page', 'starter-complete': 'diwali', 'other-cat': '' });
 });
 
 
@@ -338,7 +373,7 @@ if (process.env.TEST_SALES_BROWSER === '1') test('actual package editor, admin p
     await page.goto(base+'/package-manager');await page.getByRole('button',{name:'New package +',exact:true}).click();
     await page.getByLabel('Package name',{exact:true}).fill('Browser Package');await page.getByLabel('Permanent ID',{exact:true}).fill('browser-package');
     await page.getByLabel('Description',{exact:true}).fill('Editable starter example');await page.getByLabel('Included work (one item per line)',{exact:true}).fill('One-page business website');
-    await page.getByLabel('Regular one-time price (₹)',{exact:true}).fill('10000');await page.getByLabel('Linked offer',{exact:true}).selectOption('page');await page.getByLabel('Status',{exact:true}).selectOption('published');
+    await page.getByLabel('Main price (₹)',{exact:true}).fill('10000');await page.getByLabel('Discounted price (₹)',{exact:true}).fill('10000');await page.getByLabel('Linked offer',{exact:true}).selectOption('page');await page.getByLabel('Status',{exact:true}).selectOption('published');
     await page.getByRole('button',{name:'Save package',exact:true}).click();await page.getByText('Package saved. Existing client agreements stay unchanged.',{exact:true}).waitFor();
     await page.reload();await page.getByRole('heading',{name:'Browser Package',exact:true}).waitFor();
     await page.goto(base+'/project-form');await page.locator('select').first().selectOption('standard_websites');
@@ -376,4 +411,58 @@ test('package related-plan references do not purchase a service; extras and disc
   const invoice = await invoiceModel.findOne({ orderId: order._id, invoiceType: 'project' }).lean();
   assert.equal(invoice.lineItems.reduce((sum, item) => sum + item.price, 0), 850);
   assert.equal((await create({ sellingPrice: 699, packageId: starter.id, packageQuoteKey: starter.quoteKey, featureIds: [String(feature._id)], featureQuantities: { [String(feature._id)]: -1 } })).status, 400);
+});
+
+// Opt-in: the real website Offers editor against this backend — package ticks are the package's offerSlug.
+if (process.env.TEST_SALES_BROWSER === '1') test('offer editor package ticks and the package editor show one shared link', { timeout: 120000 }, async () => {
+  const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+  const { build } = require('../../merasoftware/node_modules/esbuild');
+  const { chromium } = require('../../merasoftware/node_modules/playwright');
+  const website = path.resolve(__dirname, '../../merasoftware');
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'mera-offer-links-browser-'));
+  const nextStubs = { name: 'next-stubs', setup(b) {
+    b.onResolve({ filter: /^next\/(navigation|link)$/ }, args => ({ path: args.path, namespace: 'next-stub' }));
+    b.onLoad({ filter: /.*/, namespace: 'next-stub' }, args => ({ resolveDir: website, loader: 'jsx', contents: args.path === 'next/link'
+      ? `import React from 'react';export default function Link({ href, prefetch, ...props }) { return <a href={String(href)} {...props} />; }`
+      : `export const useRouter=()=>({replace(){},push(){},refresh(){},prefetch(){}});export const usePathname=()=>'/admin/offers';export const useSearchParams=()=>new URLSearchParams();` }));
+  } };
+  const entry = `import React from 'react';import{createRoot}from'react-dom/client';import{OffersManager}from'@/app/admin/offers/offers-manager';import{DEFAULT_OFFER}from'@/lib/offers';
+    const offers=${JSON.stringify(LIVE_OFFERS.map(({ resolvedTerms, quoteKey, ...offer }) => offer))}.map(offer=>({...DEFAULT_OFFER,...offer}));
+    createRoot(document.getElementById('app')).render(<OffersManager initialOffers={offers} initialTerms={[]} initialListing={{title:'Offers',emptyMessage:'None'}} section="settings" initialOfferSlug="diwali" />);`;
+  await build({ stdin: { contents: entry, loader: 'tsx', resolveDir: website }, bundle: true, outfile: path.join(folder, 'offers.js'), platform: 'browser', jsx: 'automatic', loader: { '.css': 'local-css' }, tsconfig: path.join(website, 'tsconfig.json'), plugins: [nextStubs], define: { 'process.env.NODE_ENV': '"production"' } });
+  const proxy = (target, method) => async (req, res) => { const result = await nativeFetch(base + target, { method, headers: { Cookie: cookie(admin), 'Content-Type': 'application/json' }, ...(method === 'GET' ? {} : { body: JSON.stringify(req.body) }) }); const body = await result.json(); res.status(result.status).json(result.ok ? body.data : { error: body.message }); };
+  app.get('/api/time', (req, res) => res.json({ now: Date.now() }));
+  app.get('/api/packages', proxy('/admin/sales-packages', 'GET'));
+  app.patch('/api/packages/offer-links', proxy('/admin/sales-packages/offer-links', 'PATCH'));
+  app.patch('/api/offers', (req, res) => res.json(req.body.offer)); // the website's own offer store is out of scope here
+  app.get('/ui-offers/:asset', (req, res) => res.sendFile(path.join(folder, req.params.asset)));
+  app.get('/offers-editor', (req, res) => res.send('<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/ui-offers/offers.css"><style>body{font:16px sans-serif;max-width:1000px;margin:20px auto;padding:16px}label{display:block;margin:8px 0}</style></head><body><main id="app"></main><script src="/ui-offers/offers.js"></script></body></html>'));
+  const offerOf = async id => (await require('../models/salesCatalogueModel').findById('packages').lean()).packages[id].offerSlug;
+  const box = name => page.getByRole('checkbox', { name: new RegExp(`^\\s*${name}( \\(.*\\))?$`) });
+  let browser, page;
+  try {
+    browser = await chromium.launch({ headless: true });
+    page = await browser.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(base + '/offers-editor');
+    await page.getByText('Business Starter (now on Business Growth Starter)', { exact: false }).first().waitFor();
+    const saveButton = page.getByRole('button', { name: 'Save & publish', exact: true });
+    assert.equal(await saveButton.isDisabled(), true, 'opening the offer is not an unsaved change');
+    // Offer side: tick moves the package from the other offer.
+    await box('Business Starter').check();
+    await page.getByText('(moves here from Business Growth Starter on save)', { exact: false }).waitFor();
+    await saveButton.click(); await page.getByText('Saved.', { exact: true }).waitFor();
+    assert.equal(await offerOf('starter'), 'diwali');
+    assert.equal(await box('Business Starter').isChecked(), true);
+    assert.equal(await saveButton.isDisabled(), true);
+    await page.setViewportSize({ width: 390, height: 900 }); await page.screenshot({ path: path.join(folder, 'offer-links-390.png'), fullPage: true });
+    // Untick clears only this offer.
+    await box('Business Starter').uncheck(); await saveButton.click(); await page.getByText('Saved.', { exact: true }).waitFor();
+    assert.equal(await offerOf('starter'), ''); assert.equal(await offerOf('starter-plus'), 'page');
+    // Package side: saving a package with this offer shows it ticked in the offer editor.
+    const plus = (await api('/admin/sales-packages', null, 'GET')).data.packages.find(row => row.id === 'starter-plus');
+    assert.equal((await api('/admin/sales-packages', { item: { ...plus, offerSlug: 'diwali' }, creating: false }, 'PATCH')).status, 200);
+    await page.reload(); await box('Business Starter Plus').waitFor();
+    await page.waitForFunction(() => [...document.querySelectorAll('label')].some(label => /^\s*Business Starter Plus$/.test(label.textContent) && label.querySelector('input').checked));
+    assert.deepEqual(errors, []); console.log('Offer links browser evidence: ' + folder);
+  } finally { if (browser) await browser.close(); }
 });

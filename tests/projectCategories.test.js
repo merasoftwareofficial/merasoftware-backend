@@ -17,7 +17,8 @@ const invoiceModel = require('../models/invoiceModel');
 const CategoryModel = require('../models/categoryBasePriceModel');
 const authToken = require('../middleware/authToken');
 const { listProjectCategories, requireCategoryForNewProject } = require('../helpers/projectCategories');
-const { savePackage, DEFAULT_PACKAGES } = require('../helpers/salesPackages');
+const { savePackage } = require('../helpers/salesPackages');
+const { STARTER_PACKAGES } = require('./fixtures/salesPackages');
 
 let db, server, base, admin, customer, app;
 const cookie = (user) => `token=${jwt.sign({ _id: String(user._id), role: user.roles[0] }, process.env.TOKEN_SECRET_KEY)}`;
@@ -153,7 +154,7 @@ test('admin project in a new category freezes its label and starting node; archi
 
 test('packages need an active category; an archived package may stay in an archived one', async () => {
   await save({ creating: true, category: 'seo_services', label: 'SEO Services' });
-  const item = { ...DEFAULT_PACKAGES[0], id: 'seo-pack', category: 'seo_services', offerSlug: '' };
+  const item = { ...STARTER_PACKAGES[0], id: 'seo-pack', category: 'seo_services', offerSlug: '' };
   await savePackage(item, true, []);
   await save({ category: 'seo_services', status: 'archived' });
   await assert.rejects(savePackage({ ...item, name: 'Renamed' }, false, []), /active project category/);

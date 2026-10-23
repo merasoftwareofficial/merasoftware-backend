@@ -2,7 +2,7 @@ const { timingSafeEqual } = require('node:crypto');
 const User = require('../../models/userModel');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, savePackage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, savePackage, linkOfferPackages, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories } = require('../../helpers/projectCategories');
 
 async function requireAdmin(req) {
@@ -28,6 +28,12 @@ const adminSave = handle(async (req, res) => {
   const item = await savePackage(req.body.item, req.body.creating, offers);
   res.json({ success: true, data: item });
 });
+const adminLinkOffer = handle(async (req, res) => {
+  await requireAdmin(req);
+  const { offers } = await fetchWebsiteCatalogue();
+  const packageIds = await linkOfferPackages(req.body.offerSlug, req.body.packageIds, offers);
+  res.json({ success: true, data: { offerSlug: req.body.offerSlug, packageIds } });
+});
 const integrationRead = handle(async (req, res) => {
   const secret = process.env.PORTFOLIO_INTEGRATION_SECRET || '';
   if (secret.length < 32) fail('Sales integration is not configured', 503);
@@ -41,4 +47,4 @@ const integrationRead = handle(async (req, res) => {
   // Service references are admin-only; public packages never expose internal notes/IDs.
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, ...item }) => item), categories } });
 });
-module.exports = { adminRead, adminSave, integrationRead };
+module.exports = { adminRead, adminSave, adminLinkOffer, integrationRead };

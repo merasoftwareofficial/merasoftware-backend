@@ -17,7 +17,7 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     quote = quoted.quote; scope = packageItem.inclusions; packageQuoteKey = quoted.quoteKey;
   } else {
     const offer = offers.find(item => item.slug === body.offerSlug);
-    if (!offerEligible(offer, category, null)) fail('The selected offer is expired or does not apply to this project category');
+    if (!offerEligible(offer, category)) fail('The selected offer is expired or does not apply to this project category');
     if (!body.offerQuoteKey || body.offerQuoteKey !== offer.quoteKey) fail('Offer changed. Refresh offers and review the price.', 409);
     const regularPrice = Number(offer.mainPrice);
     quote = { regularPrice, ...calculateBenefit(regularPrice, offer), offer, terms: offer.resolvedTerms || [] };

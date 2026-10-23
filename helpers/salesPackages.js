@@ -6,23 +6,11 @@ const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
-const starterScope = [
-  'A single-page business website with a contact enquiry link',
-  'Google Business Profile setup or optimisation',
-  'Facebook and Instagram business profile setup',
-  'WhatsApp Business profile and contact-link setup',
-  'One branded social post design to introduce your business',
-];
-const defaultTerms = ['Domain, hosting, advertising spend and ongoing management are separate unless agreed in writing.', 'You provide business details, logo, photos and required account access.', 'Scope, delivery timeline and applicable taxes are confirmed before payment.'];
-const DEFAULT_PACKAGES = [
-  { id: 'starter', name: 'Business Starter', description: 'One-page website and business profile setup.', regularPrice: 10000, offerExtraPrice: 0, inclusions: starterScope },
-  { id: 'starter-plus', name: 'Business Starter Plus', description: 'Starter setup with a three-page website.', regularPrice: 12000, offerExtraPrice: 2000, inclusions: ['A three-page business website with a contact enquiry link', ...starterScope.slice(1), 'Basic page titles and descriptions'] },
-  { id: 'starter-complete', name: 'Business Starter Complete', description: 'Starter setup with five website pages and three social post designs.', regularPrice: 14000, offerExtraPrice: 4000, inclusions: ['A five-page business website with a contact enquiry link', ...starterScope.slice(1, 4), 'Three branded social post designs', 'Basic page titles and descriptions'] },
-].map((item, order) => ({ ...item, status: 'published', category: 'standard_websites', offerSlug: 'page', terms: defaultTerms, linkedPlanIds: [], order }));
 
+// Only packages created by an admin exist; there are no built-in defaults.
 async function readPackages() {
   const row = await Catalogue.findById('packages').lean();
-  return Object.values(row ? row.packages : Object.fromEntries(DEFAULT_PACKAGES.map(item => [item.id, item])))
+  return Object.values(row ? row.packages : {})
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
 }
 const cleanText = (value, max, label) => {
@@ -44,19 +32,23 @@ function validatePackage(raw) {
   if (raw.offerSlug && !safeId(raw.offerSlug)) fail('Choose a valid offer');
   if (!Number.isInteger(raw.order) || raw.order < 0 || raw.order > 9999) fail('Enter a valid display order');
   if (!Array.isArray(raw.linkedPlanIds) || raw.linkedPlanIds.length > 30 || raw.linkedPlanIds.some(id => typeof id !== 'string' || !/^[a-f\d]{24}$/i.test(id))) fail('Choose valid service references');
+  const regularPrice = amount(raw.regularPrice, 'main price');
+  const discountedPrice = amount(raw.discountedPrice, 'discounted price');
+  if (discountedPrice > regularPrice) fail('Discounted price cannot be more than the main price');
   return {
     id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 500, 'description'),
-    category: raw.category, status: raw.status, regularPrice: amount(raw.regularPrice, 'regular price'),
+    category: raw.category, status: raw.status, regularPrice, discountedPrice,
     offerExtraPrice: amount(raw.offerExtraPrice, 'offer extras price'), offerSlug: raw.offerSlug || '',
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
     linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order,
   };
 }
-function offerEligible(offer, category, packageId, now = Date.now()) {
+// Which packages an offer applies to is stored only on the package (offerSlug), so one package
+// carries at most one offer while one offer may serve many packages.
+function offerEligible(offer, category, now = Date.now()) {
   return !!offer && offer.status === 'published' && Date.parse(offer.endsAt) > now
     && (!offer.targets || offer.targets.includes('projects'))
-    && Array.isArray(offer.applicableCategories) && offer.applicableCategories.includes(category)
-    && (!offer.packageIds?.length || (!!packageId && offer.packageIds.includes(packageId)));
+    && Array.isArray(offer.applicableCategories) && offer.applicableCategories.includes(category);
 }
 function calculateBenefit(regularPrice, offer, extra = 0) {
   if (!offer) return { discountAmount: 0, finalPrice: regularPrice };
@@ -71,10 +63,14 @@ function calculateBenefit(regularPrice, offer, extra = 0) {
 }
 function quotePackage(item, offers, now = Date.now()) {
   const candidate = offers.find(offer => offer.slug === item.offerSlug);
-  const offer = offerEligible(candidate, item.category, item.id, now) ? candidate : null;
-  const prices = calculateBenefit(item.regularPrice, offer, item.offerExtraPrice);
-  const quote = { ...prices, regularPrice: item.regularPrice, offer,
-    terms: [...new Set([...item.terms, ...(offer?.resolvedTerms || [])])] };
+  const offer = offerEligible(candidate, item.category, now) ? candidate : null;
+  const terms = [...new Set([...item.terms, ...(offer?.resolvedTerms || [])])];
+  // A live offer is calculated from the main price. Without one the package's discounted price
+  // is the price and is quoted as the base, so agreements/invoices never show an "Offer benefit".
+  const discountedPrice = item.discountedPrice ?? item.regularPrice;
+  const quote = offer
+    ? { ...calculateBenefit(item.regularPrice, offer, item.offerExtraPrice), regularPrice: item.regularPrice, offer, terms }
+    : { discountAmount: 0, finalPrice: discountedPrice, regularPrice: discountedPrice, offer: null, terms };
   const quoteKey = createHash('sha256').update(JSON.stringify({ item, quote })).digest('hex');
   return { ...item, quote, quoteKey };
 }
@@ -94,17 +90,38 @@ async function savePackage(raw, creating, offers) {
     const count = await Product.countDocuments({ _id: { $in: item.linkedPlanIds }, category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null });
     if (count !== item.linkedPlanIds.length) fail('A referenced service is unavailable. Select active portal services.');
   }
-  if (item.offerSlug && item.status !== 'archived') {
-    const offer = offers.find(row => row.slug === item.offerSlug);
-    if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category) || (offer.packageIds?.length && !offer.packageIds.includes(item.id))) fail('The linked offer is unavailable or does not match this package category');
-    calculateBenefit(item.regularPrice, offer, item.offerExtraPrice);
-  }
+  if (item.offerSlug && item.status !== 'archived') checkOfferFits(item, offers.find(row => row.slug === item.offerSlug));
   try {
-    await Catalogue.updateOne({ _id: 'packages' }, { $setOnInsert: { packages: Object.fromEntries(DEFAULT_PACKAGES.map(row => [row.id, row])) } }, { upsert: true });
+    await Catalogue.updateOne({ _id: 'packages' }, { $setOnInsert: { packages: {} } }, { upsert: true });
   } catch (error) { if (error.code !== 11000) throw error; }
   const path = `packages.${item.id}`;
   const result = await Catalogue.updateOne({ _id: 'packages', ...(creating ? { [path]: { $exists: false } } : { [path]: { $exists: true } }) }, { $set: { [path]: item } });
   if (!result.matchedCount) fail('Package changed; refresh the catalogue and try again', 409);
   return item;
 }
-module.exports = { DEFAULT_PACKAGES, money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage };
+function checkOfferFits(item, offer) {
+  if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category)) fail(`The offer is unavailable or does not match the category of ${item.name}`);
+  calculateBenefit(item.regularPrice, offer, item.offerExtraPrice);
+}
+// The offer editor's package ticks: ticked packages move to this offer (from any other offer),
+// unticked packages that were on it lose it. Same package.offerSlug the package editor saves.
+async function linkOfferPackages(offerSlug, packageIds, offers) {
+  if (!safeId(offerSlug)) fail('Choose a valid offer');
+  if (!Array.isArray(packageIds) || packageIds.length > 100 || packageIds.some(id => !safeId(id))) fail('Choose valid packages');
+  const offer = offers.find(row => row.slug === offerSlug);
+  if (!offer) fail('Save the offer before linking packages');
+  if (packageIds.length && !offer.pricingRule) fail('Choose a pricing rule for this offer before linking packages');
+  const packages = await readPackages();
+  const wanted = new Set(packageIds);
+  const changes = {};
+  for (const id of wanted) {
+    const item = packages.find(row => row.id === id);
+    if (!item || item.status === 'archived') fail('A selected package is unavailable. Refresh and try again.');
+    checkOfferFits(item, offer);
+    if (item.offerSlug !== offerSlug) changes[`packages.${id}.offerSlug`] = offerSlug;
+  }
+  for (const item of packages) if (item.offerSlug === offerSlug && !wanted.has(item.id)) changes[`packages.${item.id}.offerSlug`] = '';
+  if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
+  return [...wanted];
+}
+module.exports = { money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages };

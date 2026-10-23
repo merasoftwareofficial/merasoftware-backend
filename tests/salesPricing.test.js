@@ -4,7 +4,8 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { buildInstallments } = require('../helpers/projectInstallments');
-const { DEFAULT_PACKAGES, quotePackage, calculateBenefit, validatePackage } = require('../helpers/salesPackages');
+const { quotePackage, calculateBenefit, validatePackage } = require('../helpers/salesPackages');
+const { STARTER_PACKAGES } = require('./fixtures/salesPackages');
 const { buildLineItemsFromOrder } = require('../helpers/paymentRecording');
 const live = { slug: 'page', title: 'Starter', status: 'published', endsAt: '2099-01-01T00:00:00Z', applicableCategories: ['standard_websites'], packageIds: [], pricingRule: 'fixed_price', mainPrice: 10000, offerPrice: 699, resolvedTerms: ['Saved offer term'] };
 
@@ -15,23 +16,36 @@ test('installments preserve every paise for odd, fractional, free and small tota
     assert(rows.every(row => row.amount >= 0));
   }
 });
-test('offer expiry/category/package eligibility is enforced, and quote versions include scope/terms', () => {
-  const item = DEFAULT_PACKAGES[0];
+test('offer expiry/category eligibility is enforced, and quote versions include scope/terms', () => {
+  const item = STARTER_PACKAGES[0];
   const initial = quotePackage(item, [live]);
   assert.equal(initial.quote.finalPrice, 699);
-  for (const patch of [{ endsAt: '2000-01-01T00:00:00Z' }, { status: 'draft' }, { applicableCategories: ['app_development'] }, { packageIds: ['other'] }]) {
+  for (const patch of [{ endsAt: '2000-01-01T00:00:00Z' }, { status: 'draft' }, { applicableCategories: ['app_development'] }]) {
     assert.equal(quotePackage(item, [{ ...live, ...patch }]).quote.finalPrice, 10000);
   }
   assert.notEqual(quotePackage({ ...item, inclusions: ['Updated scope'] }, [live]).quoteKey, initial.quoteKey);
   assert.notEqual(quotePackage(item, [{ ...live, resolvedTerms: ['Changed terms'] }]).quoteKey, initial.quoteKey);
-  assert.equal(quotePackage(DEFAULT_PACKAGES[1], [live]).quote.finalPrice, 2699);
+  assert.equal(quotePackage(STARTER_PACKAGES[1], [live]).quote.finalPrice, 2699);
+  // The package's own offerSlug is the only link; the offer's old package list no longer filters.
+  assert.equal(quotePackage(item, [{ ...live, packageIds: ['other'] }]).quote.finalPrice, 699);
+});
+test('package has a main and a discounted price; an offer replaces the discount and is calculated from the main price', () => {
+  const item = { ...STARTER_PACKAGES[0], regularPrice: 14000, discountedPrice: 12000, offerSlug: '' };
+  assert.deepEqual(quotePackage(item, [live]).quote, { discountAmount: 0, finalPrice: 12000, regularPrice: 12000, offer: null, terms: item.terms });
+  const percent = { ...live, pricingRule: 'percentage', benefitValue: 10 };
+  const withOffer = quotePackage({ ...item, offerSlug: 'page' }, [percent]).quote;
+  assert.deepEqual([withOffer.regularPrice, withOffer.discountAmount, withOffer.finalPrice], [14000, 1400, 12600]);
+  assert.equal(quotePackage({ ...item, discountedPrice: undefined }, []).quote.finalPrice, 14000);
+  assert.equal(validatePackage(item).discountedPrice, 12000);
+  assert.throws(() => validatePackage({ ...item, discountedPrice: 14000.01 }), /cannot be more than the main price/);
+  assert.throws(() => validatePackage({ ...item, discountedPrice: undefined }), /discounted price/);
 });
 test('discount rules reject invalid results; package input cannot target unsafe keys', () => {
   assert.equal(calculateBenefit(1000, { pricingRule: 'percentage', benefitValue: 10 }).finalPrice, 900);
   assert.equal(calculateBenefit(1000, { pricingRule: 'fixed_discount', benefitValue: 100.5 }).finalPrice, 899.5);
   assert.throws(() => calculateBenefit(100, { pricingRule: 'fixed_price', offerPrice: 699 }));
   assert.throws(() => calculateBenefit(100, { pricingRule: 'percentage', benefitValue: 101 }));
-  for (const id of ['constructor', '__proto__', 'a.b']) assert.throws(() => validatePackage({ ...DEFAULT_PACKAGES[0], id }));
+  for (const id of ['constructor', '__proto__', 'a.b']) assert.throws(() => validatePackage({ ...STARTER_PACKAGES[0], id }));
 });
 test('invoice rows reconcile paise, upward adjustments and separate offer/admin benefits', () => {
   for (const totalAmount of [99.5, 100, 150]) {
