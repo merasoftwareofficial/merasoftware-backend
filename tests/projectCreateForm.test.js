@@ -8,7 +8,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { requestMiddleware } = require('../helpers/emailController');
 const { EmailDraft } = require('../models/emailControlModel');
 const userModel = require('../models/userModel');
@@ -41,7 +41,7 @@ before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-project-form-secret';
   process.env.PORTFOLIO_WEBSITE_URL = 'https://website.example.test';
   process.env.PORTFOLIO_INTEGRATION_SECRET = 'x'.repeat(40);
-  db = await MongoMemoryServer.create({ instance: { launchTimeout: 60000 } });
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 }, instanceOpts: [{ launchTimeout: 60000 }] });
   await mongoose.connect(db.getUri(), { dbName: 'project-form-isolated-test' });
   [admin, customer] = await userModel.create([
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },

@@ -7,7 +7,7 @@
 // Project orders only — plans use monthlyInvoiceModel, a separate system, and must not
 // be run through this.
 const getDueUnpaidInvoiceFilter = (order) => {
-  const filter = { orderId: order._id, status: { $in: ['unpaid', 'overdue'] } };
+  const filter = { orderId: order._id, invoiceType: 'project', status: { $in: ['unpaid', 'partially_paid', 'overdue'] } };
 
   if (Array.isArray(order.installments) && order.installments.length > 0) {
     const dueInstallment = order.installments.find(

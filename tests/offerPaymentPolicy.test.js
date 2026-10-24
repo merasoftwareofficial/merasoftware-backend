@@ -154,7 +154,7 @@ test('automatic reminders reuse one durable send, stop after payment, and respec
 test('later due installment locks even before its invoice exists; final statements do not count as bills', async () => {
   const order = await project('advance');
   order.orderVisibility = 'approved'; order.isPartialPayment = true; order.currentInstallment = 2; order.projectProgress = 90;
-  order.installments = [{ installmentNumber: 1, amount: 349.5, paid: true }, { installmentNumber: 2, amount: 349.5, paid: false, progressThreshold: 90 }]; await order.save();
+  order.installments = [{ installmentNumber: 1, percentage: 50, amount: 349.5, paid: true }, { installmentNumber: 2, percentage: 50, amount: 349.5, paid: false, progressThreshold: 90 }]; await order.save();
   await Invoice.deleteMany({ orderId: order._id, invoiceType: 'project' });
   assert.equal((await getPaymentAccess(order)).allowed, false);
   order.projectProgress = 50; await order.save(); assert.equal((await getPaymentAccess(order)).allowed, true);

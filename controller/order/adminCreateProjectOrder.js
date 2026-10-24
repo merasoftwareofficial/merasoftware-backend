@@ -3,13 +3,7 @@ const userModel = require("../../models/userModel");
 const productModel = require("../../models/productModel");
 const orderModel = require("../../models/orderProductModel");
 const { requireCategoryForNewProject } = require("../../helpers/projectCategories");
-const invoiceModel = require("../../models/invoiceModel");
-const generateInvoiceNumber = require("../../helpers/generateInvoiceNumber");
-const { initializeProjectTimeline } = require("../../helpers/projectNodeService");
-// Shared SSOT payment-recording helper (extracted from this file) — reused by the
-// project-approval flow so both paths write one transaction + one invoice, never two.
-const { markProjectInvoicePaid, buildLineItemsFromOrder } = require("../../helpers/paymentRecording");
-const { syncProjectFinalInvoice } = require("../../helpers/projectFinalInvoice");
+const { persistAdminProject } = require('../../helpers/adminProjectCreation');
 const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
 const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
 const { sendProjectCreatedEmail } = require("../../helpers/emailService");
@@ -223,106 +217,13 @@ const adminCreateProjectOrderController = async (req, res) => {
       orderData.installments = buildInstallments(finalPrice, installmentCount);
     }
 
-    const order = new orderModel(orderData);
-
-    initializeProjectTimeline({
-      order,
-      startingNodeTitle: resolvedStartingNodeTitle,
-      actorId: req.userId,
+    const { order, invoice, reused } = await persistAdminProject({
+      orderData, startingNodeTitle: resolvedStartingNodeTitle, actorId: req.userId,
+      recordPayment: shouldRecordPayment ? recordPayment : null, preparedEvidence,
     });
-
-    await order.save();
-
-    // Shared builder: the base + feature rows, plus a "Discount" row whenever the agreed price
-    // is below them — the same lines approval, installment and final invoices use.
-    const lineItems = buildLineItemsFromOrder(order);
-
-    const invoiceDate = new Date();
-    const createdInvoices = [];
-    if (isPartialPayment) {
-      // A future installment is not an actionable debt. Create only installment
-      // #1 now; settleInstallmentInvoice creates #2/#3 when they are actually due.
-      const installment = order.installments[0];
-      const invoiceNumber = await generateInvoiceNumber();
-      const dueDate = commercial?.paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(commercial.paymentPolicy, invoiceDate) : installment.dueDate || invoiceDate;
-      if (commercial?.paymentPolicy) order.installments[0].dueDate = dueDate;
-      const invoice = await invoiceModel.create({
-        userId: customerId,
-        orderId: order._id,
-        invoiceNumber,
-        invoiceType: "project",
-        amount: installment.amount,
-        status: "unpaid",
-        invoiceDate,
-        dueDate,
-        installmentNumber: installment.installmentNumber,
-        lineItems,
-      });
-      createdInvoices.push(invoice);
-    } else {
-      const invoiceNumber = await generateInvoiceNumber();
-      // A FREE project's ₹0 invoice is settled from birth — there is no payment to wait for.
-      // Status is set here directly because deriveInvoiceStatus() treats a 0 total as unpaid.
-      const invoice = await invoiceModel.create({
-        userId: customerId,
-        orderId: order._id,
-        invoiceNumber,
-        invoiceType: "project",
-        amount: finalPrice,
-        amountPaid: 0,
-        status: isFree ? "paid" : "unpaid",
-        invoiceDate,
-        dueDate: commercial?.paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(commercial.paymentPolicy, invoiceDate) : invoiceDate,
-        ...(isFree ? { paidDate: invoiceDate } : {}),
-        lineItems,
-      });
-      createdInvoices.push(invoice);
-    }
-
-    // Only the first invoice (full amount for one-time, or installment #1 for partial)
-    // can be recorded paid at creation time — matches the "Payment Settings" step, which
-    // only ever asks for the first-due amount, never later installments in advance.
-    if (shouldRecordPayment && createdInvoices.length > 0) {
-      await markProjectInvoicePaid({
-        invoice: createdInvoices[0],
-        customerId,
-        paymentMethod: recordPayment.paymentMethod,
-        transactionReference: recordPayment.transactionReference,
-        paymentDetails: recordPayment.paymentDetails || {},
-        preparedEvidence,
-        notes: recordPayment.notes,
-        actorId: req.userId,
-      });
-
-      if (!isPartialPayment) {
-        order.paidAmount = finalPrice;
-        order.remainingAmount = 0;
-        order.paymentComplete = true;
-        await order.save();
-      } else {
-        order.installments[0].paid = true;
-        order.installments[0].paymentStatus = "none";
-        order.installments[0].paidDate = new Date();
-        order.paidAmount = order.installments[0].amount;
-        order.remainingAmount = finalPrice - order.installments[0].amount;
-        order.currentInstallment = 2;
-        await order.save();
-      }
-    }
-    // The statement is a summary, not a second payable bill. Make it available even before payment.
-    if (commercial?.paymentPolicy && isPartialPayment) await order.save();
-    await syncProjectFinalInvoice(order);
-
-    // Queues the "project started" mail; the response then carries its draft id and the admin
-    // panel shows the same Send / Don't Send review popup project cancellation already shows.
-    // Best-effort: the builder never throws, so a mail problem never undoes a created project.
-    await sendProjectCreatedEmail(client, order, createdInvoices[0]);
-    if (creationKey) {
-      order.projectCreationComplete = true;
-      await order.save();
-    }
-
-    return res.status(201).json({
+    // Keep request-scoped review drafts outside the retryable financial transaction.
+    if (!reused) await sendProjectCreatedEmail(client, order, invoice);
+    return res.status(reused ? 200 : 201).json({
       message: "Project created successfully",
       success: true,
       error: false,

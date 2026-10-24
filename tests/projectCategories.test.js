@@ -9,7 +9,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { requestMiddleware } = require('../helpers/emailController');
 const userModel = require('../models/userModel');
 const orderModel = require('../models/orderProductModel');
@@ -30,7 +30,7 @@ const save = (body) => call('/admin/category-base-prices', { body });
 
 before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-project-categories-secret';
-  db = await MongoMemoryServer.create({ instance: { launchTimeout: 60000 } });
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 }, instanceOpts: [{ launchTimeout: 60000 }] });
   await mongoose.connect(db.getUri(), { dbName: 'project-categories-isolated-test' });
   [admin, customer] = await userModel.create([
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
@@ -240,7 +240,7 @@ if (process.env.TEST_SALES_BROWSER === '1') test('Project Categories page: list,
 
 test('label backfill: dry run writes nothing; apply fills only missing labels and keeps updatedAt', async () => {
   const script = path.join(__dirname, '../scripts/backfillProjectCategoryLabels.js');
-  const run = (...args) => new Promise((resolve, reject) => execFile(process.execPath, [script, ...args], { env: { ...process.env, MONGODB_URI: `${db.getUri()}project-categories-isolated-test` } }, (error, stdout) => (error ? reject(error) : resolve(stdout))));
+  const run = (...args) => new Promise((resolve, reject) => execFile(process.execPath, [script, ...args], { env: { ...process.env, MONGODB_URI: db.getUri('project-categories-isolated-test') } }, (error, stdout) => (error ? reject(error) : resolve(stdout))));
   const stamp = new Date('2026-01-01T00:00:00Z');
   await orderModel.collection.insertMany([
     { projectSnapshot: { category: 'standard_websites' }, updatedAt: stamp },

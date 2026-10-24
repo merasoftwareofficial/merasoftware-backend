@@ -16,6 +16,7 @@ const { markOrderApproved } = require("../../helpers/orderLifecycle");
 // transactions, never accumulated by hand here.
 const { setOrderPaidAmount } = require("../../helpers/orderPaymentTotals");
 const { logRejected, ACTOR_TYPE } = require("../../helpers/orderLifecycleLog");
+const { projectForTransaction, approveProjectPayment, rejectProjectPayment } = require('../../helpers/projectPaymentSettlement');
 
 const requireAdmin = (req, res) => {
   if (req.userRole !== "admin") {
@@ -69,7 +70,7 @@ const applyOrderMoneyForTransaction = async (order, transaction, { settleInvoice
     return order;
   }
 
-  let settledInstallmentNumber = null;
+  let dueSettled = false;
 
   if (transaction.installmentNumber && Array.isArray(order.installments) && order.installments.length > 0) {
     const installment = order.installments.find(
@@ -77,11 +78,22 @@ const applyOrderMoneyForTransaction = async (order, transaction, { settleInvoice
     );
 
     if (installment && !installment.paid) {
-      installment.paid = true;
-      installment.paidDate = new Date();
+      // Settle the bill first. Approval of one payment is not proof that the
+      // entire installment was received (wallet + UPI and partial payments).
+      const settledInvoice = settleInvoice
+        ? await settleInstallmentInvoice({
+          order, installmentNumber: installment.installmentNumber, amount,
+          paymentMethod: transaction.paymentMethod, transaction,
+          customerId: transaction.userId,
+          transactionReference: transaction.upiTransactionId || transaction.transactionId,
+          actorId: transaction.verifiedBy,
+        })
+        : await invoiceModel.findById(transaction.invoiceId);
+      dueSettled = settledInvoice?.status === 'paid';
+      installment.paid = dueSettled;
+      installment.paidDate = dueSettled ? settledInvoice.paidDate || new Date() : null;
       installment.paymentStatus = "none";
       installment.transactionId = transaction.transactionId;
-      settledInstallmentNumber = installment.installmentNumber;
     }
   }
 
@@ -98,16 +110,8 @@ const applyOrderMoneyForTransaction = async (order, transaction, { settleInvoice
   // paid" and belongs to helpers/serviceCycleSettlement.js; leave those exactly as they were.
   await setOrderPaidAmount(order);
 
-  const orderTotal = getOrderTotal(order);
-
-  const allInstallmentsPaid =
-    Array.isArray(order.installments) &&
-    order.installments.length > 0 &&
-    order.installments.every((installment) => installment.paid);
-
-  if (!order.isPartialPayment || order.remainingAmount <= 0 || allInstallmentsPaid) {
-    order.paymentComplete = true;
-  }
+  order.paymentComplete = Number(order.remainingAmount) <= 0;
+  if (!order.isPartialPayment) dueSettled = order.paymentComplete;
 
   const nextInstallment = Array.isArray(order.installments)
     ? order.installments.find((installment) => !installment.paid)
@@ -120,28 +124,11 @@ const applyOrderMoneyForTransaction = async (order, transaction, { settleInvoice
   // never resurrect it (see helpers/orderLifecycle.js).
   // verifiedBy is the admin who approved this transaction — set by approveTransaction() before
   // this runs — so the lifecycle entry records who actually approved the order.
-  if (markOrderApproved(order, { actorId: transaction.verifiedBy, actorType: ACTOR_TYPE.ADMIN })) {
+  if (dueSettled && markOrderApproved(order, { actorId: transaction.verifiedBy, actorType: ACTOR_TYPE.ADMIN })) {
     order.rejectionReason = null;
   }
 
   await order.save();
-
-  // Settle the installment's own invoice — only for a fresh settlement (settledInstallmentNumber
-  // is only set above when the installment was actually flipped from unpaid to paid just now, so
-  // a duplicate/retried approval never re-settles an already-paid invoice), and only when the
-  // caller hasn't already settled this transaction's invoice itself (settleInvoice=false).
-  if (settleInvoice && settledInstallmentNumber != null) {
-    await settleInstallmentInvoice({
-      order,
-      installmentNumber: settledInstallmentNumber,
-      amount,
-      paymentMethod: transaction.paymentMethod,
-      transaction,
-      customerId: transaction.userId,
-      transactionReference: transaction.upiTransactionId || transaction.transactionId,
-      actorId: transaction.verifiedBy,
-    });
-  }
 
   await syncProjectFinalInvoice(order);
 
@@ -374,6 +361,14 @@ const approveTransaction = async (req, res) => {
       });
     }
 
+    if (await projectForTransaction(transaction)) {
+      const result = await approveProjectPayment(transactionId, req.userId);
+      const updated = await transactionModel.findById(result.transaction._id)
+        .populate('userId', 'name email walletBalance').populate('productId', 'serviceName').populate('verifiedBy', 'name email');
+      return res.status(200).json({ message: 'Transaction approved successfully', success: true, error: false,
+        data: { ...result, transaction: updated } });
+    }
+
     const amount = Number(transaction.amount || 0);
     const user = await userModel.findById(transaction.userId);
     if (!user) {
@@ -472,7 +467,7 @@ const approveTransaction = async (req, res) => {
     });
   } catch (error) {
     console.error("Error approving transaction:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       message: error.message || "Failed to approve transaction",
       success: false,
       error: true,
@@ -520,6 +515,15 @@ const rejectTransaction = async (req, res) => {
       });
     }
 
+    if (await projectForTransaction(transaction)) {
+      const result = await rejectProjectPayment(transactionId, req.userId, rejectionReason);
+      const updated = await transactionModel.findById(result.transaction._id)
+        .populate('userId', 'name email walletBalance').populate('productId', 'serviceName')
+        .populate('verifiedBy', 'name email').populate('rejectedBy', 'name email');
+      return res.status(200).json({ message: 'Transaction rejected successfully', success: true, error: false,
+        data: { order: result.order, transaction: updated } });
+    }
+
     // Combined payment: refund the paired wallet portion that was already debited at purchase.
     // In every creation path (customerCreateServicePlanOrder.js,
     // customerCreateCustomProjectOrder.js, walletPayInstant.js) the UPI leg IS the parent — its
@@ -559,7 +563,7 @@ const rejectTransaction = async (req, res) => {
     });
   } catch (error) {
     console.error("Error rejecting transaction:", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       message: error.message || "Failed to reject transaction",
       success: false,
       error: true,

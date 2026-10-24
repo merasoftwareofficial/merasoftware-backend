@@ -14,6 +14,7 @@ const { settleInstallmentInvoice } = require("../../helpers/installmentSettlemen
 // transactions, never accumulated by hand here.
 const { setOrderPaidAmount } = require("../../helpers/orderPaymentTotals");
 const { syncProjectFinalInvoice } = require("../../helpers/projectFinalInvoice");
+const { payProjectWallet } = require('../../helpers/projectPaymentSettlement');
 
 // Instant wallet payment for an EXISTING order/installment — no admin approval.
 //
@@ -86,6 +87,16 @@ const walletPayInstant = async (req, res) => {
         error: true,
         success: false,
       });
+    }
+
+    if (order.isWebsiteProject && !order.isServicePlan) {
+      const result = await payProjectWallet(userId, req.body);
+      return res.status(200).json({ message: 'Wallet payment successful', success: true, error: false, data: {
+        transactionId: result.transaction.transactionId, amount: result.transaction.amount,
+        walletBalance: result.walletBalance, remainingAmount: result.order.remainingAmount,
+        paymentComplete: result.order.paymentComplete, invoiceStatus: result.invoice?.status,
+        approved: result.invoice?.status === 'paid',
+      } });
     }
 
     // ---- Invoice mode ----
@@ -240,10 +251,9 @@ const walletPayInstant = async (req, res) => {
     // the caller sent a parentTransactionId (the UPI remainder's id), OR — for an installment — the
     // wallet amount doesn't cover the whole installment.
     const isCombinedPayment = Boolean(parentTransactionId);
-    const coversInstallment =
-      !isInstallment ||
-      !targetInstallment ||
-      numericAmount >= Number(targetInstallment.amount || 0);
+    const coversInstallment = isInstallment
+      ? !!targetInstallment && numericAmount >= Number(targetInstallment.amount || 0)
+      : numericAmount >= Number(order.remainingAmount || order.totalAmount || order.price || 0);
     const isFullSettlement = !isCombinedPayment && coversInstallment;
 
     // Debit the wallet atomically (throws if it can't cover the amount) + record a completed txn.
@@ -285,14 +295,7 @@ const walletPayInstant = async (req, res) => {
     // now, so only it is summed; the UPI leg adds itself when it is approved.
     await setOrderPaidAmount(order);
 
-    const allInstallmentsPaid =
-      Array.isArray(order.installments) &&
-      order.installments.length > 0 &&
-      order.installments.every((item) => item.paid);
-
-    if (!order.isPartialPayment || order.remainingAmount <= 0 || allInstallmentsPaid) {
-      order.paymentComplete = true;
-    }
+    order.paymentComplete = Number(order.remainingAmount) <= 0;
 
     const nextInstallment = Array.isArray(order.installments)
       ? order.installments.find((item) => !item.paid)
@@ -348,7 +351,7 @@ const walletPayInstant = async (req, res) => {
     console.error("Error in wallet instant payment:", error);
     const message = error.message || "Wallet payment failed";
     // Insufficient balance is a client error, not a server fault.
-    const status = message.includes("Insufficient") ? 400 : 500;
+    const status = error.statusCode || (message.includes("Insufficient") ? 400 : 500);
     return res.status(status).json({
       message,
       error: true,

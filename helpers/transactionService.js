@@ -122,15 +122,16 @@ const deductWalletInstant = async ({
   description,
   parentTransactionId = null,
   sourceType,
+  session = null,
 }) => {
   if (!userId) throw new Error("userId is required for wallet deduction");
   if (!transactionId) throw new Error("transactionId is required");
   if (!(Number(amount) > 0)) throw new Error("A positive amount is required");
 
   // Idempotency: if this debit's transaction already exists, don't debit twice.
-  const existing = await transactionModel.findOne({ transactionId });
+  const existing = await transactionModel.findOne({ transactionId }).session(session);
   if (existing) {
-    const current = await userModel.findById(userId).select("walletBalance");
+    const current = await userModel.findById(userId).select("walletBalance").session(session);
     return { transaction: existing, newBalance: current?.walletBalance || 0 };
   }
 
@@ -138,7 +139,7 @@ const deductWalletInstant = async ({
   const updatedUser = await userModel.findOneAndUpdate(
     { _id: userId, walletBalance: { $gte: Number(amount) } },
     { $inc: { walletBalance: -Number(amount) } },
-    { new: true }
+    { new: true, session }
   );
   if (!updatedUser) {
     throw new Error("Insufficient wallet balance");
@@ -164,7 +165,7 @@ const deductWalletInstant = async ({
     referredBy: updatedUser.referredBy || null,
   });
 
-  await transaction.save();
+  await transaction.save({ session });
   return { transaction, newBalance: updatedUser.walletBalance };
 };
 
@@ -179,18 +180,20 @@ const refundWalletInstant = async ({
   description,
   parentTransactionId = null,
   orderId = null,
+  session = null,
+  invoiceId = null,
 }) => {
   if (!userId) throw new Error("userId is required for wallet refund");
   if (!transactionId) throw new Error("transactionId is required");
   if (!(Number(amount) > 0)) throw new Error("A positive amount is required");
 
-  const existing = await transactionModel.findOne({ transactionId });
+  const existing = await transactionModel.findOne({ transactionId }).session(session);
   if (existing) return existing;
 
   const updatedUser = await userModel.findByIdAndUpdate(
     userId,
     { $inc: { walletBalance: Number(amount) } },
-    { new: true }
+    { new: true, session }
   );
   if (!updatedUser) throw new Error("Customer not found for wallet refund");
 
@@ -208,11 +211,12 @@ const refundWalletInstant = async ({
     date: new Date(),
     verificationDate: new Date(),
     orderId,
+    invoiceId,
     parentTransactionId,
     referredBy: updatedUser.referredBy || null,
   });
 
-  await transaction.save();
+  await transaction.save({ session });
   return transaction;
 };
 

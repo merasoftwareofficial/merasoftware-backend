@@ -80,6 +80,7 @@ const markProjectInvoicePaid = async ({
   // Evidence the caller already validated up front (so a bad reference is refused before the
   // caller creates anything). Omit to have it validated here.
   preparedEvidence = null,
+  session = null,
 }) => {
   const amountNow = Number(amount != null ? amount : invoice.amount);
 
@@ -95,7 +96,7 @@ const markProjectInvoicePaid = async ({
     });
     transactionReference = evidence.reference;
     const paymentEvidence = evidence.paymentEvidence;
-    transaction = await transactionModel.create({
+    transaction = new transactionModel({
       userId: customerId,
       orderId: invoice.orderId,
       invoiceId: invoice._id,
@@ -113,10 +114,11 @@ const markProjectInvoicePaid = async ({
       verificationDate: new Date(),
       date: new Date(),
     });
+    await transaction.save({ session });
   } else if (!transaction.invoiceId) {
     // Link a pre-existing transaction (e.g. a wallet debit) to this invoice if not linked yet.
     transaction.invoiceId = invoice._id;
-    await transaction.save();
+    await transaction.save({ session });
   }
 
   // Payment SSOT (helpers/orderPaymentTotals.js): what an invoice has been paid is DERIVED from
@@ -127,8 +129,8 @@ const markProjectInvoicePaid = async ({
   // transaction was 'pending', leaving the order permanently unapprovable. Deriving makes a
   // repeated call idempotent (the same transaction is counted once, not twice) and makes it
   // impossible for uncompleted money to appear as paid.
-  const linkedCount = await transactionModel.countDocuments({ invoiceId: invoice._id });
-  const derived = await getInvoiceAmountReceived(invoice._id);
+  const linkedCount = await transactionModel.countDocuments({ invoiceId: invoice._id }).session(session);
+  const derived = await getInvoiceAmountReceived(invoice._id, { session });
   // The fallback applies ONLY when no transaction points at this invoice at all (a legacy
   // caller settling an invoice without a payment row). It must never trigger merely because the
   // derived total is 0 — a linked payment that is still pending derives to exactly 0, and
@@ -146,7 +148,7 @@ const markProjectInvoicePaid = async ({
   invoice.transactionReference = transactionReference || invoice.transactionReference || null;
   invoice.markedPaidBy = actorId || invoice.markedPaidBy || null;
   if (notes) invoice.notes = notes;
-  await invoice.save();
+  await invoice.save({ session });
 
   return { invoice, transaction };
 };
@@ -155,7 +157,7 @@ const markProjectInvoicePaid = async ({
 // rejected. This is deliberately the counterpart of markProjectInvoicePaid:
 // amountPaid, status and paidDate are derived from the remaining settled amount,
 // never assigned by a caller.
-const reverseProjectInvoicePayment = async ({ invoice, amount }) => {
+const reverseProjectInvoicePayment = async ({ invoice, amount, session = null }) => {
   const amountNow = Number(amount || 0);
   if (!invoice || !(amountNow > 0)) return invoice;
 
@@ -163,8 +165,8 @@ const reverseProjectInvoicePayment = async ({ invoice, amount }) => {
   // rather than subtracting the caller's figure. By the time this runs the reversed payment is
   // no longer 'completed', so it drops out of the sum on its own — which also makes a repeated
   // reversal idempotent instead of subtracting the same money twice.
-  const linkedCount = await transactionModel.countDocuments({ invoiceId: invoice._id });
-  const derived = await getInvoiceAmountReceived(invoice._id);
+  const linkedCount = await transactionModel.countDocuments({ invoiceId: invoice._id }).session(session);
+  const derived = await getInvoiceAmountReceived(invoice._id, { session });
   // Same rule as markProjectInvoicePaid: derive whenever this invoice has payment rows — a
   // fully reversed invoice legitimately derives to 0, so "derived is 0" must not send us down
   // the blind-subtraction path.
@@ -174,7 +176,7 @@ const reverseProjectInvoicePayment = async ({ invoice, amount }) => {
   );
   invoice.status = deriveInvoiceStatus(invoice.amountPaid, invoice.amount);
   if (invoice.status !== "paid") invoice.paidDate = null;
-  await invoice.save();
+  await invoice.save({ session });
   return invoice;
 };
 
@@ -195,7 +197,7 @@ const createProjectInvoice = async ({
   session = null,
   paymentPolicyKey,
 }) => {
-  const invoiceNumber = await generateInvoiceNumber();
+  const invoiceNumber = await generateInvoiceNumber({ session });
   const data = {
     userId: customerId,
     orderId,

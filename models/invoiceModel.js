@@ -137,8 +137,8 @@ invoiceSchema.index(
   { unique: true, partialFilterExpression: { invoiceType: "project_final" } }
 );
 invoiceSchema.index(
-  { orderId: 1, invoiceType: 1 },
-  { unique: true, partialFilterExpression: { invoiceType: "service_statement" } }
+  { invoiceType: 1, orderId: 1 },
+  { name: "one_service_statement_per_order", unique: true, partialFilterExpression: { invoiceType: "service_statement" } }
 );
 
 const invoiceModel = mongoose.model("invoice", invoiceSchema);

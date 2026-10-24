@@ -1,6 +1,6 @@
 const invoiceModel = require("../models/invoiceModel");
 
-const generateInvoiceNumber = async () => {
+const generateInvoiceNumber = async ({ session = null } = {}) => {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -8,7 +8,7 @@ const generateInvoiceNumber = async () => {
 
   const lastInvoice = await invoiceModel
     .findOne({ invoiceNumber: new RegExp(`^${prefix}`) })
-    .sort({ invoiceNumber: -1 });
+    .sort({ invoiceNumber: -1 }).session(session);
 
   let sequenceNumber = 1;
   if (lastInvoice) {
