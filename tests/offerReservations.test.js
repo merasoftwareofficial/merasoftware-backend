@@ -14,7 +14,7 @@ const Order = require('../models/orderProductModel');
 const Invoice = require('../models/invoiceModel');
 const Transaction = require('../models/transactionModel');
 const Category = require('../models/categoryBasePriceModel');
-const { payProjectWallet } = require('../helpers/projectPaymentSettlement');
+const { payProjectWallet, approveProjectPayment, rejectProjectPayment } = require('../helpers/projectPaymentSettlement');
 const { appendProjectNode, editProjectNode, resetProjectTimeline } = require('../helpers/projectNodeService');
 const nodeController = require('../controller/order/projectNodeController');
 const express = require('express');
@@ -47,9 +47,10 @@ before(async () => {
 after(async () => { global.fetch = realFetch; await new Promise(resolve => apiServer.close(resolve)); await mongoose.disconnect(); if (database) await database.stop(); });
 beforeEach(async () => {
   for (const collection of Object.values(mongoose.connection.collections)) await collection.deleteMany({});
+  // Signup now always saves a phone (Step 2); phoneless legacy members are tested separately.
   [member, customer] = await User.create([
-    { name: 'Member', email: 'member@example.test', roles: ['member'] },
-    { name: 'Client', email: 'client@example.test', roles: ['customer'] },
+    { name: 'Member', email: 'member@example.test', roles: ['member'], phone: '+919876500001' },
+    { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002' },
   ]);
   deliveries = 0;
   process.env.OFFER_RESERVATIONS_ENABLED = 'true';
@@ -295,4 +296,99 @@ test('converted member session refreshes to its explicitly granted customer role
   await details({ userId: member._id, userRole: 'member' }, res);
   assert.equal(res.body.data.role, 'customer');
   assert.equal(require('../helpers/sessionToken').verifySession(res.token).role, 'customer');
+});
+
+// Step 1 (owner rule): submission time inside the deadline locks; approval time does not matter.
+async function expiredProjectWithUpi(parts) {
+  const created = await project();
+  assert.equal(created.statusCode, 201, created.body.message);
+  const order = await Order.findById(created.body.data._id);
+  const invoice = await Invoice.findOne({ orderId: order._id, invoiceType: 'project' });
+  const now = Date.now(), deadline = new Date(now - 3600000);
+  await Reservation.collection.updateOne({}, { $set: { reservedAt: new Date(deadline - 72 * 3600000), expiresAt: deadline } });
+  const payments = [];
+  for (const [amount, minutesFromDeadline] of parts) {
+    const payment = await Transaction.create({ userId: customer._id, orderId: order._id, invoiceId: invoice._id,
+      transactionId: new mongoose.Types.ObjectId().toString(), description: 'Isolated UPI', amount, status: 'pending',
+      paymentStatus: 'pending-approval', paymentMethod: 'upi', type: 'payment', sourceType: 'invoice' });
+    const submittedAt = new Date(deadline.getTime() + minutesFromDeadline * 60000);
+    await Transaction.collection.updateOne({ _id: payment._id }, { $set: { createdAt: submittedAt } });
+    payments.push({ transactionId: payment.transactionId, submittedAt });
+  }
+  return { payments, deadline, admin: await User.findOne({ email: 'admin@example.test' }) };
+}
+const statusOf = async () => (await listReservations(customer._id)).reservations[0].status;
+test('payment submitted before the deadline locks when approved after it, at the submission time', async () => {
+  const { payments, admin } = await expiredProjectWithUpi([[5000, -30]]);
+  assert.equal(await statusOf(), 'under_review', 'Pending in-time payment is not shown as expired');
+  await approveProjectPayment(payments[0].transactionId, admin._id);
+  const row = await Reservation.findOne();
+  assert.equal(row.confirmedAt.getTime(), payments[0].submittedAt.getTime());
+  assert.equal(await statusOf(), 'confirmed');
+});
+test('payment submitted after the deadline neither shows under review nor locks', async () => {
+  const { payments, admin } = await expiredProjectWithUpi([[5000, 30]]);
+  assert.equal(await statusOf(), 'expired');
+  await approveProjectPayment(payments[0].transactionId, admin._id);
+  assert.equal((await Reservation.findOne()).confirmedAt, null);
+});
+test('in-time payment rejected after the deadline loses the lock', async () => {
+  const { payments, admin } = await expiredProjectWithUpi([[5000, -30]]);
+  await rejectProjectPayment(payments[0].transactionId, admin._id, 'UTR not found');
+  assert.equal(await statusOf(), 'expired');
+  assert.equal((await Reservation.findOne()).confirmedAt, null);
+});
+test('split payment counts when its last part was submitted', async () => {
+  let { payments, admin } = await expiredProjectWithUpi([[2000, -50], [3000, 20]]);
+  for (const payment of payments) await approveProjectPayment(payment.transactionId, admin._id);
+  assert.equal((await Invoice.findOne({ invoiceType: 'project' })).status, 'paid');
+  assert.equal((await Reservation.findOne()).confirmedAt, null, 'Full amount was submitted only after the deadline');
+  for (const collection of Object.values(mongoose.connection.collections)) await collection.deleteMany({});
+  [member, customer] = await User.create([{ name: 'Member', email: 'member@example.test', roles: ['member'], phone: '+919876500001' }, { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002' }]);
+  await Category.create({ category: 'standard_websites', basePrice: 10000 });
+  ({ payments, admin } = await expiredProjectWithUpi([[2000, -50], [3000, -10]]));
+  for (const payment of payments) await approveProjectPayment(payment.transactionId, admin._id);
+  assert.equal((await Reservation.findOne()).confirmedAt.getTime(), payments[1].submittedAt.getTime());
+});
+
+// Step 2: phone is mandatory (owner rule — no lead or client without a phone).
+const { parsePhone, PHONE_COUNTRIES } = require('../helpers/phoneNumber');
+test('phone format: country code plus exact national length, one stored format', () => {
+  assert.equal(PHONE_COUNTRIES[0].code, '+91');
+  assert.equal(parsePhone({ countryCode: '+91', phone: '98765 43210' }), '+919876543210');
+  assert.equal(parsePhone({ phone: '9876543210' }), '+919876543210', 'India is the default');
+  assert.equal(parsePhone({ countryCode: '+971', phone: '501234567' }), '+971501234567');
+  for (const input of [{ phone: '' }, { phone: '987654321' }, { phone: '98765432101' }, { phone: '5876543210' }, { countryCode: '+999', phone: '9876543210' }, { countryCode: '+971', phone: '9876543210' }]) {
+    assert.throws(() => parsePhone(input), /mobile number|country code/);
+  }
+});
+test('signup requires a valid phone, stores it unverified, and the OTP flag fails closed', async () => {
+  const signup = require('../controller/user/userSignUp');
+  const call = async body => { const res = response(); await signup({ body: { name: 'New', email: 'new@example.test', password: 'secret1', ...body } }, res); return res.body; };
+  assert.match((await call({})).message, /mobile number/);
+  assert.match((await call({ countryCode: '+91', phone: '12345' })).message, /10-digit/);
+  assert.equal(await User.countDocuments({ email: 'new@example.test' }), 0);
+  process.env.SIGNUP_PHONE_OTP_ENABLED = 'true';
+  try { assert.match((await call({ countryCode: '+91', phone: '9876543210' })).message, /verification is not available/); }
+  finally { delete process.env.SIGNUP_PHONE_OTP_ENABLED; }
+  assert.equal(await User.countDocuments({ email: 'new@example.test' }), 0);
+  const created = await call({ countryCode: '+91', phone: '98765 43210' });
+  assert.equal(created.success, true, created.message);
+  const saved = await User.findOne({ email: 'new@example.test' });
+  assert.equal(saved.phone, '+919876543210'); assert.equal(saved.phoneVerified, false); assert.deepEqual([...saved.roles], ['member']);
+});
+test('phoneless legacy member must add a phone before any lead or reservation is written', async () => {
+  await User.updateOne({ _id: member._id }, { $unset: { phone: 1 } });
+  await assert.rejects(reserve(), error => error.statusCode === 428);
+  await assert.rejects(reserve(member, { countryCode: '+91', phone: '123' }), /10-digit/);
+  assert.equal(await Lead.countDocuments(), 0); assert.equal(await Reservation.countDocuments(), 0);
+  assert.equal((await User.findById(member._id)).phone, undefined);
+  await reserve(member, { countryCode: '+91', phone: '98765-00009' });
+  assert.equal((await User.findById(member._id)).phone, '+919876500009');
+  assert.equal((await Lead.findOne()).phone, '+919876500009');
+});
+test('a phone entered with a rejected reservation is not saved', async () => {
+  await User.updateOne({ _id: member._id }, { $unset: { phone: 1 } });
+  await assert.rejects(reserve(member, { quoteKey: 'stale', countryCode: '+91', phone: '9876500009' }), /changed/);
+  assert.equal((await User.findById(member._id)).phone, undefined);
 });

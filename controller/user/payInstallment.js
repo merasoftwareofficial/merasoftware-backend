@@ -26,6 +26,8 @@ const payInstallment = async (req, res) => {
     }
  
     try {
+      // A submission after a reservation deadline meets the current price before the order is read.
+      await require('../../helpers/reservationRepricing').ensureReservationPriceCurrent(orderId);
       // Find the order - if admin is making the request, don't filter by userId
       const orderQuery = isAdmin 
         ? { _id: orderId, isPartialPayment: true }
@@ -39,7 +41,7 @@ const payInstallment = async (req, res) => {
           message: 'Order not found or not a partial payment order'
         });
       }
- 
+
       // Find the specific installment
       const installmentIndex = order.installments.findIndex(
         inst => inst.installmentNumber === parseInt(installmentNumber)

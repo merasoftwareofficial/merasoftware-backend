@@ -70,7 +70,8 @@ async function prepareMail(event, mail, extraValues) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
   if (!scope || scope.closed || !byKey.has(event)) return suppressed();
-  if (scope.system && !['offer.payment.reminder', 'offer.reserved'].includes(event)) return suppressed();
+  // Only events the catalog registers as system-triggered may send from a background scope.
+  if (scope.system && byKey.get(event).trigger !== 'system') return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';
   if (publicIntake && !['website.subscription.confirm', 'website.subscription.manage'].includes(event)) return suppressed();
   if (!publicIntake && !scope.system) {
@@ -278,11 +279,14 @@ async function sendScheduledOfferReminder(invoice, customer, offset) {
   return decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
 }
 async function sendReservationConfirmation(reservation, user) {
-  const event = 'offer.reserved', dedupeKey = `offer-reserved:${reservation._id}`;
+  return sendReservationMail('offer.reserved', reservation, user, `offer-reserved:${reservation._id}`);
+}
+// One durable path for reservation mail (confirmation, extension); dedupeKey makes a retry safe.
+async function sendReservationMail(event, reservation, user, dedupeKey) {
   const history = await EmailHistory.findOne({ dedupeKey }).lean();
   if (history?.status === 'sent') return 'sent';
   const mail = require('./emailTemplates').buildTemplatedMail(event, reservation, user);
-  if (!mail) throw new Error('Reservation confirmation website URL or recipient is unavailable');
+  if (!mail) throw new Error('Reservation mail website URL or recipient is unavailable');
   mail.dedupeKey = dedupeKey;
   const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: '/offer-reservations', userId: null } };
   const result = await requestScope.run(scope, () => queueMail(event, mail));
@@ -295,4 +299,4 @@ async function sendReservationConfirmation(reservation, user) {
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
   return decision.status === 'sent' ? 'sent' : 'paused';
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation };
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail };

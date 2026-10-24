@@ -30,6 +30,7 @@ const events = [
   ['invoice.reminder', 'Invoices', 'Payment reminder'],
   ['offer.payment.reminder', 'Invoices', 'Offer payment reminder (scheduled)'],
   ['offer.reserved', 'Offers', 'Offer reservation confirmation'],
+  ['offer.reservation.extended', 'Offers', 'Offer reservation extended'],
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation'],
   ['website.subscription.manage', 'Website', 'Subscription management'],
@@ -37,9 +38,11 @@ const events = [
 // Mail a customer's own portal action starts. It never asks anyone: the action is On (mail
 // sends at once) or Off (no mail). Every other action's user reviews its mail first.
 const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserConfirmation', 'sendAdminUPIPendingNotification']);
+// Sent by the server itself (scheduler or a committed reservation operation), never a draft.
+const SYSTEM_TRIGGERED = new Set(['offer.payment.reminder', 'offer.reserved', 'offer.reservation.extended']);
 const catalog = events.map(([key, section, label]) => ({
   key, section, label, application: section === 'Website' ? 'website' : 'portal',
-  trigger: ['offer.payment.reminder', 'offer.reserved'].includes(key) ? 'system' : CUSTOMER_TRIGGERED.has(key) ? 'customer' : 'admin',
+  trigger: SYSTEM_TRIGGERED.has(key) ? 'system' : CUSTOMER_TRIGGERED.has(key) ? 'customer' : 'admin',
 }));
 const byKey = new Map(catalog.map(event => [event.key, event]));
 const eventKeys = application => catalog.filter(event => event.application === application).map(event => event.key);

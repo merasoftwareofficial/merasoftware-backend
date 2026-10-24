@@ -361,7 +361,10 @@ const approveTransaction = async (req, res) => {
       });
     }
 
-    if (await projectForTransaction(transaction)) {
+    const projectOrder = await projectForTransaction(transaction);
+    if (projectOrder) {
+      // A payment submitted in time is held under review; a later one meets the current price.
+      await require('../../helpers/reservationRepricing').ensureReservationPriceCurrent(projectOrder._id);
       const result = await approveProjectPayment(transactionId, req.userId);
       const updated = await transactionModel.findById(result.transaction._id)
         .populate('userId', 'name email walletBalance').populate('productId', 'serviceName').populate('verifiedBy', 'name email');

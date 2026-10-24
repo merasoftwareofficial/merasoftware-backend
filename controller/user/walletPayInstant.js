@@ -90,6 +90,8 @@ const walletPayInstant = async (req, res) => {
     }
 
     if (order.isWebsiteProject && !order.isServicePlan) {
+      // A reservation past its deadline is repriced before money settles the bill.
+      await require('../../helpers/reservationRepricing').ensureReservationPriceCurrent(order._id);
       const result = await payProjectWallet(userId, req.body);
       return res.status(200).json({ message: 'Wallet payment successful', success: true, error: false, data: {
         transactionId: result.transaction.transactionId, amount: result.transaction.amount,

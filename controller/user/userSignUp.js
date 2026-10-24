@@ -1,11 +1,12 @@
 const userModel = require("../../models/userModel")
 const bcrypt = require('bcryptjs');
 const { STORE_PLAIN_PASSWORD } = require('../../config/accessControlConfig');
+const { parsePhone, assertSignupPhoneVerification } = require('../../helpers/phoneNumber');
 
 
 async function userSignUpController (req,res) {
     try {
-        const { email, password, name, referredBy } = req.body
+        const { email, password, name, referredBy, countryCode, phone } = req.body
 
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,6 +23,9 @@ async function userSignUpController (req,res) {
         if(!name){
             throw new Error("Please provide name")
         }
+        // Owner rule: no account without a mobile number (country code + national number).
+        const cleanPhone = parsePhone({ countryCode, phone });
+        assertSignupPhoneVerification();
         // Public sign-up (the website's "Create account") makes a blog-only 'member':
         // no portal screens, not a client. The caller never chooses the role — portal
         // roles (customer, admin, ...) are granted by an admin through /api/addRole.
@@ -56,6 +60,8 @@ async function userSignUpController (req,res) {
         const payload = {
             email: normalizedEmail,
             name,
+            phone: cleanPhone,
+            phoneVerified: false,
             password: hashPassword,
             roles: [userRole],
             walletBalance: 0,

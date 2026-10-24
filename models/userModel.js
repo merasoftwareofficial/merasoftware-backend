@@ -81,6 +81,9 @@ const userSchema = new mongoose.Schema({
     password: String,
     profilePic : String,
     phone: String,     // Added phone field
+    // WhatsApp OTP provision (helpers/phoneNumber.js). Nothing verifies numbers yet.
+    phoneVerified: { type: Boolean, default: false },
+    phoneVerifiedAt: { type: Date, default: null },
     dob: {                    // New field: Date of Birth
       type: Date
     },

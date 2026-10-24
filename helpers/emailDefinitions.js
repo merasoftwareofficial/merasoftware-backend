@@ -909,4 +909,24 @@ definitions['offer.reserved'] = {
     } };
   },
 };
+// Owner decision 21: the exact new deadline, never a relative "hours left" that ages in transit.
+definitions['offer.reservation.extended'] = {
+  subject: 'Your offer reservation has been extended',
+  text: lines('Hello {{name}},', '', 'Our team has extended your reservation for {{offerTitle}}.',
+    '**Reserved price:** {{price}}', '**New payment deadline:** {{deadline}}', '',
+    'Complete the required first payment before this deadline to keep the reserved price.', '',
+    '**My offers:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
+    price: detail('Reserved price', '₹5,000'), deadline: detail('New payment deadline', '30 Oct 2026, 10:00 am IST'),
+    link: detail('My offers', 'https://www.merasoftware.com/account/offers') },
+  blocks: {},
+  build(reservation, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL || !reservation.extendedUntil) return null;
+    const href = link(process.env.PORTFOLIO_WEBSITE_URL, '/account/offers');
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
+      deadline: moment(reservation.extendedUntil), link: href,
+    } };
+  },
+};
 module.exports = { definitions, refundTable };

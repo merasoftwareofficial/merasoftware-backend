@@ -301,6 +301,9 @@ const orderSchema = new mongoose.Schema({
     // Transaction fence for project uploads racing order-state changes.
     uploadRevision: { type: Number, default: 0 },
     offerReservationId: { type: mongoose.Schema.Types.ObjectId, ref: 'offerReservation', default: null },
+    // Count of committed price revisions (models/projectPricingRevisionModel.js); a stale
+    // force-apply preview or competing repricing is refused against it.
+    pricingRevision: { type: Number, default: 0 },
     // Event-only provision. No reminder worker consumes this milestone yet.
     offerFirstWorkUpdate: { type: new mongoose.Schema({ version: Number, runId: String, nodeId: String, occurredAt: Date, actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' } }, { _id: false }), default: null },
     // Frozen offer terms; operational counters remain separate from this agreement.

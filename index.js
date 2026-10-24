@@ -30,12 +30,20 @@ if (cronsEnabled) {
   scheduleAutoRenewal();
   scheduleServicePlanRenewals();
   require('./cron/offerPaymentReminderCron').scheduleOfferPaymentReminders();
-  cron.schedule('* * * * *', () => require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message)));
   scheduleChessCleanup();
   console.log('File cleanup scheduler initialized');
   console.log('Auto-renewal scheduler initialized');
 } else {
   console.log('Crons disabled (ENABLE_CRONS is not "true") — skipping cleanup/renewal/chess-cleanup schedulers.');
+}
+// Reservation jobs have their own switch (owner decision 12): enabling them never starts the
+// wallet-charging renewal crons above. Each job also checks its own feature flag.
+if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
+  cron.schedule('* * * * *', async () => {
+    await require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message));
+    await require('./helpers/reservationRepricing').reconcileDueReservations().catch(error => console.error('[reservation repricing]', error.message));
+  });
+  console.log('Offer reservation jobs initialized');
 }
 
 const allowedOrigins = getAllowedOrigins();

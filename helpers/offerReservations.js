@@ -2,17 +2,36 @@ const mongoose = require('mongoose');
 const Reservation = require('../models/offerReservationModel');
 const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
+const Transaction = require('../models/transactionModel');
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { calculateBenefit, fail } = require('./salesPackages');
+const { parsePhone } = require('./phoneNumber');
 const HOUR = 60 * 60 * 1000;
 const safeSlug = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
+// The existing payment state for a submitted project payment awaiting admin approval.
+const PENDING_PAYMENT = { type: 'payment', status: 'pending', paymentStatus: 'pending-approval' };
 
-function reservationView(row, now = Date.now()) {
+// The deadline in force: an admin extension, otherwise the original 72 hours.
+const deadlineOf = row => new Date(row.extendedUntil || row.expiresAt);
+
+// underReview: a payment submitted before the deadline still awaits approval (read-only state).
+function reservationView(row, now = Date.now(), underReview = false) {
+  const deadline = deadlineOf(row);
   return { id: String(row._id), offerSlug: row.offerSlug, title: row.offerSnapshot.title,
     reservedPrice: row.reservedPrice, regularPrice: row.regularPrice,
     terms: row.offerSnapshot.resolvedTerms || [], reservedAt: row.reservedAt, expiresAt: row.expiresAt,
-    status: row.confirmedAt ? 'confirmed' : new Date(row.expiresAt).getTime() <= now ? 'expired' : 'reserved',
+    deadline, extendedUntil: row.extendedUntil || null,
+    status: row.confirmedAt ? 'confirmed' : underReview ? 'under_review' : deadline.getTime() <= now ? 'expired' : 'reserved',
+    resolution: row.resolution?.status || null,
     projectId: row.projectId ? String(row.projectId) : null, confirmationStatus: row.confirmationStatus };
+}
+// Rows whose linked project has a payment submitted before the deadline that still awaits approval.
+async function reviewedReservationIds(userId, rows, session = null) {
+  const open = rows.filter(row => row.projectId && !row.confirmedAt);
+  if (!open.length) return new Set();
+  const pending = await Transaction.find({ ...PENDING_PAYMENT, userId, orderId: { $in: open.map(row => row.projectId) } }).select('orderId createdAt').session(session).lean();
+  return new Set(open.filter(row => pending.some(payment => String(payment.orderId) === String(row.projectId)
+    && new Date(payment.createdAt) <= deadlineOf(row))).map(row => String(row._id)));
 }
 async function activeOwner(userId, session) {
   const user = await User.findById(userId).session(session || null);
@@ -21,60 +40,83 @@ async function activeOwner(userId, session) {
 }
 async function listReservations(userId) {
   await activeOwner(userId);
+  // Bring any due unpaid project to its post-deadline price before showing it (no-op unless enabled).
+  await require('./reservationRepricing').reconcileUserReservations(userId);
   const now = Date.now();
   const rows = await Reservation.find({ userId }).sort({ reservedAt: -1 }).lean();
-  return { reservations: rows.map(row => reservationView(row, now)), serverNow: new Date(now) };
+  const underReview = await reviewedReservationIds(userId, rows);
+  return { reservations: rows.map(row => reservationView(row, now, underReview.has(String(row._id)))), serverNow: new Date(now) };
 }
+// An expired, unpaid, unattached reservation may be followed by one new reservation in a later
+// offer period (owner decision 11). Anything else is returned unchanged on a repeat request.
+const renewable = (row, now) => !row.confirmedAt && !row.projectId && deadlineOf(row).getTime() <= now;
 
-async function reserveOffer({ userId, offerSlug, quoteKey }) {
+async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone }) {
   if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);
   if (!safeSlug(offerSlug)) fail('Choose a valid offer');
+  const enteredPhone = phone ? parsePhone({ countryCode, phone }) : null;
   await activeOwner(userId);
   // A retry remains successful even after the public deadline/catalogue changes.
-  const previous = await Reservation.findOne({ userId, offerSlug });
-  if (previous) return { reservation: reservationView(previous), reused: true, serverNow: new Date() };
+  const previous = await Reservation.findOne({ userId, offerSlug }).sort({ reservedAt: -1 });
+  if (previous && !renewable(previous, Date.now())) return { reservation: reservationView(previous), reused: true, serverNow: new Date() };
   const { offers } = await fetchWebsiteCatalogue();
   const offer = offers.find(row => row.slug === offerSlug);
+  const periodEndsAt = offer ? new Date(offer.endsAt) : null;
+  if (previous && (!periodEndsAt || periodEndsAt <= new Date(previous.periodEndsAt))) return { reservation: reservationView(previous), reused: true, serverNow: new Date() };
   const price = offer ? calculateBenefit(Number(offer.mainPrice), offer).finalPrice : null;
   return mongoose.connection.transaction(async session => {
     const user = await activeOwner(userId, session);
     // Serialize concurrent offers for one owner, so two requests cannot create two leads.
     await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
-    const existing = await Reservation.findOne({ userId, offerSlug }).session(session);
+    const existing = periodEndsAt && await Reservation.findOne({ userId, offerSlug, periodEndsAt }).session(session);
     if (existing) return { reservation: reservationView(existing), reused: true, serverNow: new Date() };
     const now = new Date();
     const remaining = Date.parse(offer?.endsAt) - now.getTime();
     if (!offer || offer.status !== 'published' || !Number.isFinite(remaining) || remaining <= 0 || remaining > 24 * HOUR
       || (offer.targets && !offer.targets.includes('projects'))) fail('Reservation is available only in the final 24 hours of a live project offer', 409);
     if (typeof quoteKey !== 'string' || !quoteKey || quoteKey !== offer.quoteKey) fail('Offer price or terms changed. Review the offer before reserving.', 409);
+    // Owner rule: no lead and no reservation without a phone. Older accounts add it here once.
+    if (!user.phone) {
+      if (!enteredPhone) fail('Add your mobile number to reserve this offer', 428);
+      user.phone = enteredPhone; user.phoneVerified = false;
+      await user.save({ session });
+    }
     let lead = null;
     if (!user.roles.includes('customer') && user.roles.includes('member')) {
       lead = await Lead.findOne({ reservationUserId: userId }).session(session);
       if (lead?.deletedAt || lead?.convertedToUserId) fail('The linked lead needs team review before another reservation', 409);
-      if (!lead) [lead] = await Lead.create([{ name: user.name || user.email, email: user.email, phone: user.phone || '',
+      if (!lead) [lead] = await Lead.create([{ name: user.name || user.email, email: user.email, phone: user.phone,
         source: 'Offer reservation', reservationUserId: userId }], { session });
+      else if (!lead.phone) { lead.phone = user.phone; await lead.save({ session }); }
     }
-    const [row] = await Reservation.create([{ userId, offerSlug, offerSnapshot: offer,
+    const [row] = await Reservation.create([{ userId, offerSlug, periodEndsAt, offerSnapshot: offer,
       regularPrice: Number(offer.mainPrice), reservedPrice: price, reservedAt: now,
       expiresAt: new Date(now.getTime() + 72 * HOUR), origin: 'customer', leadId: lead?._id }], { session });
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
 }
 // Called inside the existing project-creation transaction, never as a second commit.
-async function attachProjectReservation({ order, offer, session }) {
+// reservationId: the customer's saved reservation the admin explicitly selected, if any.
+async function attachProjectReservation({ order, offer, reservationId = null, session }) {
   if (!offer || process.env.OFFER_RESERVATIONS_ENABLED !== 'true') return null;
   await User.updateOne({ _id: order.userId }, { $inc: { __v: 1 } }, { session });
-  let row = await Reservation.findOne({ userId: order.userId, offerSlug: offer.slug }).session(session);
   const now = new Date();
+  let row = reservationId
+    ? await Reservation.findOne({ _id: reservationId, userId: order.userId }).session(session)
+    : await Reservation.findOne({ userId: order.userId, offerSlug: offer.slug, periodEndsAt: new Date(offer.endsAt) }).session(session);
+  if (reservationId && !row) fail('This customer reservation is unavailable', 409);
   if (row) {
     if (row.projectId && String(row.projectId) !== String(order._id)) fail('This reservation is already attached to a project', 409);
-    if (row.expiresAt <= now && !row.confirmedAt) fail('This reservation expired. Historical application requires the admin force protocol.', 409);
+    if (deadlineOf(row) <= now && !row.confirmedAt) fail('This reservation expired. Historical application requires the admin force protocol.', 409);
     if (row.offerSnapshot.quoteKey !== offer.quoteKey) fail('Select the saved reservation to keep its original price and terms', 409);
   } else {
     if (offer.status !== 'published' || Date.parse(offer.endsAt) <= now.getTime()) fail('Offer expired before the project was saved', 409);
-    [row] = await Reservation.create([{ userId: order.userId, offerSlug: offer.slug, offerSnapshot: offer,
-      regularPrice: Number(offer.mainPrice), reservedPrice: calculateBenefit(Number(offer.mainPrice), offer).finalPrice,
-      reservedAt: now, expiresAt: new Date(now.getTime() + 72 * HOUR), origin: 'admin_project', projectId: order._id }], { session });
+    // The reservation keeps this project's own scope price (a package quote differs from the offer's main price).
+    const agreement = order.projectSnapshot?.salesAgreement;
+    const regularPrice = Number(agreement?.regularPrice ?? offer.mainPrice);
+    const reservedPrice = Number(agreement?.packagePrice ?? calculateBenefit(regularPrice, offer).finalPrice);
+    [row] = await Reservation.create([{ userId: order.userId, offerSlug: offer.slug, periodEndsAt: new Date(offer.endsAt), offerSnapshot: offer,
+      regularPrice, reservedPrice, reservedAt: now, expiresAt: new Date(now.getTime() + 72 * HOUR), origin: 'admin_project', projectId: order._id }], { session });
   }
   row.projectId = order._id;
   order.offerReservationId = row._id;
@@ -86,9 +128,54 @@ async function confirmReservationPayment({ order, invoice, session }) {
   // Persist the receipt milestone in the financial commit. Later installments cannot clear it.
   const row = await Reservation.findOne({ _id: order.offerReservationId, userId: order.userId, projectId: order._id }).session(session);
   if (!row || row.confirmedAt) return;
-  const receivedAt = invoice.paidDate || new Date();
-  if (receivedAt > row.expiresAt) return; // Late-payment commercial handling remains a separate revision decision.
-  row.confirmedAt = receivedAt;
+  // Owner rule: a payment counts when it was submitted, not when an admin approved it.
+  // Settlement has already linked every completed part to this invoice; the full amount
+  // stood submitted when its latest part was. A free invoice has no parts.
+  const parts = await Transaction.find({ invoiceId: invoice._id, type: 'payment', status: 'completed' }).select('createdAt').session(session).lean();
+  const submittedAt = parts.length ? new Date(Math.max(...parts.map(part => new Date(part.createdAt).getTime()))) : invoice.paidDate || new Date();
+  // A late payment settles the (already repriced, or about to be repriced) bill without a lock.
+  if (submittedAt > deadlineOf(row) || row.resolution) return;
+  row.confirmedAt = submittedAt;
   await row.save({ session });
 }
-module.exports = { reserveOffer, listReservations, reservationView, attachProjectReservation, confirmReservationPayment };
+// Server-side role check for reservation admin commands; UI visibility is never authorization.
+async function currentAdmin(actorId, session = null) {
+  const actor = await User.findById(actorId).session(session);
+  if (!actor?.roles?.includes('admin') || actor.isActive === false || actor.deletedAt) fail('Current portal admin access required', 403);
+  return actor;
+}
+
+// Owner decision 7: admin-only extension, any length, reason + audit, only before any repricing.
+// The original expiresAt stays as history; the customer is told the exact new deadline.
+async function extendReservation({ reservationId, actorId, until, reason }) {
+  const deadline = new Date(until);
+  const note = String(reason || '').trim();
+  if (!mongoose.isValidObjectId(reservationId)) fail('Choose a reservation');
+  if (!Number.isFinite(deadline.getTime()) || deadline <= new Date()) fail('Choose a new deadline in the future');
+  if (!note || note.length > 300) fail('Enter a reason for the extension (up to 300 characters)');
+  const row = await mongoose.connection.transaction(async session => {
+    await currentAdmin(actorId, session);
+    const fresh = await Reservation.findById(reservationId).session(session);
+    if (!fresh) fail('Reservation not found', 404);
+    if (fresh.confirmedAt) fail('This reservation is already price-locked', 409);
+    if (fresh.resolution?.closedAt) fail('The first bill of this project is already settled or closed', 409);
+    if (fresh.resolution && fresh.resolution.status !== 'unchanged') fail('The price was already revised. Use force-apply to restore the reserved price.', 409);
+    const current = deadlineOf(fresh);
+    if (deadline <= current) fail('The new deadline must be later than the current deadline', 409);
+    fresh.extensions.push({ from: current, to: deadline, reason: note, actorId, at: new Date() });
+    fresh.extendedUntil = deadline;
+    fresh.resolution = null;
+    await fresh.save({ session });
+    return fresh;
+  });
+  let notice = 'off';
+  if (process.env.OFFER_RESERVATION_CONFIRMATIONS_ENABLED === 'true') {
+    try {
+      const user = await User.findById(row.userId).lean();
+      notice = await require('./emailController').sendReservationMail('offer.reservation.extended', row, user, `offer-reservation-extended:${row._id}:${row.extensions.length}`);
+    } catch (error) { notice = 'failed'; console.error('[reservation extension notice]', error.message); }
+  }
+  return { reservation: reservationView(row), notice };
+}
+module.exports = { reserveOffer, listReservations, reservationView, attachProjectReservation, confirmReservationPayment,
+  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, PENDING_PAYMENT };

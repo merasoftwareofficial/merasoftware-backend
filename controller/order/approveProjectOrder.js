@@ -130,6 +130,7 @@ const approveProjectOrder = async (req, res) => {
       capturedVia: "admin",
     });
 
+    await require('../../helpers/reservationRepricing').ensureReservationPriceCurrent(order._id);
     const result = await recordAdminProjectPayment({
       orderId: order._id, actorId: req.userId,
       payment: { paymentMethod, transactionReference, paymentDetails: paymentDetails || {}, notes },

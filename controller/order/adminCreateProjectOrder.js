@@ -220,7 +220,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     const { order, invoice, reused } = await persistAdminProject({
       orderData, startingNodeTitle: resolvedStartingNodeTitle, actorId: req.userId,
       recordPayment: shouldRecordPayment ? recordPayment : null, preparedEvidence,
-      sourceOffer: commercial?.sourceOffer,
+      sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId,
     });
     // Keep request-scoped review drafts outside the retryable financial transaction.
     if (!reused) await sendProjectCreatedEmail(client, order, invoice);

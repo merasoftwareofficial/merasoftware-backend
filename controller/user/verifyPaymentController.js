@@ -72,7 +72,12 @@ const verifyPaymentController = async (req, res) => {
                 processedInvoiceId = String(invoiceId);
             }
         }
-        
+
+        // A project payment submitted after a reservation deadline meets the current price first.
+        const priceOrderId = processedOrderId || (mongoose.isValidObjectId(processedInvoiceId)
+            ? (await require('../../models/invoiceModel').findById(processedInvoiceId).select('orderId').lean())?.orderId : null);
+        if (priceOrderId) await require('../../helpers/reservationRepricing').ensureReservationPriceCurrent(priceOrderId);
+
         // Determine transaction type
         const transactionType = type || (isInstallmentPayment ? "payment" : "deposit");
         

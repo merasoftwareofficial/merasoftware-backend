@@ -164,6 +164,7 @@ const {
 
 //user
 router.post("/signup", userSignUpController);
+router.get("/phone-countries", (req, res) => res.json({ success: true, error: false, data: require('../helpers/phoneNumber').PHONE_COUNTRIES }));
 router.post("/guest-login", guestLoginController);
 router.post("/guest/demo-wallet-credit", authToken, guestDummyWalletCreditController);
 

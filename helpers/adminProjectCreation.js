@@ -9,7 +9,7 @@ const { recordAdminProjectPaymentInSession } = require('./projectPaymentSettleme
 
 // External catalogue reads/validation happen before this short financial commit.
 // No network delivery or request-scoped email draft is created in a retryable callback.
-async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer }) {
+async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId }) {
   const projectId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -24,7 +24,7 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
       }
     }
     const order = new Order({ ...orderData, _id: projectId });
-    await require('./offerReservations').attachProjectReservation({ order, offer: sourceOffer, session });
+    await require('./offerReservations').attachProjectReservation({ order, offer: sourceOffer, reservationId: sourceReservationId, session });
     initializeProjectTimeline({ order, startingNodeTitle, actorId });
     await order.save({ session });
     const installment = order.isPartialPayment ? order.installments[0] : null;

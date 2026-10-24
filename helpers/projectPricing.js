@@ -10,7 +10,7 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);
     if (!require('mongoose').isValidObjectId(body.offerReservationId) || !userId || body.packageId) fail('Select a reserved offer for this customer without a package');
     reserved = await require('../models/offerReservationModel').findOne({ _id: body.offerReservationId, userId }).lean();
-    if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || reserved.expiresAt <= new Date()) fail('This customer reservation is unavailable or expired', 409);
+    if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || require('./offerReservations').deadlineOf(reserved) <= new Date()) fail('This customer reservation is unavailable or expired', 409);
   }
   const { offers } = reserved ? { offers: [reserved.offerSnapshot] } : await fetchWebsiteCatalogue();
   const extrasTotal = money(features.reduce((sum, item) => sum + item.price, 0));
@@ -45,6 +45,7 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
   if (quote.offer && !reserved && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
   return {
     sourceOffer: quote.offer || null,
+    sourceReservationId: reserved?._id || null,
     paymentPolicy: freezePaymentPolicy(quote.offer, now),
     finalPrice: calculatedTotal,
     referenceTotal: money(quote.regularPrice + extrasTotal),
