@@ -46,13 +46,13 @@ const createClientAccount = async ({ name, email, phone }) => {
 // role, posts, comments — stays linked. Sign-up never verifies the email, so
 // whoever chose this member's password may not be the client: the password is
 // reset to the default, exactly as for a new client account.
-const upgradeMemberToClient = async (user, { phone }) => {
+const upgradeMemberToClient = async (user, { phone, session }) => {
   user.roles = ["customer"];
   if (!user.phone && phone) {
     user.phone = phone;
   }
   applyDefaultPassword(user);
-  return user.save();
+  return user.save(session ? { session } : undefined);
 };
 
 module.exports = {

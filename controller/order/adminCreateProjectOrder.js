@@ -162,7 +162,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     });
     const featuresTotal = clientProjectFeatures.reduce((sum, feature) => sum + (feature.price || 0), 0);
     let referenceTotal = basePrice + featuresTotal;
-    const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal });
+    const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal, userId: client._id });
     if (commercial) {
       finalPrice = commercial.finalPrice;
       basePrice = commercial.basePrice;
@@ -220,9 +220,11 @@ const adminCreateProjectOrderController = async (req, res) => {
     const { order, invoice, reused } = await persistAdminProject({
       orderData, startingNodeTitle: resolvedStartingNodeTitle, actorId: req.userId,
       recordPayment: shouldRecordPayment ? recordPayment : null, preparedEvidence,
+      sourceOffer: commercial?.sourceOffer,
     });
     // Keep request-scoped review drafts outside the retryable financial transaction.
     if (!reused) await sendProjectCreatedEmail(client, order, invoice);
+    if (order.offerReservationId) setImmediate(() => require('../../helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message)));
     return res.status(reused ? 200 : 201).json({
       message: "Project created successfully",
       success: true,

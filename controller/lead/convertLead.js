@@ -80,6 +80,10 @@ const convertLeadController = async (req, res) => {
     //   but only after the admin confirms it (upgradeExisting).
     let memberToUpgrade = null;
     const existingUser = await userModel.findOne({ email: cleanEmail });
+    if (lead.reservationUserId && (!existingUser || String(existingUser._id) !== String(lead.reservationUserId))) {
+      return res.status(409).json({ message: "This lead is linked to a reserving account. Restore that account's email before converting.", error: true, success: false });
+    }
+    if (lead.reservationUserId && lead.guestUserId) return res.status(409).json({ message: "Review this linked account's guest access before converting.", error: true, success: false });
     if (existingUser) {
       const isOwnGuest =
         lead.guestUserId && String(existingUser._id) === String(lead.guestUserId);
@@ -118,14 +122,30 @@ const convertLeadController = async (req, res) => {
       lead.guestUserId = null;
     }
 
-    const clientUser = memberToUpgrade
-      ? await upgradeMemberToClient(memberToUpgrade, { phone: cleanPhone })
-      : await createClientAccount({ name: lead.name, email: cleanEmail, phone: cleanPhone });
-
-    // Link the lead to the client account and mark it Won.
-    lead.convertedToUserId = clientUser._id;
-    lead.status = "Won";
-    await lead.save();
+    let clientUser;
+    if (lead.reservationUserId) {
+      // Account upgrade and lead conversion share the same commit as reservation ownership.
+      clientUser = await require('mongoose').connection.transaction(async session => {
+        const current = await leadModel.findById(leadId).session(session);
+        const actor = await userModel.findById(req.userId).session(session);
+        const account = current && await userModel.findById(current.reservationUserId).session(session);
+        if (!actor?.roles?.includes('admin') || actor.isActive === false || actor.deletedAt) throw new Error('Current admin access required');
+        if (!current || current.deletedAt || current.convertedToUserId || current.guestUserId
+          || !isUpgradeableMember(account) || account.isActive === false || current.email !== account.email
+          || current.email !== cleanEmail || current.phone !== lead.phone) throw new Error('Lead or linked account changed. Refresh before converting.');
+        const upgraded = await upgradeMemberToClient(account, { phone: cleanPhone, session });
+        current.convertedToUserId = upgraded._id; current.status = 'Won';
+        await current.save({ session });
+        return upgraded;
+      });
+    } else {
+      clientUser = memberToUpgrade
+        ? await upgradeMemberToClient(memberToUpgrade, { phone: cleanPhone })
+        : await createClientAccount({ name: lead.name, email: cleanEmail, phone: cleanPhone });
+      lead.convertedToUserId = clientUser._id;
+      lead.status = "Won";
+      await lead.save();
+    }
 
     // "Client account created" mail: prepared for the admin's Send / Don't Send review and
     // dropped if this response fails. It never carries the default password.

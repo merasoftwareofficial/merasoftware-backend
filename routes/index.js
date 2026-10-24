@@ -29,6 +29,7 @@ const userRoleSwitchController = require("../controller/user/userRoleSwitch")
 const userDetailsController = require('../controller/user/userDetails')
 const addRoleToUserController = require('../controller/user/addRoleToUser')
 const authToken = require('../middleware/authToken')
+router.use('/offer-reservations', authToken, require('./offerReservations'));
 const userLogout = require('../controller/user/userLogout')
 const allUsers = require('../controller/user/allUsers')
 const getPartnerCustomers = require('../controller/user/partnerCustomers')

@@ -300,6 +300,9 @@ const orderSchema = new mongoose.Schema({
     projectCreationComplete: { type: Boolean, default: false },
     // Transaction fence for project uploads racing order-state changes.
     uploadRevision: { type: Number, default: 0 },
+    offerReservationId: { type: mongoose.Schema.Types.ObjectId, ref: 'offerReservation', default: null },
+    // Event-only provision. No reminder worker consumes this milestone yet.
+    offerFirstWorkUpdate: { type: new mongoose.Schema({ version: Number, runId: String, nodeId: String, occurredAt: Date, actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' } }, { _id: false }), default: null },
     // Frozen offer terms; operational counters remain separate from this agreement.
     paymentPolicy: { type: mongoose.Schema.Types.Mixed, default: null, immutable: true },
     paymentPolicyUploads: { type: Number, default: 0, min: 0 },

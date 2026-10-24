@@ -70,7 +70,7 @@ async function prepareMail(event, mail, extraValues) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
   if (!scope || scope.closed || !byKey.has(event)) return suppressed();
-  if (scope.system && event !== 'offer.payment.reminder') return suppressed();
+  if (scope.system && !['offer.payment.reminder', 'offer.reserved'].includes(event)) return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';
   if (publicIntake && !['website.subscription.confirm', 'website.subscription.manage'].includes(event)) return suppressed();
   if (!publicIntake && !scope.system) {
@@ -277,4 +277,22 @@ async function sendScheduledOfferReminder(invoice, customer, offset) {
   if (!fresh || !['unpaid', 'partially_paid', 'overdue'].includes(fresh.status) || !order || order.orderVisibility === 'cancelled') return;
   return decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder };
+async function sendReservationConfirmation(reservation, user) {
+  const event = 'offer.reserved', dedupeKey = `offer-reserved:${reservation._id}`;
+  const history = await EmailHistory.findOne({ dedupeKey }).lean();
+  if (history?.status === 'sent') return 'sent';
+  const mail = require('./emailTemplates').buildTemplatedMail(event, reservation, user);
+  if (!mail) throw new Error('Reservation confirmation website URL or recipient is unavailable');
+  mail.dedupeKey = dedupeKey;
+  const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: '/offer-reservations', userId: null } };
+  const result = await requestScope.run(scope, () => queueMail(event, mail));
+  if (!result.draftId) return 'paused';
+  const draft = await EmailDraft.findOneAndUpdate({ _id: result.draftId, status: 'staged' }, { $set: { status: 'pending' } }, { new: true }) || await EmailDraft.findById(result.draftId);
+  if (draft?.status === 'sent') return 'sent';
+  if (!draft || draft.expiresAt <= new Date() || draft.status === 'skipped') return 'expired';
+  if (draft.status === 'sending') throw new Error('Confirmation delivery is awaiting reconciliation');
+  await recordHistory(draft, null, true);
+  const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
+  return decision.status === 'sent' ? 'sent' : 'paused';
+}
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation };

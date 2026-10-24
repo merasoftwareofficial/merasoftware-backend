@@ -130,6 +130,9 @@ const appendProjectNode = ({ order, title, cumulativeProgress, actorId, now = ne
   }));
   syncActiveProjectProgress(order, actorId);
 
+  if (order.offerReservationId && !order.offerFirstWorkUpdate && actorId) {
+    order.offerFirstWorkUpdate = { version: 1, runId: run.runId, nodeId: node.nodeId, occurredAt: now, actorId };
+  }
   return node;
 };
 

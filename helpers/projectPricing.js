@@ -3,9 +3,16 @@ const { readPackages, quotePackage, offerEligible, calculateBenefit, money, fail
 const { freezePaymentPolicy } = require('./offerPaymentPolicy');
 
 // Resolve the commercial agreement before writing an order, invoice or payment.
-async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal }) {
+async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal, userId }) {
   if (!body.packageId && !body.offerSlug) return null; // Existing custom-project pricing stays available.
-  const { offers } = await fetchWebsiteCatalogue();
+  let reserved = null;
+  if (body.offerReservationId) {
+    if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);
+    if (!require('mongoose').isValidObjectId(body.offerReservationId) || !userId || body.packageId) fail('Select a reserved offer for this customer without a package');
+    reserved = await require('../models/offerReservationModel').findOne({ _id: body.offerReservationId, userId }).lean();
+    if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || reserved.expiresAt <= new Date()) fail('This customer reservation is unavailable or expired', 409);
+  }
+  const { offers } = reserved ? { offers: [reserved.offerSnapshot] } : await fetchWebsiteCatalogue();
   const extrasTotal = money(features.reduce((sum, item) => sum + item.price, 0));
   let packageItem = null, quote, scope, packageQuoteKey = null;
   if (body.packageId) {
@@ -17,7 +24,7 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     quote = quoted.quote; scope = packageItem.inclusions; packageQuoteKey = quoted.quoteKey;
   } else {
     const offer = offers.find(item => item.slug === body.offerSlug);
-    if (!offerEligible(offer, category)) fail('The selected offer is expired or does not apply to this project category');
+    if (!offerEligible(offer, category, reserved ? new Date(reserved.reservedAt).getTime() : Date.now())) fail('The selected offer is expired or does not apply to this project category');
     if (!body.offerQuoteKey || body.offerQuoteKey !== offer.quoteKey) fail('Offer changed. Refresh offers and review the price.', 409);
     const regularPrice = Number(offer.mainPrice);
     quote = { regularPrice, ...calculateBenefit(regularPrice, offer), offer, terms: offer.resolvedTerms || [] };
@@ -35,8 +42,9 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
   if (money(Number(body.sellingPrice)) !== calculatedTotal) fail('Project price changed. Review the current package and extras before creating it.', 409);
   const now = new Date();
   // Recheck at the final decision point, including requests crossing the deadline.
-  if (quote.offer && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
+  if (quote.offer && !reserved && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
   return {
+    sourceOffer: quote.offer || null,
     paymentPolicy: freezePaymentPolicy(quote.offer, now),
     finalPrice: calculatedTotal,
     referenceTotal: money(quote.regularPrice + extrasTotal),

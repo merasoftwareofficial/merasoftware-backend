@@ -30,6 +30,7 @@ if (cronsEnabled) {
   scheduleAutoRenewal();
   scheduleServicePlanRenewals();
   require('./cron/offerPaymentReminderCron').scheduleOfferPaymentReminders();
+  cron.schedule('* * * * *', () => require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message)));
   scheduleChessCleanup();
   console.log('File cleanup scheduler initialized');
   console.log('Auto-renewal scheduler initialized');

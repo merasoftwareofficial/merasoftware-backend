@@ -52,6 +52,7 @@ async function applyReceived(order, invoice, installment, transaction, session, 
     paymentMethod: transaction.paymentMethod, transactionReference: transaction.upiTransactionId || transaction.transactionId,
     actorId: transaction.verifiedBy, amount: transaction.amount, existingTransaction: transaction, session });
   await setOrderPaidAmount(order, { session });
+  await require('./offerReservations').confirmReservationPayment({ order, invoice: result.invoice, session });
   order.paymentComplete = cents(order.remainingAmount) === 0;
   if (installment) {
     installment.paid = result.invoice.status === 'paid';

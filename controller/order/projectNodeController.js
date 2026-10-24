@@ -34,6 +34,10 @@ const getOrderForAdmin = async (req, res) => {
     res.status(400).json({ success: false, error: true, message: "Node operations are supported only for projects" });
     return null;
   }
+  if (order.offerReservationId && !await require('../../models/userModel').exists({ _id: req.userId, roles: 'admin', isActive: { $ne: false }, deletedAt: null })) {
+    res.status(403).json({ success: false, error: true, message: 'Current portal admin access required' });
+    return null;
+  }
   if (order.projectTimelineVersion !== 1 || !order.projectTimelineInitialized) {
     res.status(409).json({
       success: false,
@@ -46,6 +50,11 @@ const getOrderForAdmin = async (req, res) => {
 };
 
 const saveResponse = async (res, order, message, actorId) => {
+  // One document commit saves the node and first-trigger fact together. Concurrent
+  // first updates must refresh rather than overwrite the original trigger.
+  if (order.offerReservationId && order.isModified('offerFirstWorkUpdate') && order.offerFirstWorkUpdate) {
+    order.$where = { ...order.$where, offerFirstWorkUpdate: null };
+  }
   await order.save();
   if (order.projectProgress >= 100) {
     await activateAfterProjectServices({ projectOrderId: order._id, actorId });
@@ -81,7 +90,7 @@ const createProjectNode = async (req, res) => {
       node.messageIds.push(String(savedMessage._id));
     }
 
-    return saveResponse(res, order, "Project node created successfully", req.userId);
+    return await saveResponse(res, order, "Project node created successfully", req.userId);
   } catch (error) {
     console.error("Error creating project node:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
@@ -117,7 +126,7 @@ const editProjectNodeController = async (req, res) => {
       node.messageIds.push(String(savedMessage._id));
     }
 
-    return saveResponse(res, order, "Project node updated successfully", req.userId);
+    return await saveResponse(res, order, "Project node updated successfully", req.userId);
   } catch (error) {
     console.error("Error editing project node:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
@@ -130,7 +139,7 @@ const deleteProjectNodes = async (req, res) => {
     const order = await getOrderForAdmin(req, res);
     if (!order) return;
     softDeleteProjectNodes({ order, nodeIds: req.body?.nodeIds, actorId: req.userId });
-    return saveResponse(res, order, "Project node(s) deleted successfully");
+    return await saveResponse(res, order, "Project node(s) deleted successfully");
   } catch (error) {
     console.error("Error deleting project nodes:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
@@ -143,7 +152,7 @@ const restoreProjectNodesController = async (req, res) => {
     const order = await getOrderForAdmin(req, res);
     if (!order) return;
     restoreProjectNodes({ order, nodeIds: req.body?.nodeIds, actorId: req.userId });
-    return saveResponse(res, order, "Project node(s) restored successfully");
+    return await saveResponse(res, order, "Project node(s) restored successfully");
   } catch (error) {
     console.error("Error restoring project nodes:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
@@ -161,7 +170,7 @@ const setProjectNodeVisibilityController = async (req, res) => {
       visibleToClient: req.body?.visibleToClient,
       actorId: req.userId,
     });
-    return saveResponse(res, order, "Project node visibility updated successfully");
+    return await saveResponse(res, order, "Project node visibility updated successfully");
   } catch (error) {
     console.error("Error updating project node visibility:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
@@ -178,7 +187,7 @@ const resetProjectNodes = async (req, res) => {
       startingNodeTitle: req.body?.startingNodeTitle,
       actorId: req.userId,
     });
-    return saveResponse(res, order, "Project timeline reset successfully");
+    return await saveResponse(res, order, "Project timeline reset successfully");
   } catch (error) {
     console.error("Error resetting project timeline:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });

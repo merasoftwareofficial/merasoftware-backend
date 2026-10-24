@@ -93,6 +93,8 @@ const proposalSchema = new mongoose.Schema({
 }, { _id: false });
 
 const leadSchema = new mongoose.Schema({
+  // Account identity before conversion; never inferred from an editable email.
+  reservationUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' },
   name: {
     type: String,
     required: true,
@@ -179,6 +181,7 @@ const leadSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+leadSchema.index({ reservationUserId: 1 }, { unique: true, partialFilterExpression: { reservationUserId: { $type: 'objectId' } } });
 const leadModel = mongoose.model("lead", leadSchema);
 
 module.exports = leadModel;

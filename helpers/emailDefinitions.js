@@ -888,4 +888,25 @@ definitions['offer.payment.reminder'] = {
     return mail ? { ...mail, reminderInvoice: undefined } : null;
   },
 };
+definitions['offer.reserved'] = {
+  subject: 'Your offer is reserved',
+  text: lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
+    '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
+    '**Payment deadline:** {{expiresAt}}', '',
+    'Your reservation is valid for 72 hours from the reserved time above. Complete the required first payment before the deadline to lock the agreed price.',
+    'Our team will help you with your project and payment steps. Reserving does not itself confirm a payment or start a project.', '',
+    '**My offers:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
+    price: detail('Reserved price', '₹5,000'), reservedAt: detail('Reserved on', '24 Oct 2026, 10:00 am IST'),
+    expiresAt: detail('Payment deadline', '27 Oct 2026, 10:00 am IST'), link: detail('My offers', 'https://www.merasoftware.com/account/offers') },
+  blocks: {},
+  build(reservation, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
+    const href = link(process.env.PORTFOLIO_WEBSITE_URL, '/account/offers');
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
+      reservedAt: moment(reservation.reservedAt), expiresAt: moment(reservation.expiresAt), link: href,
+    } };
+  },
+};
 module.exports = { definitions, refundTable };

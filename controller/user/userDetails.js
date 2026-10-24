@@ -9,10 +9,18 @@ async function userDetailsController (req,res) {
             throw new Error("User not found");
         }
 
+        // A reservation lead is explicitly upgraded in place by an admin. Refresh
+        // only that obsolete member session; ordinary multi-role choices stay intact.
+        let activeRole = req.userRole;
+        if (activeRole === 'member' && user.roles.length === 1 && user.roles[0] === 'customer') {
+            activeRole = 'customer';
+            require('../../helpers/sessionToken').issueSession(res, { _id: user._id, email: user.email, role: activeRole });
+        }
+
         res.status(200).json({
             data: {
                 ...user._doc,
-                role: req.userRole, 
+                role: activeRole,
                 walletBalance: user.walletBalance, // Explicitly include wallet balance
                 bankAccounts: user.bankAccounts,
                 userDetails: {
