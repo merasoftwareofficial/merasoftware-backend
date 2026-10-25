@@ -42,6 +42,6 @@ router.post('/:id/force-apply/preview', wrap(async req => {
 router.post('/:id/force-apply', wrap(async req => {
   sameSiteJson(req); await adminOnly(req);
   return require('../helpers/reservationRepricing').forceApplyReservation({ reservationId: req.params.id, orderId: req.body?.orderId, actorId: req.userId,
-    reason: req.body?.reason, confirmSlug: req.body?.confirmSlug, expectedRevision: req.body?.expectedRevision });
+    reason: req.body?.reason, confirmSlug: req.body?.confirmSlug, expectedRevision: req.body?.expectedRevision, previewToken: req.body?.previewToken });
 }));
 module.exports = router;

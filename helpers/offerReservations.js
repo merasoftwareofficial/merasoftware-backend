@@ -19,10 +19,11 @@ function reservationView(row, now = Date.now(), underReview = false) {
   const deadline = deadlineOf(row);
   return { id: String(row._id), offerSlug: row.offerSlug, title: row.offerSnapshot.title,
     reservedPrice: row.reservedPrice, regularPrice: row.regularPrice,
-    terms: row.offerSnapshot.resolvedTerms || [], reservedAt: row.reservedAt, expiresAt: row.expiresAt,
+    terms: row.offerSnapshot.resolvedTerms || [], reservedAt: row.reservedAt, expiresAt: row.expiresAt, periodEndsAt: row.periodEndsAt,
     deadline, extendedUntil: row.extendedUntil || null,
     status: row.confirmedAt ? 'confirmed' : underReview ? 'under_review' : deadline.getTime() <= now ? 'expired' : 'reserved',
     resolution: row.resolution?.status || null,
+    walletCredit: Number(row.resolution?.walletCredit || 0),
     projectId: row.projectId ? String(row.projectId) : null, confirmationStatus: row.confirmationStatus };
 }
 // Rows whose linked project has a payment submitted before the deadline that still awaits approval.
@@ -166,13 +167,13 @@ async function extendReservation({ reservationId, actorId, until, reason }) {
     fresh.extendedUntil = deadline;
     fresh.resolution = null;
     await fresh.save({ session });
+    await require('../models/reservationNoticeModel').create([{ reservationId: fresh._id, version: fresh.extensions.length, deadline }], { session });
     return fresh;
   });
   let notice = 'off';
   if (process.env.OFFER_RESERVATION_CONFIRMATIONS_ENABLED === 'true') {
     try {
-      const user = await User.findById(row.userId).lean();
-      notice = await require('./emailController').sendReservationMail('offer.reservation.extended', row, user, `offer-reservation-extended:${row._id}:${row.extensions.length}`);
+      notice = await require('./offerReservationConfirmation').deliverExtensionNotice(row._id, row.extensions.length);
     } catch (error) { notice = 'failed'; console.error('[reservation extension notice]', error.message); }
   }
   return { reservation: reservationView(row), notice };

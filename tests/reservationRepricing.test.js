@@ -8,6 +8,8 @@ const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
 const Reservation = require('../models/offerReservationModel');
 const Revision = require('../models/projectPricingRevisionModel');
+const Preview = require('../models/reservationActionPreviewModel');
+const Notice = require('../models/reservationNoticeModel');
 const Order = require('../models/orderProductModel');
 const Invoice = require('../models/invoiceModel');
 const Transaction = require('../models/transactionModel');
@@ -24,7 +26,7 @@ const realFetch = global.fetch;
 before(async () => {
   database = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(database.getUri());
-  await Promise.all([User, Lead, Reservation, Revision, Order, Invoice, Transaction, Category, EmailDraft, EmailHistory, EmailPolicy, EmailTemplate].map(model => model.init()));
+  await Promise.all([User, Lead, Reservation, Revision, Preview, Notice, Order, Invoice, Transaction, Category, EmailDraft, EmailHistory, EmailPolicy, EmailTemplate].map(model => model.init()));
   Object.assign(process.env, { PORTFOLIO_WEBSITE_URL: 'https://website.example.test', PORTFOLIO_INTEGRATION_SECRET: 'isolated-test-secret-32-characters-long',
     RESEND_API_KEY: 'isolated', FROM_EMAIL: 'sender@example.test', ENABLE_WHATSAPP: 'false', OFFER_RESERVATIONS_ENABLED: 'true',
     OFFER_RESERVATION_CONFIRMATIONS_ENABLED: 'false', OFFER_RESERVATION_REPRICING_ENABLED: 'true' });
@@ -161,16 +163,19 @@ test('catalogue outage never changes a price and makes payment wait', async () =
   assert.equal(await Revision.countDocuments(), 0);
 });
 
-test('money already received above the revised first bill stops automation for admin review', async () => {
+test('receipt above revised first installment carries to the next bill without wallet credit', async () => {
   const order = await project({ paymentType: 'partial', installmentCount: 2 });
   await payProjectWallet(customer._id, { orderId: order._id, amount: 2000 });
   await expire({ offerEnded: false });
   offer = { ...offer, offerPrice: 3000, quoteKey: 'quote-cheaper', endsAt: new Date(Date.now() + 48 * HOUR).toISOString() };
   const result = await repricing.reconcileOrderReservation(order._id);
-  assert.equal(result.status, 'needs_review');
-  assert.equal((await Order.findById(order._id)).totalAmount, 5000);
-  assert.equal((await reservation()).resolution.status, 'needs_review');
-  assert.equal((await repricing.reconcileOrderReservation(order._id)).status, 'not_due', 'Stopped rows are left to the admin');
+  assert.equal(result.status, 'repriced');
+  const updated = await Order.findById(order._id);
+  assert.equal(updated.totalAmount, 3000); assert.equal(updated.paidAmount, 2000); assert.equal(updated.remainingAmount, 1000);
+  assert.equal(updated.installments[0].paid, true); assert.equal(updated.currentInstallment, 2);
+  assert.equal((await User.findById(customer._id)).walletBalance, 18000);
+  const bills = await Invoice.find({ orderId: order._id, invoiceType: 'project' }).sort({ installmentNumber: 1 });
+  assert.deepEqual(bills.map(bill => [bill.amount, bill.amountPaid, bill.status]), [[1500, 1500, 'paid'], [1500, 500, 'partially_paid']]);
 });
 
 test('price-locked, cancelled and switched-off cases are never repriced', async () => {
@@ -292,7 +297,7 @@ test('force-apply restores the saved reserved price through a previewed, confirm
   assert.deepEqual([preview.before.finalPrice, preview.after.finalPrice, preview.pricingRevision], [10000, 5000, 1]);
   // The offer was edited and archived meanwhile; the saved terms are used regardless.
   offer = { ...offer, offerPrice: 9000, status: 'archived' };
-  const base = { reservationId: row._id, orderId: order._id, actorId: admin._id, reason: 'Customer paid by cheque on time', expectedRevision: preview.pricingRevision };
+  const base = { reservationId: row._id, orderId: order._id, actorId: admin._id, reason: 'Customer paid by cheque on time', expectedRevision: preview.pricingRevision, previewToken: preview.previewToken };
   await assert.rejects(repricing.forceApplyReservation({ ...base, confirmSlug: 'wrong' }), /offer code/);
   await assert.rejects(repricing.forceApplyReservation({ ...base, confirmSlug: row.offerSlug, expectedRevision: 0 }), /changed since the preview/);
   await assert.rejects(repricing.forceApplyReservation({ ...base, confirmSlug: row.offerSlug, reason: '' }), /reason/);
@@ -319,7 +324,7 @@ test('force-apply attaches an unused expired customer reservation to a project c
   const orderId = res.body.data._id;
   const preview = await repricing.forceApplyPreview({ reservationId: reserved.reservation.id, orderId, actorId: admin._id });
   assert.deepEqual([preview.before.finalPrice, preview.after.finalPrice], [10000, 5000]);
-  await repricing.forceApplyReservation({ reservationId: reserved.reservation.id, orderId, actorId: admin._id, reason: 'Reserved in time', confirmSlug: offer.slug, expectedRevision: 0 });
+  await repricing.forceApplyReservation({ reservationId: reserved.reservation.id, orderId, actorId: admin._id, reason: 'Reserved in time', confirmSlug: offer.slug, expectedRevision: 0, previewToken: preview.previewToken });
   const saved = await Order.findById(orderId);
   assert.equal(saved.totalAmount, 5000); assert.equal(String(saved.offerReservationId), reserved.reservation.id);
   assert.equal(saved.projectSnapshot.salesAgreement.offer.slug, offer.slug);
@@ -347,4 +352,187 @@ test('force-apply is refused for a locked price, another customer or another cat
       regularPrice: 10000, reservedPrice: 5000, reservedAt: new Date(Date.now() - 80 * HOUR), expiresAt: new Date(Date.now() - 8 * HOUR), origin: 'customer' }]);
     await assert.rejects(repricing.forceApplyPreview({ reservationId: manual._id, orderId: app.body.data._id, actorId: admin._id }), /category/);
   }
+});
+
+test('deadline crossing during wallet submission retries price preparation and debits once', async () => {
+  const order = await project();
+  await Reservation.collection.updateOne({ _id: order.offerReservationId }, { $set: { expiresAt: new Date(Date.now() + 500) } });
+  offer = { ...offer, endsAt: new Date(Date.now() - HOUR).toISOString() };
+  const save = Transaction.prototype.save; let delayed = false;
+  Transaction.prototype.save = async function (...args) {
+    if (!delayed && this.type === 'payment' && this.paymentMethod === 'wallet') {
+      delayed = true;
+      assert.equal((await firstBill(order._id)).amount, 5000, 'Precheck happened while the reservation was running');
+      await new Promise(resolve => setTimeout(resolve, 650));
+    }
+    return save.apply(this, args);
+  };
+  try { await payProjectWallet(customer._id, { orderId: order._id, amount: 5000 }); }
+  finally { Transaction.prototype.save = save; }
+  const updated = await Order.findById(order._id);
+  assert.equal(updated.totalAmount, 10000); assert.equal(updated.paidAmount, 5000); assert.equal(updated.paymentComplete, false);
+  assert.equal((await User.findById(customer._id)).walletBalance, 15000);
+  assert.equal(await Transaction.countDocuments({ type: 'payment', status: 'completed' }), 1);
+  assert.equal((await reservation()).confirmedAt, null);
+});
+
+test('force preview is mandatory, actor-bound, expires, and detects a new payment', async () => {
+  const order = await project(); await expire(); await repricing.reconcileOrderReservation(order._id);
+  const row = await reservation();
+  const command = { reservationId: row._id, orderId: order._id, actorId: admin._id, reason: 'Review reserved agreement', confirmSlug: row.offerSlug, expectedRevision: 1 };
+  await assert.rejects(repricing.forceApplyReservation(command), /fresh preview/);
+  const first = await repricing.forceApplyPreview(command);
+  const otherAdmin = await User.create({ name: 'Second admin', email: 'second-admin@example.test', roles: ['admin'] });
+  await assert.rejects(repricing.forceApplyReservation({ ...command, actorId: otherAdmin._id, previewToken: first.previewToken }), /changed since the preview/);
+  await payProjectWallet(customer._id, { orderId: order._id, amount: 1000 });
+  await assert.rejects(repricing.forceApplyReservation({ ...command, previewToken: first.previewToken }), /changed since the preview/);
+  const next = await repricing.forceApplyPreview(command);
+  await Preview.updateOne({ _id: next.previewToken }, { $set: { expiresAt: new Date(0) } });
+  await assert.rejects(repricing.forceApplyReservation({ ...command, previewToken: next.previewToken }), /changed since the preview/);
+  const final = await repricing.forceApplyPreview(command);
+  const applied = await repricing.forceApplyReservation({ ...command, previewToken: final.previewToken });
+  assert.equal(applied.finalPrice, 5000); assert.ok((await Preview.findById(final.previewToken)).usedAt);
+});
+
+test('scheduler visits later due projects and revisits an extended offer on its next check', async () => {
+  for (let i = 0; i < 3; i++) { offer = { ...offer, slug: `batch-${i}`, quoteKey: `batch-quote-${i}` }; await project(); }
+  await expire();
+  const one = await repricing.reconcileDueReservations({ limit: 2 });
+  const two = await repricing.reconcileDueReservations({ limit: 2 });
+  assert.equal(one.length, 2); assert.equal(two.length, 1);
+  assert.equal(new Set([...one, ...two].map(row => row.id)).size, 3);
+  assert.equal(await Revision.countDocuments(), 3);
+  offer = { ...offer, endsAt: new Date(Date.now() + HOUR).toISOString(), offerPrice: 6000, quoteKey: 'new-batch-period' };
+  await Reservation.updateMany({}, { $set: { pricingNextCheckAt: new Date(0) } });
+  await repricing.reconcileDueReservations();
+  assert.equal(await Revision.countDocuments(), 4);
+});
+
+test('offer terms-only revision updates printable terms and preserves frozen package terms', async () => {
+  offer.resolvedTerms = ['Old offer terms']; const order = await project();
+  await Order.updateOne({ _id: order._id }, { $set: { 'projectSnapshot.salesAgreement.baseTerms': ['Saved scope terms'], 'projectSnapshot.salesAgreement.terms': ['Saved scope terms', 'Old offer terms'] } });
+  await expire({ offerEnded: false });
+  offer = { ...offer, resolvedTerms: ['New offer terms'], quoteKey: 'terms-only-change' };
+  await repricing.reconcileOrderReservation(order._id);
+  const agreement = (await Order.findById(order._id)).projectSnapshot.salesAgreement;
+  assert.deepEqual(agreement.terms, ['Saved scope terms', 'New offer terms']);
+  assert.equal(agreement.finalPrice, 5000); assert.equal(await Revision.countDocuments(), 1);
+  await repricing.reconcileOrderReservation(order._id); assert.equal(await Revision.countDocuments(), 1);
+});
+
+test('surplus credits wallet once, derives paid state, and rolls back on revision failure', async () => {
+  const order = await project(); await payProjectWallet(customer._id, { orderId: order._id, amount: 4000 });
+  await expire({ offerEnded: false }); offer = { ...offer, offerPrice: 2000, quoteKey: 'credit-price' };
+  const create = Revision.create;
+  Revision.create = async () => { throw new Error('Injected revision failure'); };
+  try { await assert.rejects(repricing.reconcileOrderReservation(order._id), /Injected revision/); } finally { Revision.create = create; }
+  assert.equal((await User.findById(customer._id)).walletBalance, 16000);
+  assert.equal(await Transaction.countDocuments({ type: 'refund' }), 0);
+  assert.equal((await Order.findById(order._id)).totalAmount, 5000);
+  const result = await repricing.reconcileOrderReservation(order._id);
+  assert.equal(result.walletCredit, 2000); assert.equal((await User.findById(customer._id)).walletBalance, 18000);
+  const updated = await Order.findById(order._id);
+  assert.equal(updated.paidAmount, 2000); assert.equal(updated.remainingAmount, 0); assert.equal(updated.paymentComplete, true);
+  assert.equal((await firstBill(order._id)).status, 'paid');
+  await repricing.reconcileOrderReservation(order._id); assert.equal(await Transaction.countDocuments({ type: 'refund' }), 1);
+});
+
+test('extension notice survives delivery failure and retries with the same dedupe key', async () => {
+  const order = await project(); const row = await reservation();
+  process.env.OFFER_RESERVATION_CONFIRMATIONS_ENABLED = 'true';
+  const fetchFixture = global.fetch; let failDelivery = true; const keys = [];
+  global.fetch = async (url, options) => {
+    if (String(url).includes('api.resend.com')) {
+      keys.push(options.headers['Idempotency-Key']);
+      if (failDelivery) return { ok: false, json: async () => ({}) };
+    }
+    return fetchFixture(url, options);
+  };
+  try {
+    const result = await extendReservation({ reservationId: row._id, actorId: admin._id, until: new Date(Date.now() + 100 * HOUR), reason: 'Bank delay' });
+    assert.equal(result.notice, 'failed'); assert.equal((await Notice.findOne()).status, 'failed');
+    failDelivery = false;
+    await Notice.updateOne({}, { $set: { nextAttemptAt: new Date(0) } });
+    // Isolate the extension delivery from the unrelated original confirmation.
+    await Reservation.updateOne({ _id: row._id }, { $set: { confirmationStatus: 'sent' } });
+    await require('../helpers/offerReservationConfirmation').drainReservationConfirmations();
+    assert.equal((await Notice.findOne()).status, 'sent'); assert.equal(keys.length, 2); assert.equal(keys[0], keys[1]);
+    await require('../helpers/offerReservationConfirmation').drainReservationConfirmations(); assert.equal(keys.length, 2);
+    assert.equal((await Order.findById(order._id)).totalAmount, 5000);
+  } finally { global.fetch = fetchFixture; process.env.OFFER_RESERVATION_CONFIRMATIONS_ENABLED = 'false'; }
+});
+
+test('migration previews without writes, backfills reservation period and replaces only the old unique index', async () => {
+  await reserveOffer({ userId: customer._id, offerSlug: offer.slug, quoteKey: offer.quoteKey });
+  const row = await reservation();
+  await Reservation.collection.updateOne({ _id: row._id }, { $unset: { periodEndsAt: '' } });
+  await Reservation.collection.createIndex({ userId: 1, offerSlug: 1 }, { unique: true });
+  const { migrateReservationIndexes } = require('../scripts/migrateReservationIndexes');
+  const preview = await migrateReservationIndexes({ db: mongoose.connection.db });
+  assert.equal(preview.periodBackfills, 1); assert.equal(preview.applied, false);
+  assert.equal((await Reservation.collection.findOne({ _id: row._id })).periodEndsAt, undefined);
+  const result = await migrateReservationIndexes({ db: mongoose.connection.db, apply: true });
+  assert.equal(result.applied, true); assert.equal((await reservation()).periodEndsAt.toISOString(), offer.endsAt);
+  const indexes = await Reservation.collection.indexes();
+  assert.equal(indexes.some(index => index.name === 'userId_1_offerSlug_1'), false);
+  assert.ok(indexes.some(index => index.name === 'userId_1_offerSlug_1_periodEndsAt_1' && index.unique));
+  assert.equal((await migrateReservationIndexes({ db: mongoose.connection.db, apply: true })).periodBackfills, 0);
+});
+
+test('combined rejection after repricing cannot refund a wallet surplus twice', async () => {
+  const order = await project();
+  await payProjectWallet(customer._id, { orderId: order._id, amount: 4000, parentTransactionId: 'combined-audit' });
+  const bill = await firstBill(order._id);
+  await expire({ offerEnded: false });
+  offer = { ...offer, offerPrice: 2000, quoteKey: 'combined-cheaper' };
+  await repricing.reconcileOrderReservation(order._id);
+  assert.equal((await User.findById(customer._id)).walletBalance, 18000);
+  await Transaction.create({ userId: customer._id, orderId: order._id, invoiceId: bill._id, transactionId: 'combined-audit', amount: 1000,
+    status: 'pending', paymentStatus: 'pending-approval', paymentMethod: 'upi', type: 'payment', sourceType: 'invoice', description: 'Late combined UPI' });
+  await rejectProjectPayment('combined-audit', admin._id, 'Not received');
+  assert.equal((await User.findById(customer._id)).walletBalance, 20000);
+  assert.equal((await Order.findById(order._id)).paidAmount, 0);
+});
+
+for (const revisedPrice of [0, 1234.56]) test(`concurrent repricing to ${revisedPrice} credits every paise once`, async () => {
+  const order = await project(); await payProjectWallet(customer._id, { orderId: order._id, amount: 2000 });
+  await expire({ offerEnded: false }); offer = { ...offer, offerPrice: revisedPrice, quoteKey: 'credit-final' };
+  await Promise.all([repricing.reconcileOrderReservation(order._id), repricing.reconcileOrderReservation(order._id)]);
+  const updated = await Order.findById(order._id);
+  assert.equal(updated.totalAmount, revisedPrice); assert.equal(updated.paidAmount, revisedPrice); assert.equal(updated.paymentComplete, true);
+  assert.equal(Math.round((await User.findById(customer._id)).walletBalance * 100), 2000000 - Math.round(revisedPrice * 100));
+  assert.equal(await Transaction.countDocuments({ type: 'refund' }), 1); assert.equal(await Revision.countDocuments(), 1);
+});
+
+test('combined rejection refunds carried receipts from both installment invoices exactly once', async () => {
+  const order = await project({ paymentType: 'partial', installmentCount: 2 });
+  await payProjectWallet(customer._id, { orderId: order._id, amount: 2000, parentTransactionId: 'carry-parent' });
+  const bill = await firstBill(order._id);
+  await expire({ offerEnded: false }); offer = { ...offer, offerPrice: 3000, quoteKey: 'carry-cheaper' };
+  await repricing.reconcileOrderReservation(order._id);
+  await Transaction.create({ userId: customer._id, orderId: order._id, invoiceId: bill._id, transactionId: 'carry-parent', amount: 500,
+    status: 'pending', paymentStatus: 'pending-approval', paymentMethod: 'upi', type: 'payment', sourceType: 'invoice', description: 'Late UPI' });
+  await rejectProjectPayment('carry-parent', admin._id, 'Not received');
+  assert.equal((await User.findById(customer._id)).walletBalance, 20000);
+  const updated = await Order.findById(order._id);
+  assert.equal(updated.paidAmount, 0); assert.equal(updated.currentInstallment, 1);
+  const bills = await Invoice.find({ orderId: order._id, invoiceType: 'project' });
+  assert.ok(bills.every(item => item.amountPaid === 0 && item.status === 'unpaid'));
+});
+
+test('extension and delivery event roll back together when the outbox cannot save', async () => {
+  await project(); const row = await reservation();
+  const create = Notice.create; Notice.create = async () => { throw new Error('Injected outbox failure'); };
+  try { await assert.rejects(extendReservation({ reservationId: row._id, actorId: admin._id, until: new Date(Date.now() + 100 * HOUR), reason: 'Bank delay' }), /Injected outbox/); }
+  finally { Notice.create = create; }
+  const fresh = await reservation(); assert.equal(fresh.extendedUntil, null); assert.equal(fresh.extensions.length, 0);
+  assert.equal(await Notice.countDocuments(), 0);
+});
+
+test('migration refuses invalid legacy reservation data without changing indexes', async () => {
+  await Reservation.collection.insertOne({ userId: customer._id, offerSlug: 'invalid-legacy', offerSnapshot: { endsAt: 'invalid' } });
+  const indexes = await Reservation.collection.indexes();
+  const report = await require('../scripts/migrateReservationIndexes').migrateReservationIndexes({ db: mongoose.connection.db, apply: true });
+  assert.equal(report.blocked, true); assert.equal(report.applied, false); assert.equal(report.invalid.length, 1);
+  assert.deepEqual(await Reservation.collection.indexes(), indexes);
 });

@@ -54,8 +54,9 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
       version: 2, agreedAt: now, currency: 'INR',
       package: packageItem ? { id: packageItem.id, name: packageItem.name, category: packageItem.category, description: packageItem.description, linkedPlanIds: packageItem.linkedPlanIds, quoteKey: packageQuoteKey } : null,
       regularPrice: quote.regularPrice, offerDiscount: quote.discountAmount, packagePrice: quote.finalPrice,
+      offerScopeExtra: packageItem?.offerExtraPrice || 0,
       extrasTotal, priceAdjustment, adjustmentLabel, finalPrice: calculatedTotal,
-      scope: [...scope], terms: [...quote.terms],
+      scope: [...scope], terms: [...quote.terms], baseTerms: [...(packageItem?.terms || [])],
       extras: features.map(item => ({ name: item.name, quantity: item.quantity, unitPrice: item.unitPrice, price: item.price })),
       offer: quote.offer ? {
         slug: quote.offer.slug, title: quote.offer.title, endsAt: quote.offer.endsAt,

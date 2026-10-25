@@ -7,10 +7,12 @@ const Revision = require('../models/projectPricingRevisionModel');
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { offerEligible, calculateBenefit, money, fail } = require('./salesPackages');
 const { buildLineItemsFromOrder } = require('./paymentRecording');
-const { setOrderPaidAmount, getInvoiceAmountReceived, deriveInvoiceStatus } = require('./orderPaymentTotals');
+const { setOrderPaidAmount, getOrderAmountReceived, deriveInvoiceStatus, getInvoiceAmountReceived } = require('./orderPaymentTotals');
 const { syncProjectFinalInvoice } = require('./projectFinalInvoice');
 const { buildInstallments } = require('./projectInstallments');
 const { deadlineOf, PENDING_PAYMENT } = require('./offerReservations');
+const { createHash } = require('node:crypto');
+const Preview = require('../models/reservationActionPreviewModel');
 
 // Reservation expiry repricing (owner decisions 4–5, 24 Oct 2026). One shared operation for the
 // scheduled job, payment entry points and admin screens. Separate activation switch.
@@ -31,14 +33,14 @@ const inTimePending = (row, session) => Transaction.exists({ ...PENDING_PAYMENT,
 
 // Owner decision 4: the same offer still live (edited/extended) → its current terms; otherwise the
 // saved normal price for the same scope. Saved extras and the admin's signed adjustment are kept.
-function expiredTerms(agreement, currentOffer, category, now) {
+function expiredTerms(agreement, currentOffer, category, now, offerSlug = agreement.offer?.slug) {
   const regularPrice = Number(agreement.regularPrice);
-  const live = currentOffer && currentOffer.slug === agreement.offer?.slug && offerEligible(currentOffer, category, now.getTime()) ? currentOffer : null;
+  const live = currentOffer && currentOffer.slug === offerSlug && offerEligible(currentOffer, category, now.getTime()) ? currentOffer : null;
   let packagePrice = regularPrice;
   if (live) {
     // A package's fixed offer price carries its own extra-scope charge; keep it from the agreement.
-    const packageExtra = agreement.package && agreement.offer?.pricingRule === 'fixed_price'
-      ? money(Number(agreement.packagePrice) - Number(agreement.offer.offerPrice)) : 0;
+    const packageExtra = agreement.offerScopeExtra ?? (agreement.package && agreement.offer?.pricingRule === 'fixed_price'
+      ? money(Number(agreement.packagePrice) - Number(agreement.offer.offerPrice)) : 0);
     packagePrice = calculateBenefit(regularPrice, live, packageExtra).finalPrice;
   }
   const finalPrice = money(packagePrice + Number(agreement.extrasTotal || 0) + Number(agreement.priceAdjustment || 0));
@@ -56,7 +58,17 @@ function reservedTerms(agreement, reservation) {
 
 function revisedAgreement(agreement, terms, revision, reason, now) {
   const offer = terms.offer;
+  const oldOfferTerms = new Set(agreement.offer?.terms || []);
+  const baseTerms = agreement.baseTerms || (agreement.terms || []).filter(term => !oldOfferTerms.has(term));
+  let offerTerms = [...(offer?.resolvedTerms || [])];
+  if (reason === 'force_apply') {
+    offerTerms = offerTerms.filter(term => !/^Offer valid until\s/i.test(term));
+    offerTerms.push('Reserved offer applied by admin override. The original public expiry does not grant a new reservation period.');
+  }
   return { ...agreement, packagePrice: terms.packagePrice, offerDiscount: money(Number(agreement.regularPrice) - terms.packagePrice), finalPrice: terms.finalPrice,
+    baseTerms, terms: [...new Set([...baseTerms, ...offerTerms])],
+    offerScopeExtra: agreement.offerScopeExtra ?? (agreement.package && agreement.offer?.pricingRule === 'fixed_price'
+      ? money(Number(agreement.packagePrice) - Number(agreement.offer.offerPrice)) : 0),
     offer: offer ? { slug: offer.slug, title: offer.title, endsAt: offer.endsAt, pricingRule: offer.pricingRule, mainPrice: offer.mainPrice,
       offerPrice: offer.offerPrice, benefitValue: offer.benefitValue, terms: offer.resolvedTerms || [], appliedAt: now } : null,
     revision: { number: revision, reason, source: terms.source, at: now, previousFinalPrice: agreement.finalPrice } };
@@ -70,13 +82,15 @@ async function applyPricingRevision({ order, reservation, terms, reason, actorId
   if (!agreement || !invoice || ['paid', 'cancelled'].includes(invoice.status)) fail('The first bill is already settled; the price is locked', 409);
   const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
   const invoiceAmount = plan ? plan[0].amount : terms.finalPrice;
-  const received = await getInvoiceAmountReceived(invoice._id, { session });
-  // Owner decision 20 asks for wallet credit; until that flow exists, never cut below received money.
-  if (cents(received) > cents(invoiceAmount)) return { status: 'needs_review', note: 'Money already received on the first bill exceeds the revised amount' };
   const now = new Date();
   const revision = Number(order.pricingRevision || 0) + 1;
   const before = { finalPrice: order.totalAmount, agreement, installments: (order.installments || []).map(row => ({ installmentNumber: row.installmentNumber, amount: row.amount })),
     invoice: { id: invoice._id, amount: invoice.amount, lineItems: invoice.lineItems.map(item => ({ name: item.name, price: item.price })) } };
+  const bills = await Invoice.find({ orderId: order._id, invoiceType: 'project', status: { $ne: 'cancelled' } }).session(session);
+  if (bills.some(bill => bill.status === 'paid')) fail('Settled installment history needs review before repricing', 409);
+  before.invoices = bills.map(bill => ({ id: bill._id, amount: bill.amount, amountPaid: bill.amountPaid, status: bill.status, lineItems: bill.lineItems.toObject() }));
+  const allocation = await require('./projectReceiptReallocation').reallocateProjectReceipts({ order, invoices: bills, installments: plan,
+    finalPrice: terms.finalPrice, revision, session });
   const nextAgreement = revisedAgreement(agreement, terms, revision, reason, now);
   order.projectSnapshot.salesAgreement = nextAgreement;
   order.projectSnapshot.finalPrice = terms.finalPrice;
@@ -88,19 +102,29 @@ async function applyPricingRevision({ order, reservation, terms, reason, actorId
   order.uploadRevision = Number(order.uploadRevision || 0) + 1;
   await setOrderPaidAmount(order, { session });
   order.paymentComplete = cents(order.remainingAmount) === 0;
+  for (const bill of bills) {
+    if (bill.status === 'paid') continue; // Issued settled bills are historical documents.
+    bill.amount = plan ? plan[bill.installmentNumber - 1].amount : invoiceAmount;
+    bill.lineItems = buildLineItemsFromOrder(order);
+    bill.amountPaid = await getInvoiceAmountReceived(bill._id, { session });
+    const derived = bill.amount === 0 ? 'paid' : deriveInvoiceStatus(bill.amountPaid, bill.amount);
+    bill.status = bill.status === 'overdue' && derived === 'unpaid' ? 'overdue' : derived;
+    bill.paidDate = bill.status === 'paid' ? bill.paidDate || now : null;
+    await bill.save({ session });
+    const installment = order.installments?.find(item => item.installmentNumber === bill.installmentNumber);
+    if (installment) { installment.paid = bill.status === 'paid'; installment.paidDate = bill.paidDate; }
+  }
+  if (plan) order.currentInstallment = order.installments.find(item => !item.paid)?.installmentNumber || order.currentInstallment;
+  const updatedFirst = bills.find(bill => String(bill._id) === String(invoice._id));
+  if (updatedFirst.status === 'paid') require('./orderLifecycle').markOrderApproved(order, { actorId });
   await order.save({ session });
-  invoice.amount = invoiceAmount;
-  invoice.lineItems = buildLineItemsFromOrder(order);
-  invoice.amountPaid = received;
-  const derived = deriveInvoiceStatus(received, invoiceAmount);
-  invoice.status = invoice.status === 'overdue' && derived === 'unpaid' ? 'overdue' : derived;
-  await invoice.save({ session });
   await syncProjectFinalInvoice(order, { session });
   const after = { finalPrice: terms.finalPrice, agreement: nextAgreement, installments: plan ? plan.map(row => ({ installmentNumber: row.installmentNumber, amount: row.amount })) : [],
-    invoice: { id: invoice._id, amount: invoice.amount, lineItems: invoice.lineItems.map(item => ({ name: item.name, price: item.price })) } };
+    invoices: bills.map(bill => ({ id: bill._id, amount: bill.amount, amountPaid: bill.amountPaid, status: bill.status, lineItems: bill.lineItems.toObject() })),
+    walletCredit: allocation.walletCredit, invoice: { id: updatedFirst._id, amount: updatedFirst.amount, lineItems: updatedFirst.lineItems.map(item => ({ name: item.name, price: item.price })) } };
   const [doc] = await Revision.create([{ orderId: order._id, userId: order.userId, reservationId: reservation._id, revision, reason,
     source: terms.source, before, after, offerQuoteKey: terms.quoteKey, actorId, note }], { session });
-  return { status: 'repriced', revisionId: doc._id, finalPrice: terms.finalPrice };
+  return { status: 'repriced', revisionId: doc._id, finalPrice: terms.finalPrice, walletCredit: allocation.walletCredit };
 }
 
 // Brings one expired, unpaid reservation's project to its post-deadline price. Idempotent: the
@@ -131,18 +155,21 @@ async function reconcileReservation(reservationId, { now = new Date(), catalogue
     let terms;
     try {
       if (!agreement?.regularPrice) fail('This project has no saved agreement to reprice');
-      terms = expiredTerms(agreement, currentOffer, order.projectSnapshot.category, now);
+      terms = expiredTerms(agreement, currentOffer, order.projectSnapshot.category, now, fresh.offerSlug);
     } catch (error) {
       fresh.resolution = { status: 'needs_review', source: null, note: error.message, at: now };
       await fresh.save({ session }); return { status: 'needs_review', note: error.message };
     }
-    if (cents(terms.finalPrice) === cents(order.totalAmount)) {
+    const proposed = revisedAgreement(agreement, terms, 0, 'reservation_expired', now);
+    const offerState = value => value ? [value.slug, value.title, value.endsAt, value.pricingRule, value.mainPrice, value.offerPrice, value.benefitValue, value.terms] : null;
+    if (cents(terms.finalPrice) === cents(order.totalAmount) && JSON.stringify(agreement.terms) === JSON.stringify(proposed.terms)
+      && JSON.stringify(offerState(agreement.offer)) === JSON.stringify(offerState(proposed.offer))) {
       if (!fresh.resolution) { fresh.resolution = { status: 'unchanged', source: terms.source, at: now }; await fresh.save({ session }); }
       return { status: 'unchanged', source: terms.source };
     }
     const result = await applyPricingRevision({ order, reservation: fresh, terms, reason: 'reservation_expired', session });
     fresh.resolution = result.status === 'repriced'
-      ? { status: 'repriced', source: terms.source, revisionId: result.revisionId, at: now }
+      ? { status: 'repriced', source: terms.source, revisionId: result.revisionId, walletCredit: result.walletCredit, at: now }
       : { status: 'needs_review', source: terms.source, note: result.note, at: now };
     await fresh.save({ session });
     return { ...result, source: terms.source };
@@ -164,20 +191,60 @@ async function ensureReservationPriceCurrent(orderId) {
   return result;
 }
 
+// Catalogue I/O stays outside the financial transaction. If a deadline crosses
+// or a competing revision wins, abort and prepare again before touching money.
+async function withCurrentReservationPrice(orderId, operation) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const decision = await ensureReservationPriceCurrent(orderId);
+    const order = enabled() && await Order.findById(orderId).select('pricingRevision offerReservationId').lean();
+    const row = order?.offerReservationId && await Reservation.findById(order.offerReservationId).lean();
+    const prepared = row ? { checked: ['repriced', 'unchanged', 'closed'].includes(decision.status),
+      revision: Number(order.pricingRevision || 0), deadline: deadlineOf(row).getTime() } : null;
+    try {
+      return await mongoose.connection.transaction(session => operation(session, prepared));
+    } catch (error) {
+      if (error.code !== 'RESERVATION_PRICE_RECHECK') throw error;
+    }
+  }
+  fail('Project payment terms changed. Refresh the payment details and try again.', 409);
+}
+async function guardReservationPayment(order, session, prepared, submittedAt = null) {
+  if (!enabled() || !order.offerReservationId) return;
+  const row = await Reservation.findById(order.offerReservationId).session(session);
+  if (!row || !isDue(row, new Date()) || (submittedAt && new Date(submittedAt) <= deadlineOf(row)) || await inTimePending(row, session)) return;
+  if (!prepared?.checked || prepared.revision !== Number(order.pricingRevision || 0) || prepared.deadline !== deadlineOf(row).getTime()) {
+    throw Object.assign(new Error('Reservation price must be checked again'), { code: 'RESERVATION_PRICE_RECHECK' });
+  }
+}
+
 const dueQuery = now => ({ projectId: { $ne: null }, confirmedAt: null, 'resolution.status': { $nin: STOPPED }, 'resolution.closedAt': null,
   $or: [{ extendedUntil: null, expiresAt: { $lte: now } }, { extendedUntil: { $lte: now } }] });
 
 // Scheduled batch: one catalogue read, per-item error isolation.
 async function reconcileDueReservations({ limit = 50, now = new Date() } = {}) {
   if (!enabled()) return [];
-  const rows = await Reservation.find(dueQuery(now)).sort({ expiresAt: 1 }).limit(limit).select('_id').lean();
+  const candidates = { ...dueQuery(now), $and: [
+    { $or: [{ pricingNextCheckAt: null }, { pricingNextCheckAt: { $lte: now } }] },
+    { $or: [{ pricingLockedUntil: null }, { pricingLockedUntil: { $lte: now } }] },
+  ] };
+  const rows = await Reservation.find(candidates).sort({ pricingNextCheckAt: 1, expiresAt: 1, _id: 1 }).limit(limit).select('_id').lean();
   if (!rows.length) return [];
-  let catalogue;
-  try { catalogue = await fetchWebsiteCatalogue(); } catch { return rows.map(row => ({ id: String(row._id), status: 'unavailable' })); }
-  const results = [];
+  const claimed = [];
   for (const row of rows) {
-    try { results.push({ id: String(row._id), ...await reconcileReservation(row._id, { now, catalogue }) }); }
-    catch (error) { results.push({ id: String(row._id), status: 'error', note: error.message }); }
+    const claim = await Reservation.findOneAndUpdate({ ...candidates, _id: row._id }, { $set: { pricingLockedUntil: new Date(now.getTime() + 120000) } }, { new: true });
+    if (claim) claimed.push(claim);
+  }
+  let catalogue = null;
+  if (claimed.length) { try { catalogue = await fetchWebsiteCatalogue(); } catch { /* Retry later; outages cannot change a price. */ } }
+  const results = [];
+  for (const row of claimed) {
+    let result;
+    try { result = catalogue ? await reconcileReservation(row._id, { now, catalogue }) : { status: 'unavailable' }; }
+    catch (error) { result = { status: 'error', note: error.message }; }
+    results.push({ id: String(row._id), ...result });
+    await Reservation.updateOne({ _id: row._id, pricingLockedUntil: row.pricingLockedUntil }, { $set: {
+      pricingLockedUntil: null, pricingNextCheckAt: new Date(now.getTime() + (['unavailable', 'error', 'under_review'].includes(result.status) ? 60000 : 300000)),
+    } });
   }
   return results;
 }
@@ -226,31 +293,52 @@ async function loadForceApply({ reservationId, orderId, session }) {
 }
 
 async function forceApplyPreview({ reservationId, orderId, actorId }) {
-  await require('./offerReservations').currentAdmin(actorId);
-  const { reservation, order, invoice, terms } = await loadForceApply({ reservationId, orderId, session: null });
-  const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
-  return { reservationId: String(reservation._id), orderId: String(order._id), offerSlug: reservation.offerSlug, offerTitle: reservation.offerSnapshot.title,
-    pricingRevision: Number(order.pricingRevision || 0), deadline: deadlineOf(reservation), expiresAt: reservation.expiresAt,
-    before: { finalPrice: order.totalAmount, firstBill: invoice.amount, installments: (order.installments || []).map(row => row.amount) },
-    after: { finalPrice: terms.finalPrice, firstBill: plan ? plan[0].amount : terms.finalPrice, installments: plan ? plan.map(row => row.amount) : [] },
-    note: 'Validity is overridden by an admin; the original reservation deadline stays in history and no new 72 hours start.' };
+  return mongoose.connection.transaction(async session => {
+    await require('./offerReservations').currentAdmin(actorId, session);
+    const { reservation, order, invoice, terms } = await loadForceApply({ reservationId, orderId, session });
+    const stateHash = await forceStateHash({ reservation, order, invoice, session });
+    const [token] = await Preview.create([{ actorId, orderId, reservationId, stateHash, expiresAt: new Date(Date.now() + 15 * 60000) }], { session });
+    const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
+    const received = await getOrderAmountReceived(order._id, { session });
+    return { reservationId: String(reservation._id), orderId: String(order._id), offerSlug: reservation.offerSlug, offerTitle: reservation.offerSnapshot.title,
+      previewToken: String(token._id), pricingRevision: Number(order.pricingRevision || 0), deadline: deadlineOf(reservation), expiresAt: reservation.expiresAt,
+      before: { finalPrice: order.totalAmount, received, firstBill: invoice.amount, installments: (order.installments || []).map(row => row.amount) },
+      after: { finalPrice: terms.finalPrice, walletCredit: Math.max(0, cents(received) - cents(terms.finalPrice)) / 100,
+        firstBill: plan ? plan[0].amount : terms.finalPrice, installments: plan ? plan.map(row => row.amount) : [] },
+      note: 'Validity is overridden by an admin; the original reservation deadline stays in history and no new 72 hours start.' };
+  });
+}
+
+async function forceStateHash({ reservation, order, invoice, session }) {
+  const payments = await Transaction.find({ orderId: order._id }).select('_id type status paymentStatus amount invoiceId createdAt').sort({ _id: 1 }).session(session).lean();
+  return createHash('sha256').update(JSON.stringify({ orderId: order._id, userId: order.userId,
+    price: order.totalAmount, pricingRevision: order.pricingRevision || 0, paymentRevision: order.uploadRevision || 0,
+    visibility: order.orderVisibility, agreement: order.projectSnapshot?.salesAgreement,
+    invoice: { id: invoice._id, amount: invoice.amount, received: invoice.amountPaid, status: invoice.status },
+    reservation: { id: reservation._id, projectId: reservation.projectId, deadline: deadlineOf(reservation), confirmedAt: reservation.confirmedAt,
+      resolution: reservation.resolution, extensions: reservation.extensions }, payments })).digest('hex');
 }
 
 // Protocol: current admin, preview revision unchanged, a reason, and the offer slug typed to confirm.
-async function forceApplyReservation({ reservationId, orderId, actorId, reason, confirmSlug, expectedRevision }) {
+async function forceApplyReservation({ reservationId, orderId, actorId, reason, confirmSlug, expectedRevision, previewToken }) {
   const note = String(reason || '').trim();
   if (!note || note.length > 300) fail('Enter a reason for the force-apply (up to 300 characters)');
   return mongoose.connection.transaction(async session => {
     await require('./offerReservations').currentAdmin(actorId, session);
-    const { reservation, order, agreement, terms } = await loadForceApply({ reservationId, orderId, session });
+    const { reservation, order, invoice, agreement, terms } = await loadForceApply({ reservationId, orderId, session });
     if (confirmSlug !== reservation.offerSlug) fail('Type the offer code exactly to confirm', 400);
     if (Number(expectedRevision) !== Number(order.pricingRevision || 0)) fail('The project price changed since the preview. Refresh and review again.', 409);
+    if (!mongoose.isValidObjectId(previewToken)) fail('Open a fresh preview before applying the reserved price', 409);
+    const stateHash = await forceStateHash({ reservation, order, invoice, session });
+    const consumed = await Preview.findOneAndUpdate({ _id: previewToken, actorId, orderId, reservationId, stateHash,
+      usedAt: null, expiresAt: { $gt: new Date() } }, { $set: { usedAt: new Date() } }, { new: true, session });
+    if (!consumed) fail('Project payment or reservation changed since the preview. Refresh and review again.', 409);
     if (!order.projectSnapshot.salesAgreement) { order.projectSnapshot.salesAgreement = agreement; order.markModified('projectSnapshot'); }
     order.offerReservationId = reservation._id;
     const result = await applyPricingRevision({ order, reservation, terms, reason: 'force_apply', actorId, note, session });
     if (result.status !== 'repriced') fail(result.note || 'This project needs a manual review', 409);
     reservation.projectId = order._id;
-    reservation.resolution = { status: 'force_applied', source: 'reserved_terms', revisionId: result.revisionId, note, at: new Date() };
+    reservation.resolution = { status: 'force_applied', source: 'reserved_terms', revisionId: result.revisionId, walletCredit: result.walletCredit, note, at: new Date() };
     await reservation.save({ session });
     return { orderId: String(order._id), finalPrice: result.finalPrice, revisionId: String(result.revisionId) };
   });
@@ -258,4 +346,4 @@ async function forceApplyReservation({ reservationId, orderId, actorId, reason, 
 
 module.exports = { expiredTerms, reservedTerms, applyPricingRevision, reconcileReservation, reconcileOrderReservation,
   ensureReservationPriceCurrent, reconcileDueReservations, reconcileUserReservations, firstInvoice, isDue,
-  forceApplyPreview, forceApplyReservation };
+  forceApplyPreview, forceApplyReservation, withCurrentReservationPrice, guardReservationPayment };

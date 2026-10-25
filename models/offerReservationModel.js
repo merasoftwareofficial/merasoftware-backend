@@ -26,6 +26,7 @@ const schema = new mongoose.Schema({
       source: { type: String, enum: ['offer_extended', 'normal_price', 'reserved_terms', null] },
       revisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'projectPricingRevision', default: null },
       note: String,
+      walletCredit: { type: Number, default: 0 },
       at: Date,
       // Set when the first bill is settled or the project closes: automation stops checking it.
       closedAt: { type: Date, default: null },
@@ -36,8 +37,11 @@ const schema = new mongoose.Schema({
   confirmationNextAttemptAt: { type: Date, default: Date.now },
   confirmationLockedUntil: { type: Date, default: null },
   confirmationFailure: { type: String, default: '' },
+  pricingNextCheckAt: { type: Date, default: () => new Date(0) },
+  pricingLockedUntil: { type: Date, default: null },
 }, { timestamps: true });
 schema.index({ userId: 1, offerSlug: 1, periodEndsAt: 1 }, { unique: true });
 schema.index({ confirmationStatus: 1, confirmationNextAttemptAt: 1 });
 schema.index({ projectId: 1, confirmedAt: 1, 'resolution.status': 1 });
+schema.index({ pricingNextCheckAt: 1, expiresAt: 1, _id: 1 });
 module.exports = mongoose.model('offerReservation', schema);

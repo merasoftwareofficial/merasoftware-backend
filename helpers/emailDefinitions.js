@@ -893,7 +893,7 @@ definitions['offer.reserved'] = {
   text: lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
     '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
     '**Payment deadline:** {{expiresAt}}', '',
-    'Your reservation is valid for 72 hours from the reserved time above. Complete the required first payment before the deadline to lock the agreed price.',
+    'Your initial reservation lasts 72 hours. Any team extension is included in the payment deadline above. Complete the required first payment before that deadline to lock the agreed price.',
     'Our team will help you with your project and payment steps. Reserving does not itself confirm a payment or start a project.', '',
     '**My offers:** {{link}}', '', ...SIGN_OFF),
   variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
@@ -905,7 +905,7 @@ definitions['offer.reserved'] = {
     const href = link(process.env.PORTFOLIO_WEBSITE_URL, '/account/offers');
     return { to: [user.email], requiredLinks: [href], values: {
       name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
-      reservedAt: moment(reservation.reservedAt), expiresAt: moment(reservation.expiresAt), link: href,
+      reservedAt: moment(reservation.reservedAt), expiresAt: moment(reservation.extendedUntil || reservation.expiresAt), link: href,
     } };
   },
 };

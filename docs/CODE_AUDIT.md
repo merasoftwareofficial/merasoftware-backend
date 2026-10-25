@@ -1,4 +1,23 @@
-# Payment foundation audit
+# Current reservation/payment audit — 25 October 2026
+
+Local corrections completed against backend `d169db6`, portal `4c1ab35`, website `2d1cf55`. Production deployment, flags, indexes and real provider delivery were not changed or verified.
+
+- Payment callbacks prepare the current reservation price outside Mongo transactions and guard the deadline/revision again inside settlement, using actual payment submission time. A boundary-crossing callback aborts and prepares again; on-time pending UPI still qualifies on later approval.
+- Force-apply consumes an actor-bound, expiring, single-use preview token in the same transaction as the revision. The reviewed fingerprint covers money, ledger, reservation history/deadline and order state. Stale previews fail rather than applying new unseen terms.
+- Expiry jobs use leases and next-check times for fair bounded processing. Later same-offer extensions are evaluated by stable reservation identity even after fallback removed the active offer from the agreement.
+- Printable terms and package base terms have separate provenance. Revisions retain scope/extras/adjustments and saved package offer-extra input. Historical before/after invoice snapshots remain on the immutable revision.
+- Surplus above the new whole-project total is wallet-credited atomically through the existing refund ledger. Installment-only excess is reallocated through paired payment/refund entries without wallet movement. Each leg retains its original receipt identity; combined rejection returns only its remaining allocations, preventing double refunds after a credit/carry.
+- Extension plus durable notice commit/abort together. Existing email/WhatsApp delivery uses stable dedupe keys and retries failed extension notices; obsolete notices are skipped. No new daily reminders are sent.
+- Website re-reservation now presents a new action for an expired, unpaid, unattached reservation in a later eligible period; expired history remains.
+- Preview-first index migration validates legacy reservation data and lead duplicates, creates the new constraints before removing the old user/offer-only constraint, and does not touch project prices or backfill legacy projects.
+
+Validation: **175 main-suite tests + 2 targeted durability/migration tests passed**; website reservation/shared-clock browser checks 2/2, portal My Offers/admin reservation browser checks both passed; website TypeScript and targeted website/portal ESLint passed. Main-suite output: `E:/Allprojects/backup/backend/work14-reservation-final/validation.txt`; additional durability output: `durability-validation.txt` in that folder. Disposable replica sets and fixture providers only. Backups: backend work14-reservation-final, frontend work10-reservation-final, website work20-reservation-final.
+
+Remaining: operator-controlled rollout and real index/configuration/delivery checks in `docs/RESERVATION_ROLLOUT.md`. Central reminder scheduling/manual controls/stage messaging and signup WhatsApp OTP are explicitly future scope. Service-plan repricing and legacy-project backfills remain excluded. A replica set is required. Do not use `syncIndexes` as a live migration.
+
+## Historical payment-foundation notes — 24 October 2026
+
+The notes below record the earlier phase. Statements that reservation/revision work was not implemented describe that phase and are superseded by the current audit above.
 
 Verified 24 October 2026. Scope: baseline paid-state corrections, project UPI/wallet settlement and admin creation/manual approval transactions.
 

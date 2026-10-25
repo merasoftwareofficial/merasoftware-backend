@@ -47,7 +47,8 @@ async function dueInvoice(order, input, session) {
   return { invoice, installment };
 }
 
-async function applyReceived(order, invoice, installment, transaction, session, actorType, alreadySettled = false) {
+async function applyReceived(order, invoice, installment, transaction, session, actorType, alreadySettled = false, prepared = null) {
+  await require('./reservationRepricing').guardReservationPayment(order, session, prepared, transaction.createdAt);
   const result = alreadySettled ? { invoice, transaction } : await markProjectInvoicePaid({ invoice, customerId: order.userId,
     paymentMethod: transaction.paymentMethod, transactionReference: transaction.upiTransactionId || transaction.transactionId,
     actorId: transaction.verifiedBy, amount: transaction.amount, existingTransaction: transaction, session });
@@ -71,7 +72,9 @@ async function applyReceived(order, invoice, installment, transaction, session, 
 }
 
 async function approveProjectPayment(transactionId, actorId) {
-  return mongoose.connection.transaction(async session => {
+  const source = await Transaction.findOne({ transactionId });
+  const project = await projectForTransaction(source);
+  return require('./reservationRepricing').withCurrentReservationPrice(project?._id, async (session, prepared) => {
     const transaction = await Transaction.findOne({ transactionId }).session(session);
     if (!transaction || transaction.status !== 'pending') fail('Payment is unavailable or already decided');
     const actor = await User.findById(actorId).session(session);
@@ -80,6 +83,7 @@ async function approveProjectPayment(transactionId, actorId) {
     const order = await Order.findById(transaction.orderId || linked?.orderId).session(session);
     if (!order?.isWebsiteProject || order.isServicePlan || !same(order.userId, transaction.userId)) fail('Payment does not belong to this customer project');
     validAmount(transaction.amount);
+    await require('./reservationRepricing').guardReservationPayment(order, session, prepared);
     const { invoice, installment } = await dueInvoice(order, transaction, session);
     if (cents(transaction.amount) > cents(invoice.amount) - cents(invoice.amountPaid)) fail('Transaction amount exceeds the invoice balance');
     const user = await User.findById(transaction.userId).session(session);
@@ -94,7 +98,7 @@ async function approveProjectPayment(transactionId, actorId) {
     transaction.orderId = order._id;
     if (installment) transaction.installmentNumber = installment.installmentNumber;
     await transaction.save({ session });
-    const result = await applyReceived(order, invoice, installment, transaction, session, ACTOR_TYPE.ADMIN);
+    const result = await applyReceived(order, invoice, installment, transaction, session, ACTOR_TYPE.ADMIN, false, prepared);
     return { ...result, transaction, walletBalance: (await User.findById(user._id).session(session)).walletBalance };
   });
 }
@@ -102,7 +106,7 @@ async function approveProjectPayment(transactionId, actorId) {
 async function payProjectWallet(userId, body) {
   validAmount(body.amount);
   const transactionId = body.parentTransactionId ? `${body.parentTransactionId}-W` : `WPAY${new mongoose.Types.ObjectId()}`;
-  return mongoose.connection.transaction(async session => {
+  return require('./reservationRepricing').withCurrentReservationPrice(body.orderId, async (session, prepared) => {
     const order = await Order.findOne({ _id: body.orderId, userId, isWebsiteProject: true, isServicePlan: { $ne: true } }).session(session);
     if (!order || order.orderVisibility === 'cancelled') fail('Project is unavailable for payment');
     const previous = await Transaction.findOne({ transactionId }).session(session);
@@ -115,13 +119,14 @@ async function payProjectWallet(userId, body) {
       const invoice = previous.invoiceId ? await Invoice.findById(previous.invoiceId).session(session) : null;
       return { order, invoice, transaction: previous, walletBalance: balance };
     }
+    await require('./reservationRepricing').guardReservationPayment(order, session, prepared);
     const { invoice, installment } = await dueInvoice(order, body, session);
     if (cents(body.amount) > cents(invoice.amount) - cents(invoice.amountPaid)) fail('Payment amount must not exceed the invoice balance');
     const { transaction, newBalance } = await deductWalletInstant({ userId, transactionId, amount: Number(body.amount),
       orderId: order._id, installmentNumber: installment?.installmentNumber,
       parentTransactionId: body.parentTransactionId || null, sourceType: 'invoice',
       description: `Payment (wallet) for invoice ${invoice.invoiceNumber}`, session });
-    const result = await applyReceived(order, invoice, installment, transaction, session, ACTOR_TYPE.CUSTOMER);
+    const result = await applyReceived(order, invoice, installment, transaction, session, ACTOR_TYPE.CUSTOMER, false, prepared);
     return { ...result, transaction, walletBalance: newBalance };
   });
 }
@@ -146,13 +151,18 @@ async function rejectProjectPayment(transactionId, actorId, reason) {
       type: 'payment', paymentMethod: 'wallet', status: 'completed' }).session(session);
     const invoices = new Map();
     for (const portion of portions) {
-      await refundWalletInstant({ userId: order.userId, transactionId: `${portion.transactionId}-REFUND`,
-        amount: portion.amount, orderId: order._id, invoiceId: portion.invoiceId,
-        parentTransactionId: portion.parentTransactionId, description: `Refund for rejected payment ${transactionId}`, session });
-      if (portion.invoiceId) {
-        const invoice = await Invoice.findById(portion.invoiceId).session(session);
-        if (!invoice || invoice.invoiceType !== 'project' || !same(invoice.orderId, order._id)) fail('Paired wallet payment has an invalid invoice');
-        invoices.set(String(invoice._id), invoice);
+      const lots = (await require('./projectReceiptReallocation').projectReceiptLots(order._id, session)).filter(lot => lot.root === portion.transactionId && lot.amount > 0);
+      for (const lot of lots) {
+        // Preserve the original single-invoice retry key; carried amounts get their own key.
+        const refundId = String(lot.invoiceId) === String(portion.invoiceId) ? `${portion.transactionId}-REFUND` : `${portion.transactionId}-REFUND-${lot.invoiceId}`;
+        await refundWalletInstant({ userId: order.userId, transactionId: refundId,
+          amount: lot.amount / 100, orderId: order._id, invoiceId: lot.invoiceId,
+          parentTransactionId: portion.transactionId, description: `Refund for rejected payment ${transactionId}`, session });
+        if (lot.invoiceId) {
+          const invoice = await Invoice.findById(lot.invoiceId).session(session);
+          if (!invoice || invoice.invoiceType !== 'project' || !same(invoice.orderId, order._id)) fail('Paired wallet payment has an invalid invoice');
+          invoices.set(String(invoice._id), invoice);
+        }
       }
     }
     for (const invoice of invoices.values()) {
@@ -182,7 +192,7 @@ async function rejectProjectPayment(transactionId, actorId, reason) {
   });
 }
 
-async function recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session }) {
+async function recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session, preparedPrice = null }) {
   const { invoice, installment } = await dueInvoice(order, {}, session);
   const amount = (cents(invoice.amount) - cents(invoice.amountPaid)) / 100;
   validAmount(amount);
@@ -190,18 +200,19 @@ async function recordAdminProjectPaymentInSession({ order, actorId, payment, pre
     paymentMethod: payment.paymentMethod, transactionReference: payment.transactionReference,
     paymentDetails: payment.paymentDetails || {}, preparedEvidence,
     notes: payment.notes, actorId, amount, session });
-  return applyReceived(order, result.invoice, installment, result.transaction, session, ACTOR_TYPE.ADMIN, true);
+  return applyReceived(order, result.invoice, installment, result.transaction, session, ACTOR_TYPE.ADMIN, true, preparedPrice);
 }
 
 async function recordAdminProjectPayment({ orderId, actorId, payment, preparedEvidence }) {
-  return mongoose.connection.transaction(async session => {
+  return require('./reservationRepricing').withCurrentReservationPrice(orderId, async (session, prepared) => {
     const actor = await User.findById(actorId).session(session);
     if (!actor?.roles?.includes('admin') || actor.isActive === false || actor.deletedAt) fail('Current portal admin access required', 403);
     const order = await Order.findById(orderId).session(session);
     if (!order?.isWebsiteProject || order.isServicePlan) fail('Project not found', 404);
     if (order.orderVisibility !== 'pending-approval') fail(`Order is already ${order.orderVisibility}`);
     if (await Transaction.exists({ orderId: order._id, type: 'payment', status: 'completed' }).session(session)) fail('This project already has a recorded payment. Use the payment ledger.');
-    return recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session });
+    await require('./reservationRepricing').guardReservationPayment(order, session, prepared);
+    return recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session, preparedPrice: prepared });
   });
 }
 

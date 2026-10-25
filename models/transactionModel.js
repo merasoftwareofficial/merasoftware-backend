@@ -56,7 +56,9 @@ const transactionSchema = new mongoose.Schema(
             // "demo" is additive: guest dummy-wallet-credit only, never real money.
             // "reward" is additive: automatic system-credited rewards (e.g. lead
             // reference), never a manually recorded payment method.
-            enum: ["wallet", "upi", "combined", "cash", "bank_transfer", "cheque", "demo", "reward"],
+            // allocation is an internal receipt transfer between project invoices;
+            // its paired entries never debit or credit a wallet.
+            enum: ["wallet", "upi", "combined", "cash", "bank_transfer", "cheque", "demo", "reward", "allocation"],
             default: "upi"
         },
          // Add parentTransactionId for combined payments
