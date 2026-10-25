@@ -2,6 +2,12 @@
 
 **Next agent: start with the [cross-repo reservation handover](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md).** It explains business decisions, local completion, exact test commands, working-tree state, backups and pending live rollout. Do not infer deployment from passing local tests.
 
+## Package pages (Pricing & Packages menu) — 25 October 2026
+
+- `package.pages`, page check, quote key without pages and `unlinkPackagePage()`: `helpers/salesPackages.js`; website page list via `helpers/websiteOffers.js`; route `PATCH /admin/sales-packages/page-unlink`.
+- Tests `tests/packagePages.test.js`. Backfill `scripts/backfillPackagePages.js` (dry run default; **applied on production 25 Oct 2026**, 7 packages).
+- Full hand-over: `E:/Allprojects/merasoftware/src/docs/package-pages.md`.
+
 ## Current reservation/payment work — 25 October 2026
 
 - Read `docs/CODE_AUDIT.md` for completed corrections and remaining transaction risks.
