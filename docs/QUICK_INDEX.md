@@ -1,5 +1,7 @@
 # Backend work index
 
+**Next agent: start with the [cross-repo reservation handover](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md).** It explains business decisions, local completion, exact test commands, working-tree state, backups and pending live rollout. Do not infer deployment from passing local tests.
+
 ## Current reservation/payment work — 25 October 2026
 
 - Read `docs/CODE_AUDIT.md` for completed corrections and remaining transaction risks.

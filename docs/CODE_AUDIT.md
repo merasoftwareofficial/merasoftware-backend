@@ -1,6 +1,10 @@
 # Current reservation/payment audit — 25 October 2026
 
+Cross-app context and next steps: [RESERVATION_AGENT_HANDOVER.md](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md). The sections labelled historical below are superseded for reservation/revision implementation status.
+
 Local corrections completed against backend `d169db6`, portal `4c1ab35`, website `2d1cf55`. Production deployment, flags, indexes and real provider delivery were not changed or verified.
+
+Current observed part 4 commits: backend `beab9f4`, portal `c0803ca`, website `9776de1`. They contain the final corrections; this subsequent handover working changes documentation only. Git commits are not production deployment evidence.
 
 - Payment callbacks prepare the current reservation price outside Mongo transactions and guard the deadline/revision again inside settlement, using actual payment submission time. A boundary-crossing callback aborts and prepares again; on-time pending UPI still qualifies on later approval.
 - Force-apply consumes an actor-bound, expiring, single-use preview token in the same transaction as the revision. The reviewed fingerprint covers money, ledger, reservation history/deadline and order state. Stale previews fail rather than applying new unseen terms.

@@ -36,7 +36,12 @@ const fetchWebsiteCatalogue = async () => {
   const offers = (Array.isArray(result.catalogueOffers) ? result.catalogueOffers : result.offers)
     .filter((offer) => offer && typeof offer.slug === "string" && typeof offer.title === "string")
     .map((offer) => ({ ...offer, endsAt: offer.endsAt || null }));
-  return { offers };
+  // The website also owns the package pages (Pricing & Packages menu); a package may only be
+  // assigned to a page that exists there. A website without the field sends none.
+  const packagePages = (Array.isArray(result.packagePages) ? result.packagePages : [])
+    .filter((page) => page && typeof page.slug === "string" && typeof page.title === "string")
+    .map(({ slug, title }) => ({ slug, title }));
+  return { offers, packagePages };
 };
 const fetchLiveWebsiteOffers = async () => (await fetchWebsiteCatalogue()).offers.filter(offer => (!offer.status || offer.status === 'published') && Date.parse(offer.endsAt) > Date.now());
 

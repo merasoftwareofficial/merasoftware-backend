@@ -1,5 +1,7 @@
 # Reservation final corrections — rollout
 
+Read the [cross-repo handover](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md) first for approved commercial rules, source owners and exact local evidence. This file is the operator sequence for the remaining live work.
+
 Local source corrections are separate from production activation. No production database, deployment, message delivery or flags were changed by this working.
 
 ## Changed behavior

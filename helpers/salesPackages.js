@@ -31,6 +31,9 @@ function validatePackage(raw) {
   };
   if (raw.offerSlug && !safeId(raw.offerSlug)) fail('Choose a valid offer');
   if (!Number.isInteger(raw.order) || raw.order < 0 || raw.order > 9999) fail('Enter a valid display order');
+  // Website pages this package is shown on. Packages saved before pages existed have none.
+  const pages = raw.pages ?? [];
+  if (!Array.isArray(pages) || pages.length > 30 || pages.some(slug => !safeId(slug))) fail('Choose valid website pages');
   if (!Array.isArray(raw.linkedPlanIds) || raw.linkedPlanIds.length > 30 || raw.linkedPlanIds.some(id => typeof id !== 'string' || !/^[a-f\d]{24}$/i.test(id))) fail('Choose valid service references');
   const regularPrice = amount(raw.regularPrice, 'main price');
   const discountedPrice = amount(raw.discountedPrice, 'discounted price');
@@ -40,7 +43,7 @@ function validatePackage(raw) {
     category: raw.category, status: raw.status, regularPrice, discountedPrice,
     offerExtraPrice: amount(raw.offerExtraPrice, 'offer extras price'), offerSlug: raw.offerSlug || '',
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
-    linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order,
+    linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order, pages: [...new Set(pages)],
   };
 }
 // Which packages an offer applies to is stored only on the package (offerSlug), so one package
@@ -71,15 +74,19 @@ function quotePackage(item, offers, now = Date.now()) {
   const quote = offer
     ? { ...calculateBenefit(item.regularPrice, offer, item.offerExtraPrice), regularPrice: item.regularPrice, offer, terms }
     : { discountAmount: 0, finalPrice: discountedPrice, regularPrice: discountedPrice, offer: null, terms };
-  const quoteKey = createHash('sha256').update(JSON.stringify({ item, quote })).digest('hex');
+  // Where a package is shown does not change its price or scope, so pages stay out of the
+  // version key; moving a package between pages never invalidates an open project form.
+  const { pages, ...priced } = item;
+  const quoteKey = createHash('sha256').update(JSON.stringify({ item: priced, quote })).digest('hex');
   return { ...item, quote, quoteKey };
 }
 async function catalogueWithQuotes(offers, admin = false) {
   const items = await readPackages();
   return items.filter(item => admin || item.status === 'published').map(item => quotePackage(item, offers));
 }
-async function savePackage(raw, creating, offers) {
+async function savePackage(raw, creating, offers, packagePages = []) {
   const item = validatePackage(raw);
+  if (item.pages.some(slug => !packagePages.some(page => page.slug === slug))) fail('A selected website page no longer exists. Refresh and try again.');
   const existing = await readPackages();
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
@@ -124,4 +131,14 @@ async function linkOfferPackages(offerSlug, packageIds, offers) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return [...wanted];
 }
-module.exports = { money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages };
+// A website page is being deleted: remove it from every package. The packages themselves stay.
+async function unlinkPackagePage(slug) {
+  if (!safeId(slug)) fail('Choose a valid website page');
+  const changes = {};
+  for (const item of await readPackages()) {
+    if (item.pages?.includes(slug)) changes[`packages.${item.id}.pages`] = item.pages.filter(page => page !== slug);
+  }
+  if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
+  return Object.keys(changes).length;
+}
+module.exports = { money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage };
