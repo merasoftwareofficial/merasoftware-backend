@@ -77,7 +77,12 @@ function quotePackage(item, offers, now = Date.now()) {
   // Where a package is shown does not change its price or scope, so pages stay out of the
   // version key; moving a package between pages never invalidates an open project form.
   const { pages, ...priced } = item;
-  const quoteKey = createHash('sha256').update(JSON.stringify({ item: priced, quote })).digest('hex');
+  // An offer's own quoteKey (website src/lib/offer-quote.ts) already signs everything commercial
+  // about it and leaves out display/timing settings such as its reserve window, so the package
+  // version follows that key, as service-plan quotes do (serviceOfferPolicy.js). An offer
+  // without a key falls back to its full content.
+  const signed = quote.offer?.quoteKey ? { ...quote, offer: quote.offer.quoteKey } : quote;
+  const quoteKey = createHash('sha256').update(JSON.stringify({ item: priced, quote: signed })).digest('hex');
   return { ...item, quote, quoteKey };
 }
 async function catalogueWithQuotes(offers, admin = false) {

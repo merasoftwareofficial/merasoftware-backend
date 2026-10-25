@@ -29,6 +29,18 @@ test('offer expiry/category eligibility is enforced, and quote versions include 
   // The package's own offerSlug is the only link; the offer's old package list no longer filters.
   assert.equal(quotePackage(item, [{ ...live, packageIds: ['other'] }]).quote.finalPrice, 699);
 });
+test('package version follows the offer quoteKey: display/timing settings do not invalidate an open project form', () => {
+  const item = STARTER_PACKAGES[0];
+  const signed = { ...live, quoteKey: 'offer-key-1' };
+  const initial = quotePackage(item, [signed]);
+  // The website leaves the reserve window out of the offer key, so only the window changed here.
+  assert.equal(quotePackage(item, [{ ...signed, reserveWindowHours: 48 }]).quoteKey, initial.quoteKey);
+  // A commercial change gives the offer a new key, and the package version follows it.
+  assert.notEqual(quotePackage(item, [{ ...signed, resolvedTerms: ['Changed terms'], quoteKey: 'offer-key-2' }]).quoteKey, initial.quoteKey);
+  assert.notEqual(quotePackage({ ...item, inclusions: ['Updated scope'] }, [signed]).quoteKey, initial.quoteKey);
+  // Without a key the full offer is signed, as before.
+  assert.notEqual(quotePackage(item, [{ ...live, reserveWindowHours: 48 }]).quoteKey, quotePackage(item, [live]).quoteKey);
+});
 test('package has a main and a discounted price; an offer replaces the discount and is calculated from the main price', () => {
   const item = { ...STARTER_PACKAGES[0], regularPrice: 14000, discountedPrice: 12000, offerSlug: '' };
   assert.deepEqual(quotePackage(item, [live]).quote, { discountAmount: 0, finalPrice: 12000, regularPrice: 12000, offer: null, terms: item.terms });

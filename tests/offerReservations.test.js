@@ -101,6 +101,27 @@ test('too early, expired, archived, service-only and stale-quote requests do not
   await assert.rejects(reserve(member, { quoteKey: 'stale' }), error => error.statusCode === 409);
   assert.equal(await Reservation.countDocuments(), 0); assert.equal(await Lead.countDocuments(), 0);
 });
+test('each offer sets when Reserve opens; refusals explain the real reason', async () => {
+  const hours = value => new Date(Date.now() + value * 3600000).toISOString();
+  const refused = async (patch, message) => {
+    const saved = { ...offer }; Object.assign(offer, patch);
+    try { await assert.rejects(reserve(), error => error.statusCode === 409 && message.test(error.message), JSON.stringify(patch)); } finally { offer = saved; }
+  };
+  // Without the field the original 24 hours apply.
+  await refused({ endsAt: hours(25) }, /^Reservation opens on .+ IST\.$/);
+  await refused({ endsAt: hours(30), reserveWindowHours: 24 }, /^Reservation opens on/);
+  await refused({ endsAt: hours(50), reserveWindowHours: 48 }, /^Reservation opens on/);
+  // Invalid stored values fall back to 24 hours instead of opening early.
+  for (const reserveWindowHours of [0, 721, 2.5, '48']) await refused({ endsAt: hours(30), reserveWindowHours }, /^Reservation opens on/);
+  await refused({ targets: ['service_plans'] }, /^This offer cannot be reserved\. Please enquire about it instead\.$/);
+  await refused({ endsAt: new Date(0).toISOString() }, /^This offer has ended\.$/);
+  await refused({ status: 'draft' }, /^This offer is not available\.$/);
+  assert.equal(await Reservation.countDocuments(), 0);
+  // A 48-hour window accepts 30 hours before the end; the hold is still 72 hours.
+  Object.assign(offer, { endsAt: hours(30), reserveWindowHours: 48 });
+  const result = await reserve();
+  assert.equal(new Date(result.reservation.expiresAt) - new Date(result.reservation.reservedAt), 72 * 3600000);
+});
 test('guest, disabled and deleted accounts cannot reserve or read history', async () => {
   for (const patch of [{ isGuest: true }, { isActive: false }, { deletedAt: new Date() }]) {
     await User.updateOne({ _id: member._id }, { $set: { isGuest: false, isActive: true, deletedAt: null, ...patch } });

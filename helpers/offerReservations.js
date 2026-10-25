@@ -48,6 +48,24 @@ async function listReservations(userId) {
   const underReview = await reviewedReservationIds(userId, rows);
   return { reservations: rows.map(row => reservationView(row, now, underReview.has(String(row._id)))), serverNow: new Date(now) };
 }
+// How many hours before an offer ends public Reserve opens. Each offer sets it on the website
+// (owner decision 25 Oct 2026; website src/lib/offers.ts reserveWindowHours, 1–720). Offers
+// without the field keep the original 24 hours. The website mirrors this rule only to show or
+// hide its button (src/lib/offer-reservation-rules.ts); this check stays the authority.
+const DEFAULT_RESERVE_WINDOW_HOURS = 24;
+const reserveWindowHours = offer => Number.isInteger(offer?.reserveWindowHours) && offer.reserveWindowHours >= 1 && offer.reserveWindowHours <= 720
+  ? offer.reserveWindowHours : DEFAULT_RESERVE_WINDOW_HOURS;
+const indiaTime = value => `${new Date(value).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })} IST`;
+// Why a public reservation is refused right now, in words the customer understands; null = allowed.
+function reservationRefusal(offer, now) {
+  const endsAt = Date.parse(offer?.endsAt);
+  if (!offer || offer.status !== 'published' || !Number.isFinite(endsAt)) return 'This offer is not available.';
+  if (endsAt <= now) return 'This offer has ended.';
+  if (offer.targets && !offer.targets.includes('projects')) return 'This offer cannot be reserved. Please enquire about it instead.';
+  const opensAt = endsAt - reserveWindowHours(offer) * HOUR;
+  if (now < opensAt) return `Reservation opens on ${indiaTime(opensAt)}.`;
+  return null;
+}
 // An expired, unpaid, unattached reservation may be followed by one new reservation in a later
 // offer period (owner decision 11). Anything else is returned unchanged on a repeat request.
 const renewable = (row, now) => !row.confirmedAt && !row.projectId && deadlineOf(row).getTime() <= now;
@@ -72,9 +90,8 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     const existing = periodEndsAt && await Reservation.findOne({ userId, offerSlug, periodEndsAt }).session(session);
     if (existing) return { reservation: reservationView(existing), reused: true, serverNow: new Date() };
     const now = new Date();
-    const remaining = Date.parse(offer?.endsAt) - now.getTime();
-    if (!offer || offer.status !== 'published' || !Number.isFinite(remaining) || remaining <= 0 || remaining > 24 * HOUR
-      || (offer.targets && !offer.targets.includes('projects'))) fail('Reservation is available only in the final 24 hours of a live project offer', 409);
+    const refusal = reservationRefusal(offer, now.getTime());
+    if (refusal) fail(refusal, 409);
     if (typeof quoteKey !== 'string' || !quoteKey || quoteKey !== offer.quoteKey) fail('Offer price or terms changed. Review the offer before reserving.', 409);
     // Owner rule: no lead and no reservation without a phone. Older accounts add it here once.
     if (!user.phone) {
@@ -179,4 +196,4 @@ async function extendReservation({ reservationId, actorId, until, reason }) {
   return { reservation: reservationView(row), notice };
 }
 module.exports = { reserveOffer, listReservations, reservationView, attachProjectReservation, confirmReservationPayment,
-  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, PENDING_PAYMENT };
+  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, reservationRefusal, reserveWindowHours, PENDING_PAYMENT };
