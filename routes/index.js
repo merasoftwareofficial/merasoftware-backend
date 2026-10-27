@@ -220,6 +220,9 @@ router.post("/admin/projects/:orderId/cancel", authToken, cancelProjectOrder);
 router.post("/admin/clients/:customerId/recharge-wallet", authToken, adminRechargeWallet);
 router.get("/admin/category-base-prices", authToken, getCategoryBasePricesController);
 router.post("/admin/category-base-prices", authToken, updateCategoryBasePriceController);
+// Plan categories (helpers/planCategories.js); GET/PATCH for the website admin's salesBackend().
+router.get("/admin/plan-categories", authToken, require('../controller/admin/planCategories').listPlanCategoriesController);
+router.patch("/admin/plan-categories", authToken, require('../controller/admin/planCategories').savePlanCategoryController);
 router.get("/admin/message-templates", authToken, getMessageTemplatesController);
 router.post("/admin/message-templates", authToken, createMessageTemplateController);
 router.put("/admin/message-templates/:templateId", authToken, updateMessageTemplateController);
