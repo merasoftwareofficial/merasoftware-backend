@@ -105,16 +105,27 @@ router.get('/', handle(async (req, res) => {
   const applicationEvents = events.filter(e => e.application === req.emailApplication);
   res.json({ success: true, data: { application: req.emailApplication, events: applicationEvents, catalog: catalogFor(applicationEvents), policies, templates: templates.map(templateWithDocs), drafts, history, automaticSending: false, serverNow: Date.now() } });
 }));
-// Counts only, for the website's Communication boxes: no Outbox sync, no templates, no lists, no writes.
-// A failed/sending draft whose audit row is already 'sent' was delivered (reconcileSent repairs it when
-// the list opens), so it is not counted as waiting.
+// Counts and the last few decisions, for the website's Communication page: no Outbox sync, no templates,
+// no full lists, no writes. A failed/sending draft whose audit row is already 'sent' was delivered
+// (reconcileSent repairs it when the list opens), so it is not counted as waiting.
+const RECENT = 5;
+const UNDECIDED = ['pending', 'failed', 'sending'];
 router.get('/summary', handle(async (req, res) => {
   adminOnly(req);
   const ownership = draftAccess(req.userId, req.emailAccess);
-  const waiting = await EmailDraft.find({ ...ownership, status: { $in: ['pending', 'failed', 'sending'] }, expiresAt: { $gt: new Date() } }).select('status').lean();
+  const now = new Date();
+  const [waiting, latest] = await Promise.all([
+    EmailDraft.find({ ...ownership, status: { $in: UNDECIDED }, expiresAt: { $gt: now } }).select('status').lean(),
+    EmailHistory.find(ownership).sort({ updatedAt: -1 }).limit(RECENT).select('application event to subject status sentAt updatedAt expiresAt').lean(),
+  ]);
   const inFlight = waiting.filter(row => row.status !== 'pending').map(row => row._id);
   const delivered = inFlight.length ? (await EmailHistory.distinct('draftId', { ...ownership, draftId: { $in: inFlight }, status: 'sent' })).length : 0;
-  res.json({ success: true, data: { application: req.emailApplication, review: waiting.length - delivered, actions: events.filter(e => e.application === req.emailApplication).length } });
+  // Same status the history list shows: an undecided mail past its draft's expiry is "expired".
+  const recent = latest.map(row => ({
+    _id: row._id, application: row.application, event: row.event, label: byKey.get(row.event)?.label || row.event, to: row.to || [], subject: row.subject || '',
+    status: UNDECIDED.includes(row.status) && row.expiresAt && row.expiresAt <= now ? 'expired' : row.status, at: row.sentAt || row.updatedAt,
+  }));
+  res.json({ success: true, data: { application: req.emailApplication, review: waiting.length - delivered, actions: events.filter(e => e.application === req.emailApplication).length, recent } });
 }));
 router.get('/outbox', handle(async (req, res) => {
   adminOnly(req);

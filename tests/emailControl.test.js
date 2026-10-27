@@ -113,8 +113,15 @@ test('summary counts the same review mails as the full listing, for admins only'
   const summary = (await api('/email-control/summary', admin, null, 'GET')).data;
   const listing = (await api('/email-control', admin, null, 'GET')).data;
   const waiting = listing.drafts.filter(row => ['pending', 'failed', 'sending'].includes(row.status)).length;
-  assert.deepEqual(summary, { application: 'portal', review: waiting, actions: listing.events.length });
+  const { recent, ...counts } = summary;
+  assert.deepEqual(counts, { application: 'portal', review: waiting, actions: listing.events.length });
   assert.equal(summary.review, 1);
+  // The last decisions, newest first, as the history list has them, with the mail's name for display.
+  assert.deepEqual(recent.map(row => row._id), listing.history.slice(0, 5).map(row => row._id));
+  assert.deepEqual(recent.map(row => row.status).sort(), ['pending', 'skipped']);
+  assert.equal(recent[0].label, 'Project payment summary'); assert.deepEqual(recent[0].to, ['client@example.test']); assert.ok(recent[0].at);
+  await EmailHistory.updateOne({ status: 'pending' }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+  assert.ok((await api('/email-control/summary', admin, null, 'GET')).data.recent.some(row => row.status === 'expired'), 'an undecided mail past expiry shows as expired');
   // Portal admins share the portal's review list; the count follows the listing for each admin.
   const other = (await api('/email-control', secondAdmin, null, 'GET')).data.drafts.filter(row => ['pending', 'failed', 'sending'].includes(row.status)).length;
   assert.equal((await api('/email-control/summary', secondAdmin, null, 'GET')).data.review, other);
