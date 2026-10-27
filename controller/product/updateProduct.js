@@ -12,6 +12,13 @@ async function updateProductController (req,res){
 
         const { _id, ...resBody } = req.body
 
+        // Service plans are saved only through helpers/servicePlanCatalogue.js (validated, never a
+        // spread body). This generic route stays for feature products.
+        const target = await productModel.findById(_id).select('isServicePlan category').lean()
+        if (target && (target.isServicePlan || target.category === 'service_plan')) {
+            throw new Error("Service plans are edited from the plan settings, not here")
+        }
+
         // Allow updating isHidden field if present
         const updateData = { ...resBody }
         if (typeof resBody.isHidden !== 'undefined') {
