@@ -10,6 +10,7 @@ const Product = require('../models/productModel');
 const { MAX_SERVICE_FILES_PER_UPLOAD } = require('../config/uploadLimits');
 const { requireActivePlanCategory, listPlanCategories } = require('./planCategories');
 const { CYCLE_MONTHS, assertPricingConfig, cyclePriceFromMonthly, priceRange, rupees } = require('./servicePlanPricing');
+const { assertCanBeOnSale, canBeOnSale } = require('./servicePlanLifecycle');
 
 const PLAN_TYPES = ['website_updates', 'digital_marketing', 'google_business_setup', 'social_media_marketing', 'other'];
 const LIMIT_SCOPES = ['per_day', 'per_week', 'per_month', 'per_quarter', 'per_6_month', 'per_year', 'per_plan', 'unlimited', 'manual'];
@@ -165,6 +166,8 @@ async function savePlan(body = {}, { requireCategory = true } = {}) {
     if (existing.retiredAt) fail('A retired plan cannot be edited. Restore it first.');
   }
   const fields = await planFieldsFrom(body, existing, { requireCategory });
+  const hidden = typeof fields.isHidden === 'boolean' ? fields.isHidden : Boolean(existing?.isHidden);
+  if (!hidden) assertCanBeOnSale({ isServicePlan: true, servicePlan: fields.servicePlan });
   if (creating) {
     const created = await Product.create({ ...fields, category: 'service_plan', isServicePlan: true, isHidden: fields.isHidden === true });
     return created.toObject();
@@ -187,6 +190,7 @@ async function listPlanCatalogue() {
       description: plan.formattedDescriptions?.[0]?.content || '',
       isHidden: Boolean(plan.isHidden),
       retired: Boolean(plan.retiredAt),
+      canBeOnSale: canBeOnSale(plan),
       price: plan.price,
       servicePlan: plan.servicePlan,
       priceRange: (() => { try { return priceRange(plan); } catch { return null; } })(),
@@ -196,4 +200,13 @@ async function listPlanCatalogue() {
   };
 }
 
-module.exports = { savePlan, listPlanCatalogue };
+// The plan as the admin form would save it, without saving (admin price preview). Same rules as
+// savePlan(); a category is not needed to see a price.
+async function previewPlan(settings = {}) {
+  const existing = given(settings.planId) ? await Product.findOne({ _id: settings.planId, isServicePlan: true }).lean().catch(() => null) : null;
+  const name = typeof settings.serviceName === 'string' && settings.serviceName.trim() ? settings.serviceName : 'Preview';
+  const fields = await planFieldsFrom({ ...settings, serviceName: name }, existing, { requireCategory: false });
+  return { _id: existing?._id || 'preview', serviceName: fields.serviceName, price: fields.price, sellingPrice: fields.sellingPrice, servicePlan: fields.servicePlan };
+}
+
+module.exports = { savePlan, listPlanCatalogue, previewPlan };

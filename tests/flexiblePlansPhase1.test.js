@@ -96,6 +96,7 @@ before(async () => {
   app.post('/admin/clients/:customerId/service-plans', adminActions.startPlanForClient);
   app.patch('/admin/service-plans/:orderId/release-mode', adminActions.setReleaseMode);
   app.post('/admin/uploads/:requestId/status', adminActions.setUploadStatusController);
+  app.patch('/admin/plan-catalogue/quote', require('../controller/admin/planCatalogue').quotePlanController);
   server = app.listen(0, '127.0.0.1'); await new Promise((resolve) => server.once('listening', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
 });
@@ -227,6 +228,7 @@ test('upload status: in progress on download, done, rejected gives the update ba
 
   const history = await getOrderUploadHistory(order._id);
   const shown = history.find((row) => row.id === String(first._id));
+  assert.equal(shown.isPlanUpload, true);
   assert.deepEqual(shown.statusHistory.map((h) => [h.status, h.note, h.auto]), [['in_progress', '', true], ['completed', 'Banner changed.', false]]);
   assert.equal(history.find((row) => row.id === String(second._id)).allowanceReturned, true);
 });
@@ -265,4 +267,39 @@ test('live-plan settings script: dry run plans the Q4 changes, apply writes them
   const again = await planChanges(db);
   assert.equal(again.categories.length, 0);
   assert.ok(again.plans.every((p) => Object.keys(p.set).length === 0)); // second run: nothing left to do
+});
+
+// Phase 2a (plan.md §0): the admin quote feeds "start plan for client", also for a hidden plan.
+test('admin quotes a hidden flexible plan and starts it for a client with that key', async () => {
+  const plan = await flexiblePlan();
+  await Product.updateOne({ _id: plan._id }, { $set: { isHidden: true } });
+  const choice = { planId: String(plan._id), purchase: 'monthly', tenureMonths: 2, files: 10, updates: 1 };
+  assert.equal((await call('/customer/service-plan-quote', { body: choice })).status, 404); // customers see plans on sale only
+  const quoted = await call('/admin/plan-catalogue/quote', { method: 'PATCH', body: choice });
+  assert.equal(quoted.status, 200, quoted.message);
+  const started = await call(`/admin/clients/${client._id}/service-plans`, { body: { ...choice, quoteKey: quoted.data.quoteKey, payment: { mode: 'wallet' } } });
+  assert.equal(started.status, 201, started.message);
+  assert.equal(started.data.finalPrice, quoted.data.quote.firstPayment);
+});
+
+test('upload status is for plan uploads only; downloading a project upload changes nothing', async () => {
+  const project = await Order.collection.insertOne({ userId: client._id, isWebsiteProject: true });
+  const upload = await Request.create({ userId: client._id, updatePlanId: project.insertedId, files: [], instructions: [{ text: 'Project data' }] });
+  const refused = await call(`/admin/uploads/${upload._id}/status`, { body: { status: 'completed', note: 'x' } });
+  assert.equal(refused.status, 422);
+  assert.equal(await markInProgressOnDownload(upload._id, admin._id), null);
+  const stored = await Request.findById(upload._id).lean();
+  assert.deepEqual([stored.status, stored.statusHistory.length], ['pending', 0]);
+});
+
+test('order payloads carry the plan allowance from serviceAllowance.js', async () => {
+  const { applyOrderSummary } = require('../helpers/orderSummary');
+  require('../models/developerModel'); // the summary populates assignedDeveloper
+  const plan = await flexiblePlan();
+  const choice = { planId: String(plan._id), purchase: 'quarterly', tenureMonths: 3, files: 5, updates: 2 };
+  const quoted = await call('/customer/service-plan-quote', { body: choice });
+  const { orderId } = (await walletBuy({ ...choice, quoteKey: quoted.data.quoteKey })).data;
+  await call(`/admin/service-plans/${orderId}/release-mode`, { method: 'PATCH', body: { releaseMode: 'monthly' } });
+  const [row] = await applyOrderSummary(Order.find({ _id: orderId }));
+  assert.deepEqual([row.uploadAllowance.limit, row.uploadAllowance.cycleLimit, row.uploadAllowance.remaining], [2, 6, 2]);
 });

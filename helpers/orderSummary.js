@@ -1,4 +1,5 @@
 const { getOrderState } = require("./orderStatusEngine");
+const { uploadAllowanceNow } = require("./serviceAllowance");
 
 const ORDER_SUMMARY_FIELDS = [
   "userId productId projectSnapshot orderItems isWebsiteProject price totalAmount status projectProgress currentPhase isActive updatesUsed",
@@ -21,6 +22,8 @@ const ORDER_SUMMARY_FIELDS = [
   // orders carry a populated snapshot. Nothing is computed differently — the figure is only
   // being sent to the surfaces that already claim to show it.
   "servicePlanSnapshot serviceAccessUsedInCycle servicePlanEndDate serviceCurrentCycleNumber serviceCurrentCycleEnd serviceTotalCycles serviceNextBillingDate",
+  // Needed by helpers/serviceAllowance.js for monthly release (uploadAllowance below).
+  "serviceCurrentCycleStart serviceBillingCycleMonths",
 ].join(" ");
 
 const PRODUCT_SUMMARY_FIELDS = [
@@ -45,6 +48,9 @@ const PRODUCT_SUMMARY_FIELDS = [
 const attachOrderState = (order) => {
   if (!order) return order;
   order.orderState = getOrderState(order);
+  // A plan's "allowed right now" figure, from the one place that decides it. UIs read this,
+  // never portalAccessCount − used (monthly release opens less than the cycle total).
+  if (order.isServicePlan) order.uploadAllowance = uploadAllowanceNow(order);
   return order;
 };
 

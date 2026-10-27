@@ -23,6 +23,9 @@ async function setUploadStatus({ requestId, status, note = '', actorId = null, a
   await mongoose.connection.transaction(async (session) => {
     const request = await UpdateRequest.findById(requestId).session(session);
     if (!request) fail('Upload not found', 404);
+    // Plan uploads only (owner, 28 Oct 2026); project uploads keep no status.
+    const order = await Order.findById(request.updatePlanId).select('isServicePlan serviceCurrentCycleStart serviceAccessUsedInCycle').session(session);
+    if (!order?.isServicePlan) fail('Status is kept for plan uploads only', 422);
     if (!FROM[status].includes(request.status || 'pending')) {
       fail(auto ? 'already-moved' : `This upload is already ${String(request.status).replace('_', ' ')}`, 409);
     }
@@ -35,8 +38,7 @@ async function setUploadStatus({ requestId, status, note = '', actorId = null, a
     // cycle it was counted in (a later cycle's counter was already reset), and only once.
     let allowanceReturned = false;
     if (status === 'rejected' && !request.allowanceReturnedAt) {
-      const order = await Order.findById(request.updatePlanId).select('isServicePlan serviceCurrentCycleStart serviceAccessUsedInCycle').session(session);
-      const sameCycle = order?.isServicePlan && (!order.serviceCurrentCycleStart || request.createdAt >= order.serviceCurrentCycleStart);
+      const sameCycle = !order.serviceCurrentCycleStart || request.createdAt >= order.serviceCurrentCycleStart;
       if (sameCycle && Number(order.serviceAccessUsedInCycle || 0) > 0) {
         await Order.updateOne(
           { _id: order._id, serviceAccessUsedInCycle: { $gt: 0 } },
@@ -54,12 +56,13 @@ async function setUploadStatus({ requestId, status, note = '', actorId = null, a
   return result;
 }
 
-// Our team downloaded the upload: work has started. Quiet when it already moved on.
+// Our team downloaded the upload: work has started. Quiet when it already moved on or is not a
+// plan upload.
 async function markInProgressOnDownload(requestId, actorId) {
   try {
     return await setUploadStatus({ requestId, status: 'in_progress', actorId, auto: true });
   } catch (error) {
-    if (error.statusCode === 409) return null;
+    if (error.statusCode === 409 || error.statusCode === 422) return null;
     throw error;
   }
 }

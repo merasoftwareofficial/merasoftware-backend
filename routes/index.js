@@ -228,6 +228,7 @@ router.get("/admin/plan-categories", authToken, require('../controller/admin/pla
 router.patch("/admin/plan-categories", authToken, require('../controller/admin/planCategories').savePlanCategoryController);
 router.get("/admin/plan-catalogue", authToken, require('../controller/admin/planCatalogue').listPlanCatalogueController);
 router.patch("/admin/plan-catalogue", authToken, require('../controller/admin/planCatalogue').savePlanController);
+router.patch("/admin/plan-catalogue/quote", authToken, require('../controller/admin/planCatalogue').quotePlanController);
 // Flexible Plans admin actions (controller/admin/servicePlanAdmin.js).
 router.post("/admin/clients/:customerId/service-plans", authToken, require('../controller/admin/servicePlanAdmin').startPlanForClient);
 router.patch("/admin/service-plans/:orderId/release-mode", authToken, require('../controller/admin/servicePlanAdmin').setReleaseMode);

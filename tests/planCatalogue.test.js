@@ -29,7 +29,7 @@ const flexibleBody = (extra = {}) => ({
   files: { min: 5, max: 100, step: 5 }, ratePerFile: 100, slabs: [{ fromFile: 11, ratePerFile: 50 }, { fromFile: 21, ratePerFile: 35 }],
   updatesPerMonth: { min: 1, max: 4 }, allowOneTime: true, oneTimeValidityDays: 90, maxTenureMonths: 12,
   billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }, { billingCycle: 'quarterly', discountPercent: 5 }],
-  description: 'Choose files and updates', ...extra,
+  description: 'Choose files and updates', isHidden: true, ...extra,
 });
 // Exactly what the portal AdminCreateServicePage.js sends for the live Starter Update Plan.
 const portalStarterBody = {
@@ -51,6 +51,9 @@ before(async () => {
   const catalogue = require('../controller/admin/planCatalogue');
   app.get('/admin/plan-catalogue', authToken, catalogue.listPlanCatalogueController);
   app.patch('/admin/plan-catalogue', authToken, catalogue.savePlanController);
+  app.patch('/admin/plan-catalogue/quote', authToken, catalogue.quotePlanController);
+  app.post('/admin/plans/:planId/reactivate', authToken, require('../controller/product/reactivatePlan'));
+  app.post('/unhide-product', authToken, require('../controller/product/unhideProduct'));
   app.post('/admin/services/create', authToken, require('../controller/product/createServicePlan'));
   app.post('/update-product', authToken, require('../controller/product/updateProduct'));
   await PlanCategory.syncIndexes();
@@ -155,8 +158,89 @@ test('B5: /update-product refuses service plans but still edits feature products
   assert.equal((await productModel.findById(feature._id).lean()).serviceName, 'Feature 2');
 });
 
-test('non-admins cannot read or save', async () => {
+test('non-admins cannot read, save, act or quote', async () => {
   assert.equal((await call('/admin/plan-catalogue', { user: customer })).status, 403);
   assert.equal((await save(flexibleBody(), customer)).status, 403);
   assert.equal(await productModel.countDocuments(), 0);
+  const plan = await save(flexibleBody());
+  assert.equal((await save({ action: 'retire', planId: String(plan.data._id) }, customer)).status, 403);
+  assert.equal((await call('/admin/plan-catalogue/quote', { user: customer, body: { planId: String(plan.data._id), purchase: 'one_time', files: 5, updates: 1 } })).status, 403);
+});
+
+const post = (path, body) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie(admin) }, body: JSON.stringify(body || {}) }).then(async (r) => ({ status: r.status, ...await r.json() }));
+
+test('flexible plans stay hidden until the builder is live: save, unhide and restore', async () => {
+  const visible = await save(flexibleBody({ isHidden: false }));
+  assert.equal(visible.status, 409);
+  assert.match(visible.message, /stays hidden/);
+  assert.equal(await productModel.countDocuments(), 0);
+
+  const plan = (await save(flexibleBody())).data;
+  assert.equal(plan.isHidden, true);
+  assert.equal((await call('/admin/plan-catalogue')).data.plans[0].canBeOnSale, false);
+  assert.equal((await save({ action: 'unhide', planId: String(plan._id) })).status, 409);
+  assert.equal((await post('/unhide-product', { _id: String(plan._id) })).status, 400);
+  // An edit that does not send isHidden keeps it hidden.
+  const { isHidden, creating, ...edit } = flexibleBody({ ratePerFile: 90 });
+  assert.equal((await save({ ...edit, planId: String(plan._id) })).status, 200);
+
+  await orderModel.collection.insertOne({ productId: new mongoose.Types.ObjectId(String(plan._id)), userId: customer._id, isServicePlan: true });
+  assert.equal((await save({ action: 'retire', planId: String(plan._id) })).data.action, 'retired');
+  const restored = await post(`/admin/plans/${plan._id}/reactivate`);
+  assert.equal(restored.status, 200, restored.message);
+  assert.equal(restored.data.isHidden, true);
+  assert.equal((await productModel.findById(plan._id).lean()).isHidden, true);
+
+  // Fixed plans still go on sale.
+  const fixed = await save({ ...portalStarterBody, creating: true, categoryKey: 'website_updates', isHidden: true });
+  assert.equal((await save({ action: 'unhide', planId: String(fixed.data._id) })).status, 200);
+  assert.equal((await productModel.findById(fixed.data._id).lean()).isHidden, false);
+});
+
+test('website plan actions: retire (delete when unsold), restore, hide, delete forever', async () => {
+  const fixed = (await save({ ...portalStarterBody, creating: true, categoryKey: 'website_updates' })).data;
+  const unsold = (await save({ ...portalStarterBody, creating: true, categoryKey: 'website_updates', serviceName: 'Unsold' })).data;
+  const feature = await productModel.create({ serviceName: 'Feature', category: 'feature_upgrades', price: 1, sellingPrice: 1 });
+
+  assert.equal((await save({ action: 'retire', planId: String(unsold._id) })).data.action, 'deleted');
+  assert.equal(await productModel.countDocuments({ _id: unsold._id }), 0);
+
+  assert.equal((await save({ action: 'hide', planId: String(fixed._id) })).status, 200);
+  assert.equal((await save({ action: 'unhide', planId: String(fixed._id) })).status, 200);
+  assert.equal((await save({ action: 'purge', planId: String(fixed._id) })).status, 409); // retire first
+
+  await orderModel.collection.insertOne({ productId: new mongoose.Types.ObjectId(String(fixed._id)), userId: customer._id, isServicePlan: true });
+  assert.equal((await save({ action: 'retire', planId: String(fixed._id) })).data.action, 'retired');
+  assert.equal((await save({ action: 'hide', planId: String(fixed._id) })).status, 400); // lifecycle owns it now
+  assert.equal((await call('/admin/plan-catalogue')).data.plans.find((p) => p._id === String(fixed._id)).retired, true);
+  assert.equal((await save({ action: 'restore', planId: String(fixed._id) })).data.isHidden, false);
+
+  await save({ action: 'retire', planId: String(fixed._id) });
+  assert.match((await save({ action: 'purge', planId: String(fixed._id), mode: 'hard', confirmName: 'wrong' })).message, /exact name/);
+  assert.equal((await save({ action: 'purge', planId: String(fixed._id) })).data.action, 'archived');
+  assert.equal((await call('/admin/plan-catalogue')).data.plans.length, 0);
+  assert.equal(await orderModel.countDocuments(), 1); // orders never touched
+
+  assert.equal((await save({ action: 'hide', planId: String(feature._id) })).status, 404); // plans only here
+  assert.equal((await save({ action: 'fly', planId: String(feature._id) })).status, 400);
+});
+
+test('admin quote: saved hidden plan with a key, unsaved form settings without one', async () => {
+  const plan = (await save(flexibleBody())).data; // hidden
+  const quote = (body) => call('/admin/plan-catalogue/quote', { body });
+  const saved = await quote({ planId: String(plan._id), purchase: 'quarterly', tenureMonths: 6, files: 20, updates: 2 });
+  assert.equal(saved.status, 200, saved.message);
+  assert.equal(saved.data.quote.cyclePrice, 8550);
+  assert.match(saved.data.quoteKey, /^[0-9a-f]{64}$/);
+
+  const { creating, ...settings } = flexibleBody({ ratePerFile: 200, categoryKey: undefined, serviceName: '' });
+  const preview = await quote({ settings, purchase: 'one_time', files: 5, updates: 1 });
+  assert.equal(preview.status, 200, preview.message);
+  assert.deepEqual([preview.data.quote.totalPrice, preview.data.quoteKey, preview.data.planId], [1000, undefined, null]);
+  assert.equal(await productModel.countDocuments(), 1); // nothing saved
+
+  assert.equal((await quote({ settings: { ...settings, files: { min: 5, max: 500, step: 5 } }, purchase: 'one_time', files: 5, updates: 1 })).status, 400);
+  assert.equal((await quote({ planId: String(plan._id), purchase: 'one_time', files: 7, updates: 1 })).status, 400);
+  await productModel.updateOne({ _id: plan._id }, { $set: { retiredAt: new Date() } });
+  assert.equal((await quote({ planId: String(plan._id), purchase: 'one_time', files: 5, updates: 1 })).status, 404);
 });

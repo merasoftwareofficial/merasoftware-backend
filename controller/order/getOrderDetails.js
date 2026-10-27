@@ -3,6 +3,7 @@ const invoiceModel = require("../../models/invoiceModel");
 const transactionModel = require("../../models/transactionModel");
 const { getDueUnpaidInvoiceFilter } = require("../../helpers/projectDuePayment");
 const { getOrderState } = require("../../helpers/orderStatusEngine");
+const { uploadAllowanceNow } = require("../../helpers/serviceAllowance");
 const { buildLifecycleTimeline, getCurrentStateSince } = require("../../helpers/orderLifecycleLog");
 
 const toPlainObject = (doc) => {
@@ -123,7 +124,7 @@ const getOrderDetails = async (req, res) => {
                 .select([
                     'productId projectSnapshot orderItems orderVisibility createdAt',
                     'servicePlanSnapshot servicePlanStartDate servicePlanEndDate',
-                    'serviceCurrentCycleStart serviceCurrentCycleEnd',
+                    'serviceCurrentCycleStart serviceCurrentCycleEnd serviceBillingCycleMonths',
                     'serviceAccessUsedInCycle serviceAccessUsedTotal servicePlanStatus',
                     'linkedProjectOrderId addedDuringProjectPhase',
                     // Needed by helpers/orderStatusEngine.js to classify these rows as services
@@ -138,6 +139,7 @@ const getOrderDetails = async (req, res) => {
         // service inside a project reads identically to the badge on that service's own row.
         linkedServices.forEach((service) => {
             service.orderState = getOrderState(service);
+            service.uploadAllowance = uploadAllowanceNow(service);
         });
 
         // A payment the customer has already SUBMITTED but the admin has not yet verified.
@@ -197,6 +199,8 @@ const getOrderDetails = async (req, res) => {
             pendingPayment: pendingPaymentTransaction || null,
             serviceInvoices,
             linkedServices,
+            // "Allowed right now" for a plan (helpers/serviceAllowance.js); null for a project.
+            uploadAllowance: order.isServicePlan ? uploadAllowanceNow(orderData) : null,
         };
 
         if (!isAdmin) {

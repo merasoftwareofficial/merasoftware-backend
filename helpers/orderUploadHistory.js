@@ -111,6 +111,9 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
     .select("_id userId updatePlanId status deliveryStatus createdAt instructions files statusHistory completedAt allowanceReturnedAt")
     .sort({ createdAt: -1 })
     .lean();
+  // Status is kept for plan uploads only (helpers/uploadStatus.js); a project's history also
+  // holds its linked plans' uploads, so each row says which kind it is.
+  const planOrderIds = new Set((await orderModel.find({ _id: { $in: ownerIds }, isServicePlan: true }).select("_id").lean()).map((row) => String(row._id)));
 
   const now = new Date();
 
@@ -133,6 +136,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
     return {
       id: String(request._id),
       orderId: String(request.updatePlanId || ""),
+      isPlanUpload: planOrderIds.has(String(request.updatePlanId || "")),
       status: request.status,
       deliveryStatus: request.deliveryStatus || 'ready',
       createdAt: request.createdAt,
