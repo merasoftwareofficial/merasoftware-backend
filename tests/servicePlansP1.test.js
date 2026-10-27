@@ -11,7 +11,7 @@ const userModel = require('../models/userModel');
 const orderModel = require('../models/orderProductModel');
 const invoiceModel = require('../models/invoiceModel');
 const { resolveServiceRenewalPrice } = require('../helpers/serviceBillingSchedule');
-const { resolveCustomerBillingSelection, MAX_SERVICE_TENURE_MONTHS } = require('../helpers/servicePlanPurchase');
+const { resolvePurchase, MAX_SERVICE_TENURE_MONTHS } = require('../helpers/servicePlanPurchase');
 const { processServicePlanRenewals } = require('../cron/servicePlanRenewalCron');
 const getAdminUserWorkspace = require('../controller/user/getAdminUserWorkspace');
 
@@ -44,11 +44,14 @@ test('renewal price: nothing to bill gives 0', () => {
 test('tenure: up to 12 months is accepted, longer is refused', () => {
   const servicePlan = { billingOptions: [{ billingCycle: 'monthly', pricePerCycle: 1490 }, { billingCycle: 'yearly', pricePerCycle: 16450 }, { billingCycle: 'every_2_years', pricePerCycle: 30000 }] };
   assert.equal(MAX_SERVICE_TENURE_MONTHS, 12);
-  assert.equal(resolveCustomerBillingSelection({ servicePlan, billingCycle: 'monthly', tenureMonths: 12 }).totalCycles, 12);
-  assert.equal(resolveCustomerBillingSelection({ servicePlan, billingCycle: 'yearly', tenureMonths: 12 }).totalCycles, 1);
-  assert.throws(() => resolveCustomerBillingSelection({ servicePlan, billingCycle: 'monthly', tenureMonths: 24 }), /at most 12 months/);
-  assert.throws(() => resolveCustomerBillingSelection({ servicePlan, billingCycle: 'yearly', tenureMonths: 36 }), /at most 12 months/);
-  assert.throws(() => resolveCustomerBillingSelection({ servicePlan, billingCycle: 'every_2_years', tenureMonths: 24 }), /at most 12 months/);
+  // The tenure rule now lives in the quote (servicePlanPricing.js), reached through resolvePurchase().
+  const plan = { _id: 'p1', price: 1490, servicePlan: { ...servicePlan, monthlyReferencePrice: 1490 } };
+  const buy = (selectedBillingCycle, tenureMonths) => resolvePurchase(plan, { selectedBillingCycle, tenureMonths });
+  assert.equal(buy('monthly', 12).billingSelection.totalCycles, 12);
+  assert.equal(buy('yearly', 12).billingSelection.totalCycles, 1);
+  assert.throws(() => buy('monthly', 24), /at most 12 months/);
+  assert.throws(() => buy('yearly', 36), /at most 12 months/);
+  assert.throws(() => buy('every_2_years', 24), /not available/);
 });
 
 test('renewal cron bills the frozen order price, not the snapshot option', async () => {

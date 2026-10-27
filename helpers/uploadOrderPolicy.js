@@ -22,7 +22,10 @@ async function assertUploadOrder(order, { fileCount, serviceOrderId }) {
       const access = await require('./offerPaymentPolicy').getPaymentAccess(order);
       if (!access.allowed) reject(access.reason);
     }
-    if (s.limitScope !== 'unlimited' && Number(order.serviceAccessUsedInCycle || 0) >= Number(s.portalAccessCount || 0)) reject('Selected service upload limit is used');
+    const allowance = require('./serviceAllowance').uploadAllowanceNow(order);
+    if (!allowance.unlimited && allowance.remaining <= 0) {
+      reject(allowance.nextReleaseAt ? 'This month\'s uploads are used. More open next month.' : 'Selected service upload limit is used');
+    }
     if (fileCount > Math.min(limits.MAX_SERVICE_FILES_PER_UPLOAD, Number(s.filesLimit || 0))) reject('Too many files for the selected service');
   } else if (isProjectUpload) {
     const refusal = await assertProjectAcceptsUpload(order);

@@ -929,4 +929,107 @@ definitions['offer.reservation.extended'] = {
     } };
   },
 };
+
+// --- Plans: every step of a service plan (merasoftware/src/docs/plan.md §4 "Plan communication").
+// Sent by helpers/servicePlanNotifications.js as system mail (WhatsApp mirrors every sent mail).
+const planLink = order => link(process.env.ADMIN_DASHBOARD_URL, `/plan-details/${order?._id}`);
+const planTitle = order => text(order?.servicePlanSnapshot?.serviceName || getOrderDisplayName(order, 'Your plan'));
+// What the customer gets, in words, from the order's own frozen snapshot.
+const planGets = (order) => {
+  const s = order?.servicePlanSnapshot || {};
+  if (s.capability !== 'upload_data') return '';
+  const files = s.filesLimit ? `${s.filesLimit} files per update` : '';
+  const updates = s.limitScope === 'unlimited' ? 'Unlimited updates'
+    : s.selectedBillingCycle ? `${s.portalAccessCount} update(s) per billing period` : `${s.portalAccessCount} update(s)`;
+  return [updates, files].filter(Boolean).join(', ');
+};
+const CYCLE_WORDS = { monthly: 'Monthly', quarterly: 'Every 3 months', half_yearly: 'Every 6 months', yearly: 'Yearly' };
+const PLAN_LINK = detail('Plan page link', 'https://app.merasoftware.com/plan-details/123', 'The customer’s own plan page');
+const UPLOADED_ON = detail('Uploaded on', '28 Oct 2026, 11:30 am IST', 'When the customer sent this upload');
+const NOTE = detail('Note from our team', 'Banner changed on the home page.', 'Empty when no note was written');
+const uploadValues = (request, order, note) => ({
+  name: text(request?.userId?.name), plan: planTitle(order), uploadedOn: moment(request?.createdAt),
+  files: request?.files?.length ? `${request.files.length} file(s)` : '', note: text(note), link: planLink(order),
+});
+const UPLOAD_VARIABLES = { name: NAME, plan: PLAN, uploadedOn: UPLOADED_ON, files: detail('Files', '3 file(s)'), note: NOTE, link: PLAN_LINK };
+
+definitions['plan.started'] = {
+  subject: 'Your plan {{plan}} has started',
+  text: lines('Hello {{name}},', '',
+    'Your plan **{{plan}}** is now active.', '',
+    '**What you get:** {{gets}}', '**Billing:** {{billing}}', '**Paid now:** {{paid}}', '**Plan runs until:** {{endsOn}}', '',
+    'You can send your data from your plan page whenever you are ready. We will tell you at every step.',
+    '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: {
+    name: NAME, plan: PLAN, gets: detail('What the customer gets', '3 update(s) per billing period, 20 files per update', 'Empty for a plan without uploads'),
+    billing: detail('Billing', 'Every 3 months', '“One-time” for a one-time plan'), paid: detail('Paid now', '₹4,336', 'Empty when nothing was paid yet'),
+    endsOn: detail('Plan end date', '28 Apr 2027', 'Empty when the plan has no end date'), link: PLAN_LINK,
+  },
+  blocks: {},
+  build(order, invoice) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    const s = order.servicePlanSnapshot || {};
+    return { to: [user.email], values: {
+      name: text(user.name), plan: planTitle(order), gets: planGets(order),
+      billing: CYCLE_WORDS[s.selectedBillingCycle] || 'One-time', paid: invoice?.status === 'paid' ? money(invoice.amount) : '',
+      endsOn: day(order.servicePlanEndDate), link: planLink(order),
+    } };
+  },
+};
+definitions['plan.payment.received'] = {
+  subject: 'Payment received for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'We have received your payment for **{{plan}}**.', '',
+    '**Amount:** {{amount}}', '**Invoice:** {{invoiceNumber}}', '**Period:** {{period}}', '',
+    'Thank you!', '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: NAME, plan: PLAN, amount: detail('Amount', '₹4,336'), invoiceNumber: INVOICE_NUMBER,
+    period: detail('Period paid for', '28 Jan 2027 – 28 Apr 2027', 'Empty when the period is not known yet'), link: PLAN_LINK },
+  blocks: {},
+  build(order, invoice) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    const period = order.serviceCurrentCycleStart && order.serviceCurrentCycleEnd ? `${day(order.serviceCurrentCycleStart)} – ${day(order.serviceCurrentCycleEnd)}` : '';
+    return { to: [user.email], values: {
+      name: text(user.name), plan: planTitle(order), amount: money(invoice?.amount), invoiceNumber: text(invoice?.invoiceNumber), period, link: planLink(order),
+    } };
+  },
+};
+definitions['plan.upload.in_progress'] = {
+  subject: 'We are working on your update for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'We have taken the data you sent on {{uploadedOn}} ({{files}}) for **{{plan}}** and started working on it.', '',
+    '{{note}}', '',
+    'We will tell you when it is done.', '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: UPLOAD_VARIABLES,
+  blocks: {},
+  build(request, order, note) {
+    return request?.userId?.email ? { to: [request.userId.email], values: uploadValues(request, order, note) } : null;
+  },
+};
+definitions['plan.upload.completed'] = {
+  subject: 'Your update for {{plan}} is done',
+  text: lines('Hello {{name}},', '',
+    'The update you sent on {{uploadedOn}} for **{{plan}}** is complete.', '',
+    '**Note from our team:** {{note}}', '',
+    'Please check it, and reply if anything needs a change.', '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: UPLOAD_VARIABLES,
+  blocks: {},
+  build(request, order, note) {
+    return request?.userId?.email ? { to: [request.userId.email], values: uploadValues(request, order, note) } : null;
+  },
+};
+definitions['plan.upload.rejected'] = {
+  subject: 'Please send your data again for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'We could not use the data you sent on {{uploadedOn}} for **{{plan}}**.', '',
+    '**Reason:** {{note}}', '',
+    'This upload has not used any of your plan’s updates. Please send the data again from your plan page.',
+    '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: UPLOAD_VARIABLES,
+  blocks: {},
+  build(request, order, note) {
+    return request?.userId?.email ? { to: [request.userId.email], values: uploadValues(request, order, note) } : null;
+  },
+};
 module.exports = { definitions, refundTable };

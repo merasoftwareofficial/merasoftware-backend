@@ -53,6 +53,8 @@ const settleServiceCycle = async ({ orderId, invoice, now = new Date() }) => {
 
   await service.save();
   await syncServiceBillingStatement(service);
+  // Every paid cycle (wallet purchase, approved UPI, admin start) tells the client once.
+  require('./servicePlanNotifications').notifyCyclePaid(service._id, invoice);
   return service;
 };
 

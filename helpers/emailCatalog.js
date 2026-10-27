@@ -37,12 +37,20 @@ const events = [
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation', 'Subscription'],
   ['website.subscription.manage', 'Website', 'Subscription management', 'Subscription'],
+  ['plan.started', 'Plans', 'Plan started', 'Plan steps'],
+  ['plan.payment.received', 'Plans', 'Plan payment received', 'Plan steps'],
+  ['plan.upload.in_progress', 'Plans', 'Plan upload in progress', 'Plan upload status'],
+  ['plan.upload.completed', 'Plans', 'Plan upload done', 'Plan upload status'],
+  ['plan.upload.rejected', 'Plans', 'Plan upload rejected', 'Plan upload status'],
 ];
 // Mail a customer's own portal action starts. It never asks anyone: the action is On (mail
 // sends at once) or Off (no mail). Every other action's user reviews its mail first.
 const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserConfirmation', 'sendAdminUPIPendingNotification']);
 // Sent by the server itself (scheduler or a committed reservation operation), never a draft.
-const SYSTEM_TRIGGERED = new Set(['offer.payment.reminder', 'offer.reserved', 'offer.reservation.extended']);
+// Plan steps are system mail too: they go out the moment the step happens (the client is told at
+// every step), whichever request or job caused it (helpers/servicePlanNotifications.js).
+const SYSTEM_TRIGGERED = new Set(['offer.payment.reminder', 'offer.reserved', 'offer.reservation.extended',
+  'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected']);
 const catalog = events.map(([key, section, label, group = label]) => ({
   key, section, label, group, application: section === 'Website' ? 'website' : 'portal',
   trigger: SYSTEM_TRIGGERED.has(key) ? 'system' : CUSTOMER_TRIGGERED.has(key) ? 'customer' : 'admin',

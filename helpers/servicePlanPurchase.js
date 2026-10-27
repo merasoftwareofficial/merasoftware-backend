@@ -7,7 +7,7 @@
 // place regardless of where the purchase is initiated from.
 
 const SERVICE_PLAN_CATEGORY = "service_plan";
-const { deriveTotalCycles, addMonths } = require("./serviceBillingSchedule");
+const { addMonths } = require("./serviceBillingSchedule");
 
 const VALIDITY_UNIT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
 
@@ -59,35 +59,56 @@ const runsIndefinitely = (servicePlan = {}) =>
   !servicePlan.validityInDays &&
   !servicePlan.validityValue;
 
-// Longest term a recurring service is sold for. The portal's serviceTenure.js lists only
-// terms up to the same cap; this check is what actually enforces it.
-const MAX_SERVICE_TENURE_MONTHS = 12;
+// Longest term a recurring service is sold for: the pricing SSOT's cap (servicePlanPricing.js),
+// which the quote enforces. The portal's serviceTenure.js lists only terms up to the same cap.
+const { MAX_TENURE_MONTHS: MAX_SERVICE_TENURE_MONTHS, quoteServicePlan, planQuoteKey, pricingMode } = require('./servicePlanPricing');
 
-const resolveCustomerBillingSelection = ({ servicePlan = {}, billingCycle, tenureMonths }) => {
-  const cycleMonths = BILLING_CYCLE_MONTHS[billingCycle];
-  const option = Array.isArray(servicePlan.billingOptions)
-    ? servicePlan.billingOptions.find((item) => item.billingCycle === billingCycle)
-    : null;
-  if (!cycleMonths || !option || !Number.isFinite(Number(option.pricePerCycle)) || Number(option.pricePerCycle) < 0) {
-    throw new Error('The selected billing option is not available for this service');
-  }
-  if (tenureMonths === undefined || tenureMonths === null || tenureMonths === '') {
-    throw new Error('Total tenure is required for a recurring service');
-  }
-  const resolvedTenureMonths = Number(tenureMonths);
-  if (resolvedTenureMonths > MAX_SERVICE_TENURE_MONTHS) {
-    throw new Error(`A service can be bought for at most ${MAX_SERVICE_TENURE_MONTHS} months`);
-  }
-  const totalCycles = deriveTotalCycles({ tenureMonths: resolvedTenureMonths, cycleMonths });
-  return {
-    billingCycle,
-    cycleMonths,
-    tenureMonths: resolvedTenureMonths,
-    totalCycles,
+const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
+
+// Decides what a purchase costs and runs for, from the plan and the customer's choices — the one
+// path for the customer purchase and the admin "start plan for client". The price always comes
+// from quoteServicePlan(); nothing from the request is trusted except the choices it validates.
+//
+// Request fields: purchase ('one_time' | billing cycle), tenureMonths, files, updates, releaseMode,
+// quoteKey. The portal page built before Flexible Plans sends selectedBillingCycle instead of
+// purchase and no quoteKey; that still works for fixed plans. A flexible plan needs a quoteKey.
+//
+// Returns { quote, quoteKey, billingSelection, oneTimeValidityDays } or null for an old plan the
+// quote does not cover (fixed, recurring, but no billing options): it keeps its validity-window path.
+function resolvePurchase(plan, body = {}) {
+  const servicePlan = plan.servicePlan || {};
+  const flexible = pricingMode(servicePlan) === 'flexible';
+  const hasOptions = (servicePlan.billingOptions || []).length > 0;
+  if (!flexible && !hasOptions && servicePlan.purchaseType !== 'one_time') return null;
+
+  const purchase = body.purchase || body.selectedBillingCycle || (!hasOptions ? 'one_time' : undefined);
+  if (!purchase) fail('Choose how you want to pay for this plan');
+  const quote = quoteServicePlan(plan, {
+    purchase,
+    tenureMonths: body.tenureMonths,
+    files: body.files,
+    updates: body.updates,
+    releaseMode: body.releaseMode,
+  });
+  const quoteKey = planQuoteKey(plan, quote);
+  if (flexible && !body.quoteKey) fail('Check the price before buying this plan');
+  if (body.quoteKey && body.quoteKey !== quoteKey) fail('The plan or its price changed. Check the new price and try again.', 409);
+
+  const billingSelection = quote.purchase === 'one_time' ? null : {
+    billingCycle: quote.purchase,
+    cycleMonths: quote.cycleMonths,
+    tenureMonths: quote.tenureMonths,
+    totalCycles: quote.totalCycles,
     autoRenew: false,
-    firstPayment: Number(option.pricePerCycle),
+    firstPayment: quote.cyclePrice,
   };
-};
+  // One-time: an upload plan without its own (older) validity runs for the one-time validity
+  // (default 90 days, owner decision Q3); other one-time plans keep their previous behaviour.
+  const oneTimeValidityDays = quote.purchase === 'one_time' && servicePlan.capability === 'upload_data' && runsIndefinitely(servicePlan)
+    ? quote.validityDays
+    : null;
+  return { quote, quoteKey, billingSelection, oneTimeValidityDays };
+}
 
 // Builds the full order document for a purchased service plan: the frozen
 // config snapshot, the validity window, and the first service cycle.
@@ -103,12 +124,24 @@ const buildServicePlanOrderData = ({
   addedDuringProjectPhase = null,
   startDate = new Date(),
   billingSelection = null,
+  // From resolvePurchase(): the quote (choices + price) and a one-time validity to apply.
+  quote = null,
+  oneTimeValidityDays = null,
 }) => {
   const servicePlan = plan.servicePlan || {};
   const waitsForProjectCompletion = servicePlan.timing === 'after' && addedDuringProjectPhase === 'in_progress' && linkedProjectOrderId;
+  if (oneTimeValidityDays) validityInDays = oneTimeValidityDays;
 
   const isCustomerConfigured = Boolean(billingSelection);
-  const isIndefinite = isCustomerConfigured ? false : runsIndefinitely(servicePlan);
+  const isIndefinite = isCustomerConfigured || oneTimeValidityDays ? false : runsIndefinitely(servicePlan);
+  // What the customer may use: from the quote when there is one (a "per month" plan bought
+  // quarterly gets 3 × its monthly count), else the plan's own figures as before.
+  const allowance = quote && quote.allowancePerCycle !== null && quote.allowancePerCycle !== undefined
+    ? quote.allowancePerCycle
+    : servicePlan.portalAccessCount;
+  const updatesPerMonth = quote && quote.purchase !== 'one_time'
+    ? (quote.pricingMode === 'flexible' ? quote.updates : (servicePlan.limitScope === 'per_month' ? servicePlan.portalAccessCount : undefined))
+    : undefined;
   const endDate = waitsForProjectCompletion ? null : (isCustomerConfigured
     ? (billingSelection.tenureMonths ? addMonths(startDate, billingSelection.tenureMonths) : null)
     : (isIndefinite ? null : addDays(startDate, validityInDays)));
@@ -161,8 +194,8 @@ const buildServicePlanOrderData = ({
       limitScope: servicePlan.limitScope,
       manualUnit: servicePlan.manualUnit,
       manualCount: servicePlan.manualCount,
-      portalAccessCount: servicePlan.portalAccessCount,
-      filesLimit: servicePlan.filesLimit,
+      portalAccessCount: allowance,
+      filesLimit: quote?.files ?? servicePlan.filesLimit,
       validityUnit: servicePlan.validityUnit,
       validityValue: servicePlan.validityValue,
       validityInDays,
@@ -174,6 +207,24 @@ const buildServicePlanOrderData = ({
       tenureMonths: billingSelection?.tenureMonths,
       totalCycles: billingSelection?.totalCycles,
       autoRenew: false,
+      categoryKey: servicePlan.categoryKey,
+      pricingMode: quote?.pricingMode,
+      chosenFiles: quote?.files ?? undefined,
+      chosenUpdates: quote?.updates ?? undefined,
+      updatesPerMonth,
+      releaseMode: quote?.releaseMode,
+      oneTimeValidityDays: oneTimeValidityDays || undefined,
+      priceBreakdown: quote ? {
+        updatePrice: quote.updatePrice ?? undefined,
+        perMonthPrice: quote.perMonthPrice ?? undefined,
+        subtotal: quote.subtotal,
+        discountPercent: quote.discountPercent,
+        discount: quote.discount,
+        cyclePrice: quote.cyclePrice,
+        totalPrice: quote.totalPrice,
+        cycleMonths: quote.cycleMonths ?? undefined,
+        totalCycles: quote.totalCycles,
+      } : undefined,
     },
     servicePlanStartDate: waitsForProjectCompletion ? null : startDate,
     servicePlanEndDate: endDate,
@@ -208,7 +259,7 @@ module.exports = {
   resolveServicePlanPrice,
   resolveValidityInDays,
   runsIndefinitely,
-  resolveCustomerBillingSelection,
+  resolvePurchase,
   MAX_SERVICE_TENURE_MONTHS,
   buildServicePlanOrderData,
 };

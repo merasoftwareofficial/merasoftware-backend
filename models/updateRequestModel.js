@@ -79,6 +79,17 @@ const updateRequestSchema = new mongoose.Schema({
     }
   }],
   completedAt: Date,
+  // Every status change by our team, oldest first, with the note the client sees
+  // (helpers/uploadStatus.js). The client's own instructions stay in `instructions`.
+  statusHistory: [{
+    status: { type: String, enum: ['in_progress', 'completed', 'rejected'] },
+    note: { type: String, default: '', maxlength: 2000 },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'user' },
+    auto: { type: Boolean, default: false },
+    at: { type: Date, default: Date.now }
+  }],
+  // Set when a rejected upload gave its plan update back (once only).
+  allowanceReturnedAt: { type: Date, default: null },
 }, {
   timestamps: true
 });

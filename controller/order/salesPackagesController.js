@@ -1,5 +1,5 @@
-const { timingSafeEqual } = require('node:crypto');
 const User = require('../../models/userModel');
+const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
 const { catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
@@ -41,11 +41,7 @@ const adminUnlinkPage = handle(async (req, res) => {
   res.json({ success: true, data: { pageSlug: req.body.pageSlug, updated } });
 });
 const integrationRead = handle(async (req, res) => {
-  const secret = process.env.PORTFOLIO_INTEGRATION_SECRET || '';
-  if (secret.length < 32) fail('Sales integration is not configured', 503);
-  const expected = Buffer.from(`Bearer ${secret}`);
-  const actual = Buffer.from(req.get('authorization') || '');
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) fail('Unauthorized integration', 401);
+  requireIntegration(req);
   const { offers } = await fetchWebsiteCatalogue();
   const packages = await catalogueWithQuotes(offers);
   // Category names for the public package cards; only active categories, key and name only.

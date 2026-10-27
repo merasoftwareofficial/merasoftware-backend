@@ -23,7 +23,7 @@ const {
   resolveServicePlanPrice,
   resolveValidityInDays,
   runsIndefinitely,
-  resolveCustomerBillingSelection,
+  resolvePurchase,
 } = require("../../helpers/servicePlanPurchase");
 
 // Customer-side purchase path for Service Plan products (category "service_plan").
@@ -58,8 +58,6 @@ const customerCreateServicePlanOrder = async (req, res) => {
       linkedProjectOrderId,
       addedDuringProjectPhase,
       paymentDetails,
-      selectedBillingCycle,
-      tenureMonths,
     } = req.body;
 
     if (!planId) {
@@ -92,10 +90,12 @@ const customerCreateServicePlanOrder = async (req, res) => {
 
     const servicePlan = plan.servicePlan || {};
 
-    const billingSelection = Array.isArray(servicePlan.billingOptions) && servicePlan.billingOptions.length
-      ? resolveCustomerBillingSelection({ servicePlan, billingCycle: selectedBillingCycle, tenureMonths })
-      : null;
-    const finalPrice = billingSelection ? billingSelection.firstPayment : resolveServicePlanPrice(plan);
+    // Price, term and choices from the one purchase rule (servicePlanPurchase.js resolvePurchase →
+    // servicePlanPricing.js). null only for an old recurring plan without billing options, which
+    // keeps its catalogue price and validity window.
+    const purchase = resolvePurchase(plan, req.body);
+    const billingSelection = purchase?.billingSelection || null;
+    const finalPrice = purchase ? purchase.quote.firstPayment : resolveServicePlanPrice(plan);
 
     if (!Number.isFinite(finalPrice) || finalPrice <= 0) {
       return res.status(400).json({
@@ -163,7 +163,7 @@ const customerCreateServicePlanOrder = async (req, res) => {
     // ----- Validity + first cycle window -----
     const validityInDays = resolveValidityInDays(servicePlan);
 
-    if (!billingSelection && !runsIndefinitely(servicePlan) && (!Number.isFinite(validityInDays) || validityInDays <= 0)) {
+    if (!billingSelection && !purchase?.oneTimeValidityDays && !runsIndefinitely(servicePlan) && (!Number.isFinite(validityInDays) || validityInDays <= 0)) {
       return res.status(400).json({
         message: "This plan has no valid duration configured. Please contact support.",
         error: true,
@@ -179,7 +179,7 @@ const customerCreateServicePlanOrder = async (req, res) => {
     if (req.body.deferPayment) {
       if (typeof req.body.purchaseKey !== 'string' || !/^[a-f\d-]{36}$/i.test(req.body.purchaseKey)) throw new Error('A purchase identifier is required. Refresh and retry.');
       purchaseKey = `${userId}:${req.body.purchaseKey}`;
-      purchaseHash = require('node:crypto').createHash('sha256').update(JSON.stringify({ planId: String(plan._id), offer: req.body.offerQuoteKey, linkedProjectOrderId: linkedOrder ? String(linkedOrder._id) : null, billingSelection })).digest('hex');
+      purchaseHash = require('node:crypto').createHash('sha256').update(JSON.stringify({ planId: String(plan._id), offer: req.body.offerQuoteKey, linkedProjectOrderId: linkedOrder ? String(linkedOrder._id) : null, billingSelection, choice: purchase ? { files: purchase.quote.files, updates: purchase.quote.updates, releaseMode: purchase.quote.releaseMode, purchase: purchase.quote.purchase } : null })).digest('hex');
       const previous = await orderModel.findOne({ serviceOfferPurchaseKey: purchaseKey });
       if (previous) {
         if (previous.serviceOfferPurchaseHash !== purchaseHash) throw new Error('This purchase identifier belongs to different selections');
@@ -203,6 +203,8 @@ const customerCreateServicePlanOrder = async (req, res) => {
       addedDuringProjectPhase: resolvedPhase,
       startDate,
       billingSelection,
+      quote: purchase?.quote || null,
+      oneTimeValidityDays: purchase?.oneTimeValidityDays || null,
     });
 
     const endDate = orderData.servicePlanEndDate;
@@ -236,6 +238,8 @@ const customerCreateServicePlanOrder = async (req, res) => {
     } else invoice = await createProjectInvoice(invoiceData);
     if (req.body.deferPayment) {
       await require('../../helpers/serviceBillingStatement').syncServiceBillingStatement(order);
+      // Agreed pay-later terms: the plan is working before payment, so it has started.
+      require('../../helpers/servicePlanNotifications').notifyPlanStarted(order._id, invoice);
       return res.status(201).json({ success: true, message: 'Service created with the agreed payment terms', data: { orderId: order._id, invoiceId: invoice._id, finalPrice, walletPaid: 0, upiPending: 0, paymentPending: true, dueDate: invoice.dueDate } });
     }
 
@@ -348,7 +352,7 @@ const customerCreateServicePlanOrder = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(400).json({
+    return res.status(error.statusCode || 400).json({
       message: error.message || "Failed to purchase service plan",
       error: true,
       success: false,

@@ -99,7 +99,9 @@ async function commitSubmission(req, { instructions, files, receipt = false }) {
           || (snapshot.capability !== 'upload_data' && snapshot.serviceBehavior !== 'portal_access_control')
           || files.length > Number(snapshot.filesLimit || 0)) throw failure('Selected service no longer accepts this upload', 400);
         const filter = { _id: current._id, servicePlanStatus: 'active' };
-        if (snapshot.limitScope !== 'unlimited') filter.$expr = { $lt: [{ $ifNull: ['$serviceAccessUsedInCycle', 0] }, Number(snapshot.portalAccessCount || 0)] };
+        // Same "allowed right now" limit as every other upload path (helpers/serviceAllowance.js).
+        const allowanceExpr = require('./serviceAllowance').reservationExpr(current);
+        if (allowanceExpr) filter.$expr = allowanceExpr;
         const reserved = await Order.updateOne(filter, { $inc: { serviceAccessUsedInCycle: 1, serviceAccessUsedTotal: 1 } }, { session });
         if (reserved.modifiedCount !== 1) throw failure('Selected service upload allowance is used', 400);
       } else {

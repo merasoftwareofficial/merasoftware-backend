@@ -206,6 +206,9 @@ router.patch('/admin/sales-packages', authToken, require('../controller/order/sa
 router.patch('/admin/sales-packages/offer-links', authToken, require('../controller/order/salesPackagesController').adminLinkOffer);
 router.patch('/admin/sales-packages/page-unlink', authToken, require('../controller/order/salesPackagesController').adminUnlinkPage);
 router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
+// Flexible Plans: public plan catalogue + estimator quote for the website (bearer, helpers/integrationAuth.js).
+router.get('/integration/plan-catalogue', require('../controller/order/servicePlanQuote').integrationCatalogue);
+router.patch('/integration/plan-catalogue/quote', require('../controller/order/servicePlanQuote').integrationQuote);
 router.post("/admin/clients/:customerId/documents", authToken, upload.any(), uploadClientDocumentController);
 router.get("/admin/clients/:customerId/documents", authToken, getAdminClientDocumentsController);
 router.get("/admin/clients/:customerId/credentials", authToken, getClientCredentialsController);
@@ -225,6 +228,10 @@ router.get("/admin/plan-categories", authToken, require('../controller/admin/pla
 router.patch("/admin/plan-categories", authToken, require('../controller/admin/planCategories').savePlanCategoryController);
 router.get("/admin/plan-catalogue", authToken, require('../controller/admin/planCatalogue').listPlanCatalogueController);
 router.patch("/admin/plan-catalogue", authToken, require('../controller/admin/planCatalogue').savePlanController);
+// Flexible Plans admin actions (controller/admin/servicePlanAdmin.js).
+router.post("/admin/clients/:customerId/service-plans", authToken, require('../controller/admin/servicePlanAdmin').startPlanForClient);
+router.patch("/admin/service-plans/:orderId/release-mode", authToken, require('../controller/admin/servicePlanAdmin').setReleaseMode);
+router.post("/admin/uploads/:requestId/status", authToken, require('../controller/admin/servicePlanAdmin').setUploadStatusController);
 router.get("/admin/message-templates", authToken, getMessageTemplatesController);
 router.post("/admin/message-templates", authToken, createMessageTemplateController);
 router.put("/admin/message-templates/:templateId", authToken, updateMessageTemplateController);
@@ -317,6 +324,7 @@ router.post("/create-order", authToken, createOrder)
 // Service Plan purchase — standalone, or as an add-on attached to a project.
 // Single service: wallet, UPI or combined. Bulk: wallet only (doc 55 §10).
 router.post("/customer/service-plan-order", authToken, customerCreateServicePlanOrder)
+router.post("/customer/service-plan-quote", authToken, require('../controller/order/servicePlanQuote').customerQuote)
 router.get('/customer/service-plan-offers/:planId', authToken, require('../controller/order/servicePlanOffers'))
 router.post("/customer/custom-project-order", authToken, customerCreateCustomProjectOrder)
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)

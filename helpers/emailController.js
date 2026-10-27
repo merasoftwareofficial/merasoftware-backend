@@ -287,8 +287,16 @@ async function sendReservationMail(event, reservation, user, dedupeKey) {
   if (history?.status === 'sent') return 'sent';
   const mail = require('./emailTemplates').buildTemplatedMail(event, reservation, user);
   if (!mail) throw new Error('Reservation mail website URL or recipient is unavailable');
+  return sendSystemMail(event, mail, dedupeKey, '/offer-reservations');
+}
+// Sends one system-triggered mail (emailCatalog.js SYSTEM_TRIGGERED) outside any review: staged,
+// recorded, then sent through decide() like a reviewed send, so the action's On/Off policy and the
+// WhatsApp mirror apply. dedupeKey makes it once-only: a retry or a second caller returns 'sent'.
+async function sendSystemMail(event, mail, dedupeKey, source) {
+  const history = await EmailHistory.findOne({ dedupeKey }).lean();
+  if (history?.status === 'sent') return 'sent';
   mail.dedupeKey = dedupeKey;
-  const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: '/offer-reservations', userId: null } };
+  const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: source, userId: null } };
   const result = await requestScope.run(scope, () => queueMail(event, mail));
   if (!result.draftId) return 'paused';
   const draft = await EmailDraft.findOneAndUpdate({ _id: result.draftId, status: 'staged' }, { $set: { status: 'pending' } }, { new: true }) || await EmailDraft.findById(result.draftId);
@@ -299,4 +307,4 @@ async function sendReservationMail(event, reservation, user, dedupeKey) {
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
   return decision.status === 'sent' ? 'sent' : 'paused';
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail };
+module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };

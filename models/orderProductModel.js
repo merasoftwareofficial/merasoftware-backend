@@ -710,7 +710,35 @@ const orderSchema = new mongoose.Schema({
         selectedBillingCycle: String,
         selectedBillingCycleMonths: Number,
         tenureMonths: Number,
-        autoRenew: Boolean
+        autoRenew: Boolean,
+        // ── Flexible Plans: what the customer chose and paid, frozen at purchase ──
+        // (helpers/servicePlanPricing.js quote). Absent on orders bought before.
+        categoryKey: String,
+        pricingMode: String,
+        chosenFiles: Number,
+        chosenUpdates: Number,
+        // Updates opened per month; with releaseMode 'monthly' helpers/serviceAllowance.js opens
+        // them month by month inside the cycle.
+        updatesPerMonth: Number,
+        releaseMode: String,
+        oneTimeValidityDays: Number,
+        priceBreakdown: {
+            updatePrice: Number,
+            perMonthPrice: Number,
+            subtotal: Number,
+            discountPercent: Number,
+            discount: Number,
+            cyclePrice: Number,
+            totalPrice: Number,
+            cycleMonths: Number,
+            totalCycles: Number
+        }
+    },
+    // When the "plan started" message went out (helpers/servicePlanNotifications.js), so it is
+    // sent once, whichever path activates the plan first.
+    serviceStartNotifiedAt: {
+        type: Date,
+        default: null
     },
     // Add-on service linkage. A service order can be bought two ways:
     //   linkedProjectOrderId === null -> standalone plan (existing behaviour)

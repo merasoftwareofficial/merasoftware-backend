@@ -203,7 +203,6 @@ const submitCore = asyncHandler(async (req, res) => {
       requestPersisted = true;
     } else {
       if (isServiceUpload) {
-        const snapshot = updatePlan.servicePlanSnapshot || {};
         const reservationFilter = {
           _id: new ObjectId(planId),
           userId: new ObjectId(userId),
@@ -212,14 +211,9 @@ const submitCore = asyncHandler(async (req, res) => {
           planStatus: { $ne: 'closed' },
           autoRenewalStatus: { $ne: 'paused' },
         };
-        if (snapshot.limitScope !== 'unlimited') {
-          reservationFilter.$expr = {
-            $lt: [
-              { $ifNull: ['$serviceAccessUsedInCycle', 0] },
-              Number(snapshot.portalAccessCount || 0),
-            ],
-          };
-        }
+        // Same "allowed right now" limit as every other upload path (helpers/serviceAllowance.js).
+        const allowanceExpr = require('../../helpers/serviceAllowance').reservationExpr(updatePlan);
+        if (allowanceExpr) reservationFilter.$expr = allowanceExpr;
         const reservedOrder = await measureUpload(timing, 'service_allowance_reserve', () => orderModel.findOneAndUpdate(
           reservationFilter,
           { $inc: { serviceAccessUsedInCycle: 1, serviceAccessUsedTotal: 1 } },

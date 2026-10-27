@@ -160,10 +160,19 @@ function quoteServicePlan(plan, choice = {}) {
   if (!isWhole(tenureMonths) || tenureMonths < cycleMonths || tenureMonths % cycleMonths !== 0) fail('Total length must be a whole number of billing periods');
   if (tenureMonths > maxTenure) fail(`This plan can be bought for at most ${maxTenure} months`);
 
-  const perMonth = mode === 'flexible' ? updatePrice * updates : Number(sp.monthlyReferencePrice || 0);
-  const subtotal = rupees(perMonth * cycleMonths);
   const discountPercent = Number(option.discountPercent || 0);
-  const cyclePrice = cyclePriceFromMonthly(perMonth, cycleMonths, discountPercent);
+  // Fixed: the price stored on the billing option is what the admin set and what was always
+  // charged; only rounded here. A plan without one is worked out from its monthly price.
+  const storedCyclePrice = mode === 'fixed' && Number.isFinite(Number(option.pricePerCycle)) && option.pricePerCycle !== null && option.pricePerCycle !== undefined
+    ? rupees(option.pricePerCycle)
+    : null;
+  const perMonth = mode === 'flexible'
+    ? updatePrice * updates
+    : (Number(sp.monthlyReferencePrice) > 0 || storedCyclePrice === null || discountPercent >= 100
+      ? Number(sp.monthlyReferencePrice || 0)
+      : storedCyclePrice / cycleMonths / (1 - discountPercent / 100));
+  const subtotal = rupees(perMonth * cycleMonths);
+  const cyclePrice = storedCyclePrice ?? cyclePriceFromMonthly(perMonth, cycleMonths, discountPercent);
   if (!(cyclePrice > 0)) fail('This plan has no price. Please contact support.');
   const totalCycles = tenureMonths / cycleMonths;
   return {
@@ -175,7 +184,43 @@ function quoteServicePlan(plan, choice = {}) {
   };
 }
 
+// The plan's settings in one canonical form, so a hash is the same whether the plan was read as a
+// lean row or a model document. A document adds empty nested objects and default empty arrays
+// (files: {}, slabs: []) that a stored row does not have; dropping empty values and sorting keys
+// makes both read the same, while any real setting change still changes the hash.
+const canonical = (value) => {
+  if (Array.isArray(value)) {
+    const items = value.map(canonical).filter((item) => item !== undefined);
+    return items.length ? items : undefined;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value).sort()
+      .map((key) => [key, canonical(value[key])])
+      .filter(([, item]) => item !== undefined);
+    return entries.length ? Object.fromEntries(entries) : undefined;
+  }
+  return value === null ? undefined : value;
+};
+const planSettings = (plan) => canonical(JSON.parse(JSON.stringify(plan.servicePlan || {}))) || {};
+
+// Proof that a quote is still current: the plan, its settings and price, the customer's choices
+// and the amount. The purchase refuses a key that no longer matches ("price changed, refresh").
+function planQuoteKey(plan, quote) {
+  const { createHash } = require('node:crypto');
+  return createHash('sha256').update(JSON.stringify({
+    planId: String(plan._id),
+    settings: planSettings(plan),
+    price: plan.sellingPrice ?? plan.price ?? null,
+    choice: canonical({ purchase: quote.purchase, tenureMonths: quote.tenureMonths, files: quote.files, updates: quote.updates, releaseMode: quote.releaseMode }) || {},
+    firstPayment: quote.firstPayment,
+    totalPrice: quote.totalPrice,
+  })).digest('hex');
+}
+
 module.exports = {
+  canonical,
+  planSettings,
+  planQuoteKey,
   CYCLE_MONTHS,
   MAX_TENURE_MONTHS,
   DEFAULT_ONE_TIME_VALIDITY_DAYS,

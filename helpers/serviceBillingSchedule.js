@@ -4,15 +4,6 @@ const addMonths = (date, months) => {
   return result;
 };
 
-const deriveTotalCycles = ({ tenureMonths, cycleMonths }) => {
-  const tenure = Number(tenureMonths);
-  const cycle = Number(cycleMonths);
-  if (!Number.isInteger(tenure) || !Number.isInteger(cycle) || tenure < cycle || tenure % cycle !== 0) {
-    throw new Error("Total tenure must be a whole multiple of the selected billing period");
-  }
-  return tenure / cycle;
-};
-
 const isFixedTenureService = (service) =>
   Boolean(service?.isServicePlan && Number.isInteger(Number(service?.serviceTotalCycles)) && Number(service.serviceTotalCycles) > 0);
 
@@ -63,7 +54,6 @@ const getCycleDates = (service, cycleNumber, now = new Date()) => {
 
 module.exports = {
   addMonths,
-  deriveTotalCycles,
   isFixedTenureService,
   getNextCycleNumber,
   resolveServiceRenewalPrice,

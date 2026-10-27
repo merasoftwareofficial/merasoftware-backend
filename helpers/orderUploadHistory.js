@@ -108,7 +108,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
 
   const requests = await updateRequestModel
     .find(query)
-    .select("_id userId updatePlanId status deliveryStatus createdAt instructions files")
+    .select("_id userId updatePlanId status deliveryStatus createdAt instructions files statusHistory completedAt allowanceReturnedAt")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -141,6 +141,16 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
         timestamp: note?.timestamp || null,
       })),
       files,
+      // Our team's status changes with the note the client sees (helpers/uploadStatus.js);
+      // who made the change is not shown.
+      statusHistory: (request.statusHistory || []).map((entry) => ({
+        status: entry.status,
+        note: entry.note || "",
+        auto: Boolean(entry.auto),
+        at: entry.at || null,
+      })),
+      completedAt: request.completedAt || null,
+      allowanceReturned: Boolean(request.allowanceReturnedAt),
       // Same test the zip route runs, so a listing never offers a download that would
       // produce an empty archive.
       hasDownloadableFiles: getDownloadableFiles(request.files, now).length > 0,

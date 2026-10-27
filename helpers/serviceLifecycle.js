@@ -27,6 +27,8 @@ const activateAfterProjectServices = async ({ projectOrderId, actorId, now = new
       }
     }
     await service.save();
+    // The plan was waiting for its project; now it has started.
+    require('./servicePlanNotifications').notifyPlanStarted(service._id);
     if (service.paymentPolicy) {
       await require('../models/invoiceModel').updateMany({ orderId: service._id, serviceCycleNumber: 1, invoiceType: 'project', status: { $in: ['unpaid', 'partially_paid'] } }, { $set: { dueDate: require('./offerPaymentPolicy').paymentDueDate(service.paymentPolicy, now) } });
     }

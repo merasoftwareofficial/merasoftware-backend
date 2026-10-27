@@ -51,6 +51,13 @@ const downloadUploadRequestZip = async (req, res) => {
     const refusal = assertCanReadUpload(req, request.userId);
     if (refusal) return res.status(refusal.status).json(refusal.body);
 
+    // Our team taking the data is the start of work: a pending upload becomes In progress and the
+    // client is told (helpers/uploadStatus.js). Never blocks the download.
+    if (req.userRole === "admin") {
+      await require("../../helpers/uploadStatus").markInProgressOnDownload(requestId, req.userId)
+        .catch((error) => console.error("Could not mark upload in progress:", error.message));
+    }
+
     // Which files are fetchable is decided by the shared helper, not restated here — the
     // listing offers a download on exactly this answer, so the two cannot disagree.
     const files = getDownloadableFiles(request.files);

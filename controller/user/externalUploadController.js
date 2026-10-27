@@ -158,8 +158,9 @@ const buildContextPayload = async ({ order, kind }) => {
   } else {
     maxFiles = Number(snapshot.filesLimit || 0);
     if (order.servicePlanStatus !== "active") refusal = "This service is not active";
-    if (snapshot.limitScope !== "unlimited") {
-      remainingUploads = Math.max(0, Number(snapshot.portalAccessCount || 0) - Number(order.serviceAccessUsedInCycle || 0));
+    const allowance = require("../../helpers/serviceAllowance").uploadAllowanceNow(order);
+    if (!allowance.unlimited) {
+      remainingUploads = allowance.remaining;
       if (remainingUploads === 0) refusal = "Selected service upload limit is used";
     }
   }
