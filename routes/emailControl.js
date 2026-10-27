@@ -105,6 +105,17 @@ router.get('/', handle(async (req, res) => {
   const applicationEvents = events.filter(e => e.application === req.emailApplication);
   res.json({ success: true, data: { application: req.emailApplication, events: applicationEvents, catalog: catalogFor(applicationEvents), policies, templates: templates.map(templateWithDocs), drafts, history, automaticSending: false, serverNow: Date.now() } });
 }));
+// Counts only, for the website's Communication boxes: no Outbox sync, no templates, no lists, no writes.
+// A failed/sending draft whose audit row is already 'sent' was delivered (reconcileSent repairs it when
+// the list opens), so it is not counted as waiting.
+router.get('/summary', handle(async (req, res) => {
+  adminOnly(req);
+  const ownership = draftAccess(req.userId, req.emailAccess);
+  const waiting = await EmailDraft.find({ ...ownership, status: { $in: ['pending', 'failed', 'sending'] }, expiresAt: { $gt: new Date() } }).select('status').lean();
+  const inFlight = waiting.filter(row => row.status !== 'pending').map(row => row._id);
+  const delivered = inFlight.length ? (await EmailHistory.distinct('draftId', { ...ownership, draftId: { $in: inFlight }, status: 'sent' })).length : 0;
+  res.json({ success: true, data: { application: req.emailApplication, review: waiting.length - delivered, actions: events.filter(e => e.application === req.emailApplication).length } });
+}));
 router.get('/outbox', handle(async (req, res) => {
   adminOnly(req);
   const ownership = { ...draftAccess(req.userId, req.emailAccess), application: req.emailApplication };

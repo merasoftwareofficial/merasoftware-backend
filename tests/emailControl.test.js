@@ -105,6 +105,21 @@ test('settings require admin and draft decisions belong to the action user', asy
   const id = await draft(); assert.equal((await api(`/email-control/drafts/${id}`, secondAdmin, null, 'GET')).status, 400);
   assert.equal(calls.length, 0);
 });
+test('summary counts the same review mails as the full listing, for admins only', async () => {
+  assert.equal((await api('/email-control/summary', null, null, 'GET')).status, 401);
+  assert.equal((await api('/email-control/summary', customer, null, 'GET')).status, 403);
+  await draft(); const skipped = await draft();
+  await api(`/email-control/drafts/${skipped}/decision`, admin, { choice: 'skip' });
+  const summary = (await api('/email-control/summary', admin, null, 'GET')).data;
+  const listing = (await api('/email-control', admin, null, 'GET')).data;
+  const waiting = listing.drafts.filter(row => ['pending', 'failed', 'sending'].includes(row.status)).length;
+  assert.deepEqual(summary, { application: 'portal', review: waiting, actions: listing.events.length });
+  assert.equal(summary.review, 1);
+  // Portal admins share the portal's review list; the count follows the listing for each admin.
+  const other = (await api('/email-control', secondAdmin, null, 'GET')).data.drafts.filter(row => ['pending', 'failed', 'sending'].includes(row.status)).length;
+  assert.equal((await api('/email-control/summary', secondAdmin, null, 'GET')).data.review, other);
+  assert.equal((await api('/email-control/summary?application=website', admin, null, 'GET')).data.application, 'website');
+});
 test('Off blocks new drafts and previously prepared mail', async () => {
   const id = await draft();
   await api('/email-control/policies/invoice.project', admin, { mode: 'off' }, 'PUT');
@@ -258,6 +273,9 @@ test('accepted mail never becomes failed when a draft result write fails', async
     assert.equal((await EmailHistory.findOne({ draftId: id })).status, 'sent');
     assert.equal(calls.length, 1);
   } finally { EmailDraft.updateOne = original; }
+  // The draft row was never marked sent, but the mail went: the summary does not count it as waiting.
+  assert.notEqual((await EmailDraft.findById(id).lean()).status, 'sent');
+  assert.equal((await api('/email-control/summary', admin, null, 'GET')).data.review, 0);
 });
 
 test('Outbox repairs an audit write failure from the accepted draft', async () => {
