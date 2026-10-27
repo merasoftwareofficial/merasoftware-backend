@@ -5,13 +5,17 @@ const userModel = require('../models/userModel');
 const { Queue, State, STATE_ID, QUEUE_STATUSES } = require('../whatsapp/src/models.js');
 const { dayKey } = require('../whatsapp/src/sender.js');
 const { loadConfig } = require('../whatsapp/src/config.js');
-const { RECOMMENDED, LIMITS, effectiveSettings, inQuietHours, settingsWarnings, validateSettings } = require('../whatsapp/src/settings.js');
+const { RECOMMENDED, LIMITS, effectiveSettings, inQuietHours, quietEnd, settingsWarnings, validateSettings } = require('../whatsapp/src/settings.js');
+const { estimateQueue } = require('../whatsapp/src/schedule.js');
 
 // The WhatsApp admin page (website /admin/whatsapp, through its /api/whatsapp proxy). Admins only:
 // the list holds customers' messages and the QR links the business number.
 const router = express.Router();
 const PAGE_SIZE = 20;
 const WORKER_SILENT_MS = 90_000; // the worker writes a heartbeat every 30 seconds
+const UPCOMING_MAX = 500; // the queue page shows this many waiting messages at most (100 a day is the expected load)
+const WAITING = ['pending', 'sending'];
+const NOT_SENT = ['failed', 'skipped', 'expired', 'cancelled'];
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(authToken);
 router.use(async (req, res, next) => {
@@ -28,6 +32,7 @@ const handle = fn => async (req, res) => {
 const setState = fields => State.updateOne({ _id: STATE_ID }, { $set: fields }, { upsert: true });
 const savedSettings = async () => effectiveSettings((await State.findById(STATE_ID).select('settings').lean())?.settings);
 const maxAgeMs = settings => settings.maxAgeHours * 3_600_000;
+const workerAlive = (state, now) => !!state?.heartbeatAt && now - state.heartbeatAt < WORKER_SILENT_MS;
 const settingsReply = settings => ({ settings, recommended: RECOMMENDED, limits: LIMITS, warnings: settingsWarnings(settings) });
 
 router.get('/status', handle(async () => {
@@ -40,14 +45,13 @@ router.get('/status', handle(async () => {
   const settings = effectiveSettings(state?.settings);
   return {
     enabled: process.env.ENABLE_WHATSAPP === 'true',
-    workerRunning: !!state?.heartbeatAt && now - state.heartbeatAt < WORKER_SILENT_MS,
+    workerRunning: workerAlive(state, now),
     connection: state?.connection || 'disconnected',
     qr: state?.connection === 'qr' ? state.qr || null : null,
     phone: state?.phone || null,
     paused: !!state?.paused,
     unlinkRequested: !!state?.logoutRequested,
     sentToday: state?.day === dayKey(now, config.timeZone) ? state.sentToday : 0,
-    dailyLimit: settings.dailyLimit,
     minGapSec: settings.minGapSec,
     maxAgeHours: settings.maxAgeHours,
     quietNow: inQuietHours(settings, now, config.timeZone),
@@ -61,10 +65,11 @@ router.get('/status', handle(async () => {
 }));
 
 router.get('/queue', handle(async req => {
+  // 'not-sent' = every finished message that did not go: failed, skipped and expired together.
   const status = String(req.query.status || 'all');
-  if (status !== 'all' && !QUEUE_STATUSES.includes(status)) throw new Error('Unknown status');
+  if (status !== 'all' && status !== 'not-sent' && !QUEUE_STATUSES.includes(status)) throw new Error('Unknown status');
   const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-  const filter = status === 'all' ? {} : { status };
+  const filter = status === 'all' ? {} : status === 'not-sent' ? { status: { $in: NOT_SENT } } : { status };
   const retryAfter = new Date(Date.now() - maxAgeMs(await savedSettings()));
   const [rows, total] = await Promise.all([
     Queue.find(filter).sort({ createdAt: -1 }).skip((page - 1) * PAGE_SIZE).limit(PAGE_SIZE)
@@ -74,6 +79,29 @@ router.get('/queue', handle(async req => {
   return {
     rows: rows.map(row => ({ ...row, canRetry: row.status === 'failed' && row.createdAt > retryAfter })),
     total, page, pages: Math.ceil(total / PAGE_SIZE),
+  };
+}));
+
+// The waiting messages in the order they will go, each with when it should leave (schedule.js).
+// `stopped` says why nothing is leaving (no times then); `quietUntil` is set during quiet hours.
+router.get('/queue/upcoming', handle(async () => {
+  const config = loadConfig();
+  const [state, rows, total] = await Promise.all([
+    State.findById(STATE_ID).lean(),
+    Queue.find({ status: { $in: WAITING } }).sort({ createdAt: 1 }).limit(UPCOMING_MAX)
+      .select('to email event application text status attempts lastError createdAt nextAttemptAt').lean(),
+    Queue.countDocuments({ status: { $in: WAITING } }),
+  ]);
+  const now = new Date();
+  const rules = effectiveSettings(state?.settings);
+  const stopped = process.env.ENABLE_WHATSAPP !== 'true' ? 'off' : !workerAlive(state, now) ? 'not-running'
+    : state?.paused ? 'paused' : state?.connection !== 'connected' ? 'offline' : null;
+  const estimated = estimateQueue({ rows, nextSendAt: state?.nextSendAt, rules, now, timeZone: config.timeZone, stopped: !!stopped });
+  return {
+    rows: estimated.map((row, index) => ({ ...row, position: index + 1 })),
+    total, stopped, now,
+    quietUntil: inQuietHours(rules, now, config.timeZone) ? quietEnd(rules, now, config.timeZone) : null,
+    sentToday: state?.day === dayKey(now, config.timeZone) ? state.sentToday : 0,
   };
 }));
 

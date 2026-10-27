@@ -51,6 +51,8 @@ if (!config.senderEnabled) {
 
   let held = false;
   let heartbeatAt = 0;
+  // A long send must not let the lease run out under it (the loop renews only between steps).
+  setInterval(() => { if (held && !stopping) lease.ensure().catch(error => logger.warn({ err: error }, 'lease renewal failed')); }, 20_000).unref();
   while (!stopping) {
     try {
       const nowHeld = await lease.ensure();

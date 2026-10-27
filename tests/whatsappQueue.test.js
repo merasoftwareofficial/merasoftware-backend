@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { decide } = require('../helpers/emailController');
-const { enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText } = require('../helpers/whatsappQueue');
+const fs = require('node:fs');
+const path = require('node:path');
+const { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText } = require('../helpers/whatsappQueue');
 const { EmailDraft, EmailHistory } = require('../models/emailControlModel');
 const { Queue } = require('../whatsapp/src/models.js');
 const userModel = require('../models/userModel');
@@ -108,6 +110,33 @@ test('queuing the same email twice keeps one row per recipient', async () => {
   await enqueueWhatsAppForEmail(draft);
   await enqueueWhatsAppForEmail(draft);
   assert.equal(await Queue.countDocuments(), 1);
+});
+
+test('enqueueWhatsApp is the one way in: a number waits its turn, no number is kept as skipped', async () => {
+  const waiting = await enqueueWhatsApp({ to: '919876543210', text: 'Hello', event: 'manual.test' });
+  assert.deepEqual([waiting.status, waiting.to, waiting.text], ['pending', '919876543210', 'Hello']);
+  const skipped = await enqueueWhatsApp({ to: null, text: 'Hello', skipReason: 'No phone' });
+  assert.deepEqual([skipped.status, skipped.lastError, !!skipped.expiresAt], ['skipped', 'No phone', true]);
+});
+
+// Owner rule (27 Oct 2026): no WhatsApp is ever sent directly; every one goes through the queue.
+test('only the worker talks to WhatsApp, and only whatsappQueue.js adds to the queue', () => {
+  const root = path.join(__dirname, '..');
+  const files = [];
+  const walk = dir => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', '.git', 'tests', 'uploads'].includes(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(c|m)?js$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(root);
+  const where = pattern => files.filter(file => pattern.test(fs.readFileSync(file, 'utf8'))).map(file => path.relative(root, file).replace(/\\/g, '/')).sort();
+  assert.deepEqual(where(/\bsendMessage\s*\(/), ['whatsapp/src/whatsapp.js'], 'WhatsApp messages leave only from the connection');
+  assert.deepEqual(where(/transport\.send\s*\(/), ['whatsapp/src/sender.js'], 'and only the queue sender uses it');
+  assert.deepEqual(where(/\bQueue\.(create|insertMany|bulkWrite)\s*\(/), ['helpers/whatsappQueue.js'], 'rows are added in one place only');
+  assert.deepEqual(where(/35\.208\.75\.95|WHATSAPP_API_URL/), [], 'the old direct sender is gone');
 });
 
 test('a WhatsApp problem never changes the email result', async () => {

@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 // one schema) and sets paused / logoutRequested on whatsapp_state; the worker does everything else.
 export const STATE_ID = 'main';
 export const KEEP_FINISHED_DAYS = 30;
+export const SLOT_MS = 60_000; // the sending slot lapses this long after its holder last renewed it
 
 export const QUEUE_STATUSES = ['pending', 'sending', 'sent', 'failed', 'skipped', 'expired', 'cancelled'];
 
@@ -37,10 +38,14 @@ const stateSchema = new mongoose.Schema({
   phone: String, // linked WhatsApp account
   paused: { type: Boolean, default: false },
   logoutRequested: { type: Boolean, default: false },
-  day: String, // YYYY-MM-DD in India time; sentToday belongs to this day
+  day: String, // YYYY-MM-DD in India time; sentToday belongs to this day (a count to show, not a limit)
   sentToday: { type: Number, default: 0 },
   lastSentAt: Date,
   nextSendAt: Date, // persisted so a restart still waits out the gap
+  // The one sending slot (sender.js): only its holder talks to a chat. Taken in the same write that
+  // checks the gap, renewed while the message is out, and it lapses SLOT_MS after its holder stops renewing.
+  sendingBy: String,
+  sendingUntil: Date,
   messageCap: mongoose.Schema.Types.Mixed, // WhatsApp's new-chat quota, as WhatsApp reports it
   settings: mongoose.Schema.Types.Mixed, // the admin's sending rules; checked by settings.js before saving
   lastError: String,

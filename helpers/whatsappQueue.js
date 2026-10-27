@@ -2,8 +2,10 @@ const userModel = require('../models/userModel');
 const leadModel = require('../models/leadModel');
 const { Queue, finishedExpiry } = require('../whatsapp/src/models.js');
 
+// Owner rule (27 Oct 2026): no WhatsApp is ever sent directly. Every one, automatic or typed by an
+// admin, is added here with enqueueWhatsApp and waits its turn; the worker (whatsapp/src/sender.js) is
+// the only code that talks to a chat, one message at a time. tests/whatsappQueue.test.js checks both.
 // Owner rule: every email that is really sent also goes out on WhatsApp, with the same text.
-// The worker (whatsapp/) sends the queue one message at a time; this file only fills it.
 const NO_PHONE = 'No phone number is saved for this email address.';
 const BAD_PHONE = 'The saved phone number is not a valid mobile number.';
 const ANY_CASE = { locale: 'en', strength: 2 }; // emails are unique but not always stored lower-case
@@ -36,6 +38,17 @@ function messageText(draft) {
 }
 
 /**
+ * The only way into the WhatsApp queue. A row without a usable number is stored as 'skipped' with
+ * the reason, so the admin page shows why nothing went. Throws on a database error (11000 = already queued).
+ */
+async function enqueueWhatsApp({ to, text, skipReason, ...fields }) {
+  const row = to
+    ? { status: 'pending', to }
+    : { status: 'skipped', lastError: skipReason || NO_PHONE, expiresAt: finishedExpiry(new Date()) };
+  return Queue.create({ ...fields, text: String(text || '').slice(0, MAX_TEXT), ...row });
+}
+
+/**
  * Queues one WhatsApp per recipient of a sent email. A recipient without a usable phone gets a
  * 'skipped' row with the reason, so the admin page shows why nothing went. Off unless ENABLE_WHATSAPP.
  */
@@ -45,11 +58,8 @@ async function enqueueWhatsAppForEmail(draft) {
   for (const email of draft.to || []) {
     try {
       const saved = await savedPhoneFor(email);
-      const to = normalizePhone(saved);
-      const row = to
-        ? { status: 'pending', to }
-        : { status: 'skipped', lastError: saved ? BAD_PHONE : NO_PHONE, expiresAt: finishedExpiry(new Date()) };
-      await Queue.create({ emailDraftId: draft._id, email, event: draft.event, application: draft.application, text, ...row });
+      await enqueueWhatsApp({ to: normalizePhone(saved), skipReason: saved ? BAD_PHONE : NO_PHONE,
+        emailDraftId: draft._id, email, event: draft.event, application: draft.application, text });
     } catch (error) {
       // 11000: this recipient is already queued. Any other error loses only this recipient's copy.
       if (error.code !== 11000) console.error(`[whatsapp] Could not queue the WhatsApp copy of ${draft.event}:`, error.message);
@@ -57,4 +67,4 @@ async function enqueueWhatsAppForEmail(draft) {
   }
 }
 
-module.exports = { enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText };
+module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText };

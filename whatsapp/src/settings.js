@@ -4,7 +4,7 @@
 export const RECOMMENDED = Object.freeze({
   minGapSec: 30, // Owner rule: never sooner than 30 seconds after the last message.
   jitterSec: 15, // a random 0–15 seconds more, so the gap is never the same twice
-  dailyLimit: 50, // a newly linked number is watched closely by WhatsApp; raise it after a few quiet weeks
+  // No daily limit (owner decision, 27 Oct 2026): every message simply waits its turn in the queue.
   typing: true, // show "typing…" in the chat before each message
   typingMinSec: 2,
   typingMaxSec: 8,
@@ -18,14 +18,14 @@ export const RECOMMENDED = Object.freeze({
 
 // [lowest, highest] each number may be set to. Outside these, the risk of a ban is too high or the setting makes no sense.
 export const LIMITS = Object.freeze({
-  minGapSec: [30, 600], jitterSec: [0, 120], dailyLimit: [1, 300],
+  minGapSec: [30, 600], jitterSec: [0, 120],
   typingMinSec: [0, 20], typingMaxSec: [0, 20],
   quietFrom: [0, 23], quietTo: [0, 23],
   retryDelayMin: [1, 60], maxAttempts: [1, 5], maxAgeHours: [1, 72],
 });
 
 const LABELS = {
-  minGapSec: 'Gap between messages', jitterSec: 'Random extra gap', dailyLimit: 'Messages per day',
+  minGapSec: 'Gap between messages', jitterSec: 'Random extra gap',
   typing: 'Show "typing…"', typingMinSec: 'Shortest typing time', typingMaxSec: 'Longest typing time',
   quietHours: 'Quiet hours', quietFrom: 'Quiet hours start', quietTo: 'Quiet hours end',
   retryDelayMin: 'Wait before trying again', maxAttempts: 'Tries per message', maxAgeHours: 'Drop a message after',
@@ -86,4 +86,21 @@ export function inQuietHours(settings, date, timeZone) {
   const hour = hourIn(date, timeZone);
   const { quietFrom: from, quietTo: to } = settings;
   return from < to ? hour >= from && hour < to : hour >= from || hour < to;
+}
+
+/** The first moment at or after `date` outside quiet hours: the start of the hour they end. */
+export function quietEnd(settings, date, timeZone) {
+  let time = new Date(date);
+  for (let hours = 0; hours < 25 && inQuietHours(settings, time, timeZone); hours += 1) {
+    const minute = Number(new Intl.DateTimeFormat('en-GB', { timeZone, minute: '2-digit' }).format(time));
+    time = new Date(time.getTime() - (minute * 60 + time.getUTCSeconds()) * 1000 - time.getUTCMilliseconds() + 3_600_000);
+  }
+  return time;
+}
+
+/** How long "typing…" shows: the shortest time + 1 second per 100 letters + up to 1 second at random, never past the longest. */
+export function typingTime(settings, textLength, random) {
+  if (!settings.typing) return 0;
+  return Math.min(settings.typingMaxSec * 1000,
+    settings.typingMinSec * 1000 + Math.floor(textLength / 100) * 1000 + Math.floor(random * 1000));
 }

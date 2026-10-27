@@ -40,7 +40,7 @@ beforeEach(async () => {
 after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 
 test('only a signed-in admin can open anything', async () => {
-  for (const [path, method] of [['/status', 'GET'], ['/queue', 'GET'], ['/pause', 'POST'], ['/unlink', 'POST'], ['/settings', 'GET'], ['/settings', 'POST'], ['/settings/reset', 'POST']]) {
+  for (const [path, method] of [['/status', 'GET'], ['/queue', 'GET'], ['/queue/upcoming', 'GET'], ['/pause', 'POST'], ['/unlink', 'POST'], ['/settings', 'GET'], ['/settings', 'POST'], ['/settings/reset', 'POST']]) {
     assert.equal((await api(path, null, method)).status, 401, path);
     assert.equal((await api(path, customer, method)).status, 403, path);
   }
@@ -56,7 +56,7 @@ test('status shows the link, the QR only while waiting for a scan, today\'s coun
   assert.equal(data.workerRunning, true);
   assert.equal(data.qr, 'data:image/png;base64,AAA');
   assert.equal(data.sentToday, 0, 'yesterday\'s count is not today\'s');
-  assert.equal(data.dailyLimit, RECOMMENDED.dailyLimit, 'nothing saved yet, so the recommended limit');
+  assert.equal('dailyLimit' in data, false, 'there is no daily limit');
   assert.equal(data.counts.pending, 1);
   assert.equal(data.counts.skipped, 1);
   assert.equal(data.counts.sent, 0);
@@ -95,6 +95,45 @@ test('the queue list is newest first, filters by status and pages by 20', async 
   assert.equal((await api('/queue?status=nonsense')).status, 400);
 });
 
+test('history "not sent" lists failed, skipped and expired together, never a sent or waiting one', async () => {
+  for (const status of ['sent', 'pending', 'failed', 'skipped', 'expired']) {
+    await Queue.create({ status, text: status, ...(status === 'skipped' ? {} : { to: '919876543210' }) });
+  }
+  const { data } = await api('/queue?status=not-sent');
+  assert.deepEqual(data.rows.map(row => row.status).sort(), ['expired', 'failed', 'skipped']);
+  assert.equal(data.total, 3);
+});
+
+test('upcoming: waiting messages in sending order with when each should go, or why nothing goes', async () => {
+  const live = { _id: STATE_ID, connection: 'connected', heartbeatAt: new Date(), settings: { ...RECOMMENDED, quietHours: false } };
+  await State.create(live);
+  await Queue.create([
+    { to: '919000000002', text: 'second', createdAt: hoursAgo(1) },
+    { to: '919000000001', text: 'first', createdAt: hoursAgo(2) },
+    { to: '919000000003', text: 'gone', status: 'sent', createdAt: hoursAgo(3) },
+  ]);
+  let { status, data } = await api('/queue/upcoming');
+  assert.equal(status, 200);
+  assert.equal(data.stopped, null);
+  assert.equal(data.total, 2);
+  assert.deepEqual(data.rows.map(row => [row.position, row.text]), [[1, 'first'], [2, 'second']]);
+  const [one, two] = data.rows.map(row => new Date(row.eta).getTime());
+  assert.ok(one >= Date.now() - 5_000 && one < Date.now() + 60_000);
+  assert.ok(two - one >= RECOMMENDED.minGapSec * 1000, 'the second one waits the gap after the first');
+
+  await State.updateOne({ _id: STATE_ID }, { paused: true });
+  ({ data } = await api('/queue/upcoming'));
+  assert.equal(data.stopped, 'paused');
+  assert.deepEqual(data.rows.map(row => row.eta), [null, null]);
+
+  await State.updateOne({ _id: STATE_ID }, { paused: false, connection: 'qr' });
+  assert.equal((await api('/queue/upcoming')).data.stopped, 'offline');
+  await State.updateOne({ _id: STATE_ID }, { connection: 'connected', heartbeatAt: new Date(Date.now() - 120_000) });
+  assert.equal((await api('/queue/upcoming')).data.stopped, 'not-running');
+  delete process.env.ENABLE_WHATSAPP;
+  assert.equal((await api('/queue/upcoming')).data.stopped, 'off');
+});
+
 test('send again puts only a failed message from the last 24 hours back in the queue', async () => {
   const fresh = await Queue.create({ to: '919876543210', text: 'x', status: 'failed', attempts: 3, lastError: 'socket closed', expiresAt: new Date(Date.now() + 1e9), createdAt: hoursAgo(2) });
   const old = await Queue.create({ to: '919876543210', text: 'y', status: 'failed', createdAt: hoursAgo(25) });
@@ -114,16 +153,15 @@ test('sending rules: recommended until saved, a save is checked and stored, rese
   let { data } = await api('/settings');
   assert.deepEqual(data.settings, RECOMMENDED);
   assert.deepEqual(data.recommended, RECOMMENDED);
-  assert.deepEqual(data.limits.dailyLimit, [1, 300]);
+  assert.equal('dailyLimit' in data.limits, false);
   assert.deepEqual(data.warnings, []);
 
-  const mine = { ...RECOMMENDED, dailyLimit: 80, minGapSec: 45, quietFrom: 20, quietTo: 12, maxAgeHours: 12 };
+  const mine = { ...RECOMMENDED, minGapSec: 45, quietFrom: 20, quietTo: 12, maxAgeHours: 12 };
   ({ data } = await api('/settings', admin, 'POST', mine));
   assert.deepEqual(data.settings, mine);
   assert.match(data.warnings[0], /will expire/);
   assert.deepEqual((await State.findById(STATE_ID).lean()).settings, mine);
   ({ data } = await api('/status'));
-  assert.equal(data.dailyLimit, 80);
   assert.equal(data.minGapSec, 45);
 
   const refused = await api('/settings', admin, 'POST', { ...mine, minGapSec: 10 });
