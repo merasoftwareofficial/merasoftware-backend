@@ -305,7 +305,50 @@ const productSchema = new mongoose.Schema({
         type: Number,
         min: 0
       }
-    }]
+    }],
+    // ── Flexible Plans (merasoftware/src/docs/plan.md §4) ──
+    // All optional: a plan saved before these existed is read as pricingMode 'fixed' by
+    // helpers/servicePlanPricing.js, which is the only place a price is worked out.
+    categoryKey: String, // helpers/planCategories.js key
+    pricingMode: {
+      type: String,
+      enum: ['fixed', 'flexible']
+    },
+    // Flexible only: the customer picks files per update in this range.
+    files: {
+      min: { type: Number, min: 1 },
+      max: { type: Number, min: 1 },
+      step: { type: Number, min: 1 }
+    },
+    // Flexible only: price of each file from file 1, then cheaper slabs from `fromFile` on.
+    ratePerFile: {
+      type: Number,
+      min: 0
+    },
+    slabs: [{
+      fromFile: { type: Number, min: 2 },
+      ratePerFile: { type: Number, min: 0 }
+    }],
+    // Flexible only: updates per month (recurring) or number of updates (one-time).
+    updatesPerMonth: {
+      min: { type: Number, min: 1 },
+      max: { type: Number, min: 1 }
+    },
+    allowOneTime: Boolean,
+    oneTimeValidityDays: {
+      type: Number,
+      min: 1
+    },
+    maxTenureMonths: {
+      type: Number,
+      min: 1,
+      max: 12
+    },
+    releaseMode: {
+      type: String,
+      enum: ['all_at_once', 'monthly']
+    },
+    customerCanChooseRelease: Boolean
   }
 }, {
     timestamps: true

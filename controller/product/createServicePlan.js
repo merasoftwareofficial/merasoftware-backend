@@ -1,5 +1,6 @@
 const productModel = require("../../models/productModel");
 const { MAX_SERVICE_FILES_PER_UPLOAD } = require('../../config/uploadLimits');
+const { cyclePriceFromMonthly } = require('../../helpers/servicePlanPricing');
 
 const PLAN_TYPES = ['website_updates', 'digital_marketing', 'google_business_setup', 'social_media_marketing', 'other'];
 const LIMIT_SCOPES = ['per_day', 'per_week', 'per_month', 'per_quarter', 'per_6_month', 'per_year', 'per_plan', 'unlimited', 'manual'];
@@ -102,7 +103,8 @@ const createServicePlanController = async (req, res) => {
           throw new Error("Billing-option discount must be between 0 and 100");
         }
         seenBillingCycles.add(billingCycleOption);
-        const pricePerCycle = Number(monthlyReferencePrice) * CATALOGUE_BILLING_MONTHS[billingCycleOption] * (1 - discountPercent / 100);
+        // Whole rupees, from the pricing SSOT (an unrounded 16449.600000000002 was stored before).
+        const pricePerCycle = cyclePriceFromMonthly(monthlyReferencePrice, CATALOGUE_BILLING_MONTHS[billingCycleOption], discountPercent);
         return { billingCycle: billingCycleOption, discountPercent, pricePerCycle };
       });
       cataloguePrice = normalizedBillingOptions[0].pricePerCycle;
