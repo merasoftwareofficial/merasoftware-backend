@@ -53,7 +53,7 @@ async function collectFirstRunPreview(now = new Date()) {
   require("../models/productModel"); // registers 'product' for populate
   const { EmailPolicy, EmailHistory, EmailDraft } = require("../models/emailControlModel");
   const ChessGame = require("../chess/chessGameModel");
-  const { isFixedTenureService, isFinalCycle, getNextCycleNumber } = require("../helpers/serviceBillingSchedule");
+  const { isFixedTenureService, isFinalCycle, getNextCycleNumber, resolveServiceRenewalPrice } = require("../helpers/serviceBillingSchedule");
   const { modeForCycle, paymentDueDate } = require("../helpers/offerPaymentPolicy");
 
   const users = new Map();
@@ -117,8 +117,7 @@ async function collectFirstRunPreview(now = new Date()) {
     else if (!isFixedTenureService(service) && !service.serviceAutoRenew) row.outcome = "inactive";
     else if (await Invoice.exists({ orderId: service._id, invoiceType: "plan_renewal", status: { $in: ["unpaid", "partially_paid", "overdue"] } })) row.outcome = "paused (renewal bill already unpaid)";
     else {
-      const option = (service.servicePlanSnapshot?.billingOptions || []).find((item) => item.billingCycle === service.serviceSelectedBillingCycle);
-      const amount = Number(option?.pricePerCycle || 0);
+      const amount = resolveServiceRenewalPrice(service);
       if (amount > 0) { row.outcome = `paused until cycle ${getNextCycleNumber(service)} is paid`; row.newInvoice = amount; }
       else row.outcome = "nothing (no renewal price)";
     }

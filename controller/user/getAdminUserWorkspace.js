@@ -128,10 +128,17 @@ const getAdminUserWorkspace = async (req, res) => {
     const isActiveOrder = (order) =>
       !isPendingOrder(order) && !isRejectedOrder(order) && !isCompletedOrder(order);
 
-    const activeOrders = orders.filter(isActiveOrder);
-    const pendingOrders = orders.filter(isPendingOrder);
-    const completedOrders = orders.filter(isCompletedOrder);
-    const rejectedOrders = orders.filter(isRejectedOrder);
+    // Plans and projects are counted apart, split by the order's own flag. The portal page
+    // splits with helpers/orderType.js isPlanItem(), which also matches old update-plan
+    // categories; production has none of those orders, so both give the same split.
+    const planOrders = orders.filter((order) => order?.isServicePlan === true);
+    const projectOrders = orders.filter((order) => order?.isServicePlan !== true);
+
+    const activeOrders = projectOrders.filter(isActiveOrder);
+    const pendingOrders = projectOrders.filter(isPendingOrder);
+    const completedOrders = projectOrders.filter(isCompletedOrder);
+    const rejectedOrders = projectOrders.filter(isRejectedOrder);
+    const activePlans = planOrders.filter((order) => order?.orderState?.code === "plan_active");
     const updateCount = updateRequestCounts[0]?.total || 0;
     const pendingUpdates = updateRequestCounts[0]?.pending || 0;
 
@@ -153,7 +160,7 @@ const getAdminUserWorkspace = async (req, res) => {
           pendingOrders: pendingOrders.length,
           completedOrders: completedOrders.length,
           rejectedOrders: rejectedOrders.length,
-          activePlans: orders.filter((order) => order?.productId?.isWebsiteUpdate && order?.isActive !== false).length,
+          activePlans: activePlans.length,
           updateCount,
           pendingUpdates,
           walletBalance: customer.walletBalance || 0,

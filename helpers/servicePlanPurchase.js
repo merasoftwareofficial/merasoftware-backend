@@ -59,6 +59,10 @@ const runsIndefinitely = (servicePlan = {}) =>
   !servicePlan.validityInDays &&
   !servicePlan.validityValue;
 
+// Longest term a recurring service is sold for. The portal's serviceTenure.js lists only
+// terms up to the same cap; this check is what actually enforces it.
+const MAX_SERVICE_TENURE_MONTHS = 12;
+
 const resolveCustomerBillingSelection = ({ servicePlan = {}, billingCycle, tenureMonths }) => {
   const cycleMonths = BILLING_CYCLE_MONTHS[billingCycle];
   const option = Array.isArray(servicePlan.billingOptions)
@@ -71,6 +75,9 @@ const resolveCustomerBillingSelection = ({ servicePlan = {}, billingCycle, tenur
     throw new Error('Total tenure is required for a recurring service');
   }
   const resolvedTenureMonths = Number(tenureMonths);
+  if (resolvedTenureMonths > MAX_SERVICE_TENURE_MONTHS) {
+    throw new Error(`A service can be bought for at most ${MAX_SERVICE_TENURE_MONTHS} months`);
+  }
   const totalCycles = deriveTotalCycles({ tenureMonths: resolvedTenureMonths, cycleMonths });
   return {
     billingCycle,
@@ -202,5 +209,6 @@ module.exports = {
   resolveValidityInDays,
   runsIndefinitely,
   resolveCustomerBillingSelection,
+  MAX_SERVICE_TENURE_MONTHS,
   buildServicePlanOrderData,
 };

@@ -18,6 +18,19 @@ const isFixedTenureService = (service) =>
 
 const getNextCycleNumber = (service) => Number(service?.serviceCurrentCycleNumber || 0) + 1;
 
+// What the next cycle of a (non-offer) service costs. The order's own frozen price wins
+// (servicePlanPurchase.js writes serviceCyclePrice at purchase), the same source
+// offerServiceRenewal.js bills from. Older orders were bought before that field existed, so
+// they fall back to the cycle's price in the purchase-time snapshot — never the live catalogue.
+const resolveServiceRenewalPrice = (service) => {
+  const frozen = Number(service?.serviceCyclePrice || 0);
+  if (frozen > 0) return frozen;
+  const option = (service?.servicePlanSnapshot?.billingOptions || []).find(
+    (item) => item.billingCycle === service?.serviceSelectedBillingCycle
+  );
+  return Number(option?.pricePerCycle || 0);
+};
+
 const isFinalCycle = (service, cycleNumber) =>
   isFixedTenureService(service) && Number(cycleNumber) >= Number(service.serviceTotalCycles);
 
@@ -53,6 +66,7 @@ module.exports = {
   deriveTotalCycles,
   isFixedTenureService,
   getNextCycleNumber,
+  resolveServiceRenewalPrice,
   isFinalCycle,
   getCycleDates,
 };

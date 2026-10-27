@@ -2,13 +2,8 @@ const cron = require('node-cron');
 const orderModel = require('../models/orderProductModel');
 const invoiceModel = require('../models/invoiceModel');
 const { createProjectInvoice } = require('../helpers/paymentRecording');
-const { getNextCycleNumber, isFinalCycle, isFixedTenureService, getCycleDates } = require('../helpers/serviceBillingSchedule');
+const { getNextCycleNumber, isFinalCycle, isFixedTenureService, getCycleDates, resolveServiceRenewalPrice } = require('../helpers/serviceBillingSchedule');
 const { syncServiceBillingStatement } = require('../helpers/serviceBillingStatement');
-
-const resolveRenewalPrice = (service) => {
-  const snapshot = service.servicePlanSnapshot || {};
-  return Number((snapshot.billingOptions || []).find((item) => item.billingCycle === service.serviceSelectedBillingCycle)?.pricePerCycle || 0);
-};
 
 const processServicePlanRenewals = async (now = new Date()) => {
   const dueServices = await orderModel.find({ isServicePlan: true, servicePlanStatus: 'active', serviceNextBillingDate: { $lte: now } });
@@ -37,7 +32,7 @@ const processServicePlanRenewals = async (now = new Date()) => {
       await service.save();
       continue;
     }
-    const amount = resolveRenewalPrice(service);
+    const amount = resolveServiceRenewalPrice(service);
     if (!(amount > 0)) continue;
     const cycleNumber = getNextCycleNumber(service);
     const cycle = getCycleDates(service, cycleNumber, now);
