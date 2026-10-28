@@ -246,3 +246,47 @@ test('admin quote: saved hidden plan with a key, unsaved form settings without o
   await productModel.updateOne({ _id: plan._id }, { $set: { retiredAt: new Date() } });
   assert.equal((await quote({ planId: String(plan._id), purchase: 'one_time', files: 5, updates: 1 })).status, 404);
 });
+
+
+test('stale website/portal edits and lifecycle actions return 409 without overwriting the winner', async () => {
+  const created = await save(flexibleBody());
+  const expectedUpdatedAt = created.data.updatedAt;
+  const first = await save(flexibleBody({ creating: false, planId: created.data._id, expectedUpdatedAt, serviceName: 'Winner' }));
+  assert.equal(first.status, 200, first.message);
+  assert.notEqual(first.data.updatedAt, expectedUpdatedAt);
+  const stale = await save(flexibleBody({ creating: false, planId: created.data._id, expectedUpdatedAt, serviceName: 'Stale' }));
+  assert.equal(stale.status, 409, stale.message);
+  for (const action of ['hide', 'unhide', 'retire', 'restore', 'purge']) {
+    const result = await save({ action, planId: created.data._id, expectedUpdatedAt });
+    assert.equal(result.status, 409, action + ': ' + result.message);
+    assert.match(result.message, /another session/, action);
+  }
+  const stored = await productModel.findById(created.data._id).lean();
+  assert.equal(stored.serviceName, 'Winner');
+  assert.equal(stored.isHidden, true);
+});
+
+test('atomic revision save has one winner even when two documents were read before either saves', async () => {
+  const { saveRevision } = require('../helpers/catalogueRevision');
+  const created = await save(flexibleBody());
+  const [left, right] = await Promise.all([productModel.findById(created.data._id), productModel.findById(created.data._id)]);
+  left.serviceName = 'Left'; right.serviceName = 'Right';
+  const results = await Promise.allSettled([saveRevision(left), saveRevision(right)]);
+  assert.equal(results.filter(row => row.status === 'fulfilled').length, 1);
+  const refused = results.find(row => row.status === 'rejected');
+  assert.equal(refused.reason.statusCode, 409);
+  assert.equal((await productModel.findById(created.data._id)).isWebsiteUpdate, false); // save hooks still run
+});
+
+test('category edits reject a stale revision; catalogue supplies full project-link choices', async () => {
+  const { savePlanCategory, listPlanCategories } = require('../helpers/planCategories');
+  const category = (await listPlanCategories()).find(row => row.key === 'website_updates');
+  const expectedUpdatedAt = new Date(category.updatedAt).toISOString();
+  const fresh = await savePlanCategory({ key: category.key, label: 'Winner category', expectedUpdatedAt }, admin._id);
+  assert.notEqual(new Date(fresh.updatedAt).toISOString(), expectedUpdatedAt);
+  await assert.rejects(savePlanCategory({ key: category.key, label: 'Stale category', expectedUpdatedAt }, admin._id), error => error.statusCode === 409);
+  const catalogue = await call('/admin/plan-catalogue');
+  assert.ok(catalogue.data.projectCategories.some(row => row.category === 'standard_websites'));
+  assert.equal(catalogue.data.categories.find(row => row.key === category.key).usage.plans, 0);
+  assert.equal((await listPlanCategories()).find(row => row.key === category.key).label, 'Winner category');
+});

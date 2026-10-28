@@ -23,11 +23,11 @@ const listPlanCatalogueController = async (req, res) => {
 
 // Off-sale actions on one plan (helpers/servicePlanLifecycle.js; the website can only send PATCH).
 const ACTIONS = {
-  retire: (body, actorId) => retirePlan({ planId: body.planId, actorId }),
-  restore: (body) => restorePlan({ planId: body.planId }),
-  purge: (body, actorId) => purgePlan({ planId: body.planId, mode: body.mode === 'hard' ? 'hard' : 'archive', confirmName: body.confirmName, actorId }),
-  hide: async (body) => ({ message: 'Plan hidden', data: await setProductHidden({ productId: body.planId, hidden: true }) }),
-  unhide: async (body) => ({ message: 'Plan shown to customers', data: await setProductHidden({ productId: body.planId, hidden: false }) }),
+  retire: (body, actorId) => retirePlan({ planId: body.planId, expectedUpdatedAt: body.expectedUpdatedAt, actorId }),
+  restore: (body) => restorePlan({ planId: body.planId, expectedUpdatedAt: body.expectedUpdatedAt }),
+  purge: (body, actorId) => purgePlan({ planId: body.planId, expectedUpdatedAt: body.expectedUpdatedAt, mode: body.mode === 'hard' ? 'hard' : 'archive', confirmName: body.confirmName, actorId }),
+  hide: async (body) => ({ message: 'Plan hidden', data: await setProductHidden({ productId: body.planId, expectedUpdatedAt: body.expectedUpdatedAt, hidden: true }) }),
+  unhide: async (body) => ({ message: 'Plan shown to customers', data: await setProductHidden({ productId: body.planId, expectedUpdatedAt: body.expectedUpdatedAt, hidden: false }) }),
 };
 
 // { creating: true, ...settings } creates a plan; { planId, ...settings } replaces its settings;

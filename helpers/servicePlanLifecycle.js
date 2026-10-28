@@ -18,6 +18,7 @@
 // after the Phase 2b portal is deployed (deploy order backend → website → portal).
 const productModel = require('../models/productModel');
 const orderModel = require('../models/orderProductModel');
+const { assertRevision, saveRevision, deleteRevision, revisionFilter, nextTime, conflict } = require('./catalogueRevision');
 
 const FLEXIBLE_PLANS_ON_SALE = true;
 
@@ -36,33 +37,35 @@ async function findPlan(planId) {
   return plan;
 }
 
-async function retirePlan({ planId, actorId }) {
+async function retirePlan({ planId, actorId, expectedUpdatedAt }) {
   const plan = await findPlan(planId);
+  assertRevision(plan, expectedUpdatedAt);
   if (plan.retiredAt) fail('This plan is already retired', 409);
   // Counted against real orders; the client never says how many customers a plan has.
   const purchaseCount = await orderModel.countDocuments({ productId: plan._id });
   if (purchaseCount === 0) {
-    await productModel.findByIdAndDelete(plan._id);
+    await deleteRevision(productModel, plan, expectedUpdatedAt);
     return { message: `"${plan.serviceName}" deleted`, data: { action: 'deleted', planId: plan._id, purchaseCount: 0 } };
   }
   plan.retiredAt = new Date();
   plan.retiredBy = actorId;
   plan.isHidden = true;
-  await plan.save();
+  await saveRevision(plan, expectedUpdatedAt);
   return {
     message: `"${plan.serviceName}" retired — ${purchaseCount} existing purchase${purchaseCount === 1 ? '' : 's'} kept intact`,
     data: { action: 'retired', planId: plan._id, purchaseCount },
   };
 }
 
-async function restorePlan({ planId }) {
+async function restorePlan({ planId, expectedUpdatedAt }) {
   const plan = await findPlan(planId);
+  assertRevision(plan, expectedUpdatedAt);
   if (!plan.retiredAt) fail('This plan is not retired', 409);
   plan.retiredAt = null;
   plan.retiredBy = null;
   // Restore puts the plan back on sale, except a flexible plan before the builder is live.
   plan.isHidden = !canBeOnSale(plan);
-  await plan.save();
+  await saveRevision(plan, expectedUpdatedAt);
   return {
     message: plan.isHidden
       ? `"${plan.serviceName}" restored to Active Plans (kept hidden: flexible plans go on sale with the new builder)`
@@ -71,31 +74,33 @@ async function restorePlan({ planId }) {
   };
 }
 
-async function purgePlan({ planId, mode, confirmName, actorId }) {
+async function purgePlan({ planId, mode, confirmName, actorId, expectedUpdatedAt }) {
   const plan = await findPlan(planId);
+  assertRevision(plan, expectedUpdatedAt);
   if (!plan.retiredAt) fail('Only a retired plan can be deleted forever. Remove it first.', 409);
   if (plan.archivedAt) fail('This plan has already been deleted', 409);
   const purchaseCount = await orderModel.countDocuments({ productId: plan._id });
   if (mode === 'hard') {
     if (String(confirmName || '').trim() !== String(plan.serviceName || '').trim()) fail("Type the plan's exact name to permanently delete it");
-    await productModel.findByIdAndDelete(plan._id);
+    await deleteRevision(productModel, plan, expectedUpdatedAt);
     return { message: `"${plan.serviceName}" permanently deleted from the database`, data: { action: 'hard_deleted', planId: plan._id, purchaseCount } };
   }
   plan.archivedAt = new Date();
   plan.archivedBy = actorId;
-  await plan.save();
+  await saveRevision(plan, expectedUpdatedAt);
   return { message: `"${plan.serviceName}" deleted`, data: { action: 'archived', planId: plan._id, purchaseCount } };
 }
 
 // Any catalogue product (feature products use the same routes).
-async function setProductHidden({ productId, hidden }) {
+async function setProductHidden({ productId, hidden, expectedUpdatedAt }) {
   if (!productId) fail('Product ID is required');
-  const existing = await productModel.findById(productId).select('retiredAt archivedAt isServicePlan servicePlan.pricingMode').catch(() => null);
+  const existing = await productModel.findById(productId).select('retiredAt archivedAt isServicePlan servicePlan.pricingMode updatedAt').catch(() => null);
   if (!existing) fail('Product not found', 404);
   if (existing.retiredAt || existing.archivedAt) fail('This plan is retired. Restore it before changing its availability.');
+  assertRevision(existing, expectedUpdatedAt);
   if (!hidden) assertCanBeOnSale(existing);
-  const updated = await productModel.findByIdAndUpdate(productId, { isHidden: Boolean(hidden) }, { new: true });
-  if (!updated) fail('Product not found', 404);
+  const updated = await productModel.findOneAndUpdate(revisionFilter(existing), { isHidden: Boolean(hidden), updatedAt: nextTime(existing) }, { new: true, timestamps: false });
+  if (!updated) throw conflict();
   return updated;
 }
 

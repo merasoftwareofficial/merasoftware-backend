@@ -2,6 +2,7 @@
 // page all read categories through this module. Same shape and rules as helpers/projectCategories.js:
 // a key is created once, never changed, and a category is archived instead of deleted.
 const PlanCategory = require('../models/servicePlanCategoryModel');
+const { assertRevision, nextTime, conflict } = require('./catalogueRevision');
 const { getProjectCategory } = require('./projectCategories');
 
 const KEY_PATTERN = /^[a-z][a-z0-9_]{2,39}$/;
@@ -96,11 +97,13 @@ async function savePlanCategory(body, actorId) {
       throw error;
     }
   }
+  assertRevision(existing, body.expectedUpdatedAt);
   const row = await PlanCategory.findOneAndUpdate(
-    { key },
-    { $set: { ...update, updatedBy: actorId } },
-    { new: true, runValidators: true, lean: true },
+    { key, updatedAt: existing.updatedAt || null },
+    { $set: { ...update, updatedBy: actorId, updatedAt: nextTime(existing) } },
+    { new: true, runValidators: true, lean: true, timestamps: false },
   );
+  if (!row) throw conflict();
   return normalise(row);
 }
 

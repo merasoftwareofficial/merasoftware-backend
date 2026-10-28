@@ -7,8 +7,10 @@
 // Prices are worked out by helpers/servicePlanPricing.js. A saved edit never changes what a
 // customer already bought: every order keeps its own snapshot (servicePlanPurchase.js).
 const Product = require('../models/productModel');
+const { saveRevision } = require('./catalogueRevision');
+const { listProjectCategories } = require('./projectCategories');
 const { MAX_SERVICE_FILES_PER_UPLOAD } = require('../config/uploadLimits');
-const { requireActivePlanCategory, listPlanCategories } = require('./planCategories');
+const { requireActivePlanCategory, listPlanCategories, planCategoryUsage } = require('./planCategories');
 const { CYCLE_MONTHS, assertPricingConfig, cyclePriceFromMonthly, priceRange, rupees } = require('./servicePlanPricing');
 const { assertCanBeOnSale, canBeOnSale } = require('./servicePlanLifecycle');
 
@@ -173,15 +175,17 @@ async function savePlan(body = {}, { requireCategory = true } = {}) {
     return created.toObject();
   }
   existing.set(fields);
-  await existing.save();
+  await saveRevision(existing, body.expectedUpdatedAt);
   return existing.toObject();
 }
 
 // Admin catalogue: every service plan (retired ones flagged) with its card price, plus categories.
 async function listPlanCatalogue() {
-  const [plans, categories] = await Promise.all([
+  const [plans, categories, projectCategories, usage] = await Promise.all([
     Product.find({ category: 'service_plan', isServicePlan: true, archivedAt: null }).sort({ createdAt: -1 }).lean(),
     listPlanCategories(),
+    listProjectCategories(),
+    planCategoryUsage(),
   ]);
   return {
     plans: plans.map((plan) => ({
@@ -196,7 +200,8 @@ async function listPlanCatalogue() {
       priceRange: (() => { try { return priceRange(plan); } catch { return null; } })(),
       updatedAt: plan.updatedAt,
     })),
-    categories,
+    categories: categories.map(category => ({ ...category, usage: { plans: usage[category.key] || 0 } })),
+    projectCategories: projectCategories.map(({ category, label, status }) => ({ category, label, status })),
   };
 }
 
