@@ -62,12 +62,22 @@ async function uploadStatus(requestId, status, note, step) {
   return sendPlanMail(event, `plan-upload:${requestId}:${step}`, request, order, note);
 }
 
+// One message per work update our team posts on a plan without uploads.
+async function workUpdate(orderId, entryId) {
+  const order = await withCustomer(orderId);
+  const entry = (order?.serviceWorkUpdates || []).find((item) => String(item._id) === String(entryId));
+  if (!entry) return 'missing';
+  return sendPlanMail('plan.work_update', `plan-work-update:${orderId}:${entryId}`, order, entry);
+}
+
 module.exports = {
   notifyPlanStarted: (orderId, invoice) => later('plan started', () => planStarted(orderId, invoice)),
   notifyCyclePaid: (orderId, invoice) => later('plan payment', () => cyclePaid(orderId, invoice)),
   notifyUploadStatus: (requestId, status, note, step) => later(`upload ${status}`, () => uploadStatus(requestId, status, note, step)),
+  notifyWorkUpdate: (orderId, entryId) => later('work update', () => workUpdate(orderId, entryId)),
   // Awaitable forms for tests.
   planStarted,
   cyclePaid,
   uploadStatus,
+  workUpdate,
 };

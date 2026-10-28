@@ -96,6 +96,8 @@ before(async () => {
   app.post('/admin/clients/:customerId/service-plans', adminActions.startPlanForClient);
   app.patch('/admin/service-plans/:orderId/release-mode', adminActions.setReleaseMode);
   app.post('/admin/uploads/:requestId/status', adminActions.setUploadStatusController);
+  app.post('/admin/service-plans/:orderId/work-updates', adminActions.addWorkUpdate);
+  app.get('/get-product', require('../controller/product/getProduct'));
   app.patch('/admin/plan-catalogue/quote', require('../controller/admin/planCatalogue').quotePlanController);
   server = app.listen(0, '127.0.0.1'); await new Promise((resolve) => server.once('listening', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
@@ -302,4 +304,35 @@ test('order payloads carry the plan allowance from serviceAllowance.js', async (
   await call(`/admin/service-plans/${orderId}/release-mode`, { method: 'PATCH', body: { releaseMode: 'monthly' } });
   const [row] = await applyOrderSummary(Order.find({ _id: orderId }));
   assert.deepEqual([row.uploadAllowance.limit, row.uploadAllowance.cycleLimit, row.uploadAllowance.remaining], [2, 6, 2]);
+});
+
+test('portal plan list carries each plan card price range', async () => {
+  await flexiblePlan(); await starterPlan(); await liveChatPlan();
+  await Product.create({ serviceName: 'Feature', category: 'feature_upgrades', price: 900, sellingPrice: 900 });
+  const list = await call('/get-product');
+  assert.equal(list.status, 200, list.message);
+  const byName = Object.fromEntries(list.data.map((p) => [p.serviceName, p]));
+  assert.deepEqual(byName['Website Update · Flexible'].priceRange, { unit: 'update', from: 500, to: 4300 });
+  assert.deepEqual(byName['Starter Update Plan'].priceRange, { unit: 'month', from: 1490, to: 1490 });
+  assert.deepEqual(byName['Live Chat Feature'].priceRange, { unit: 'one_time', from: 2500, to: 2500 });
+  assert.equal('priceRange' in byName.Feature, false);
+});
+
+test('work update: plans without uploads only; stored on the order and mailed to the client', async () => {
+  const chat = await liveChatPlan();
+  const chatOrderId = (await walletBuy({ planId: String(chat._id) })).data.orderId;
+  assert.equal((await call(`/admin/service-plans/${chatOrderId}/work-updates`, { body: { text: '   ' } })).status, 400);
+  const posted = await call(`/admin/service-plans/${chatOrderId}/work-updates`, { body: { text: 'Live chat is on every page.' } });
+  assert.equal(posted.status, 201, posted.message);
+  assert.deepEqual(posted.data.workUpdates.map((w) => w.text), ['Live chat is on every page.']);
+  const entryId = String(posted.data.workUpdates[0]._id);
+  const mail = await mailFor(`plan-work-update:${chatOrderId}:${entryId}`);
+  assert.equal(mail?.event, 'plan.work_update');
+  assert.equal(mail?.status, 'sent');
+  assert.ok(sent.some((m) => m.subject === 'Work update for Live Chat Feature' && m.to.includes('client@example.test')));
+
+  const starter = await starterPlan();
+  const uploadOrderId = (await walletBuy({ planId: String(starter._id), selectedBillingCycle: 'monthly', tenureMonths: 1 })).data.orderId;
+  assert.equal((await call(`/admin/service-plans/${uploadOrderId}/work-updates`, { body: { text: 'x' } })).status, 422);
+  assert.equal((await call(`/admin/service-plans/${new mongoose.Types.ObjectId()}/work-updates`, { body: { text: 'x' } })).status, 404);
 });

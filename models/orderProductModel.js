@@ -838,6 +838,16 @@ const orderSchema = new mongoose.Schema({
         }],
         default: []
     },
+    // "What we did" notes our team posts on a plan without uploads (capability send_reminders),
+    // newest last; the client sees them on the plan page and gets a mail for each
+    // (controller/admin/servicePlanAdmin.js addWorkUpdate, docs/plan.md §4).
+    serviceWorkUpdates: {
+        type: [{
+            text: { type: String, trim: true, maxlength: 2000 },
+            at: { type: Date, default: Date.now }
+        }],
+        default: []
+    },
     servicePlanStatus: {
         type: String,
         enum: ['pending_activation', 'active', 'paused', 'expired', 'inactive', 'cancelled'],

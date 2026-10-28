@@ -169,27 +169,29 @@ test('non-admins cannot read, save, act or quote', async () => {
 
 const post = (path, body) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie(admin) }, body: JSON.stringify(body || {}) }).then(async (r) => ({ status: r.status, ...await r.json() }));
 
-test('flexible plans stay hidden until the builder is live: save, unhide and restore', async () => {
+test('flexible plans go on sale (Phase 2b builder): save, unhide and restore', async () => {
   const visible = await save(flexibleBody({ isHidden: false }));
-  assert.equal(visible.status, 409);
-  assert.match(visible.message, /stays hidden/);
-  assert.equal(await productModel.countDocuments(), 0);
+  assert.equal(visible.status, 200, visible.message);
+  assert.equal(visible.data.isHidden, false);
+  assert.equal((await call('/admin/plan-catalogue')).data.plans[0].canBeOnSale, true);
 
-  const plan = (await save(flexibleBody())).data;
+  const plan = (await save(flexibleBody({ serviceName: 'Flexible hidden' }))).data;
   assert.equal(plan.isHidden, true);
-  assert.equal((await call('/admin/plan-catalogue')).data.plans[0].canBeOnSale, false);
-  assert.equal((await save({ action: 'unhide', planId: String(plan._id) })).status, 409);
-  assert.equal((await post('/unhide-product', { _id: String(plan._id) })).status, 400);
-  // An edit that does not send isHidden keeps it hidden.
-  const { isHidden, creating, ...edit } = flexibleBody({ ratePerFile: 90 });
+  assert.equal((await save({ action: 'unhide', planId: String(plan._id) })).status, 200);
+  assert.equal((await productModel.findById(plan._id).lean()).isHidden, false);
+  assert.equal((await save({ action: 'hide', planId: String(plan._id) })).status, 200);
+  assert.equal((await post('/unhide-product', { _id: String(plan._id) })).status, 200);
+  // An edit that does not send isHidden keeps the current visibility.
+  const { isHidden, creating, ...edit } = flexibleBody({ serviceName: 'Flexible hidden', ratePerFile: 90 });
   assert.equal((await save({ ...edit, planId: String(plan._id) })).status, 200);
+  assert.equal((await productModel.findById(plan._id).lean()).isHidden, false);
 
   await orderModel.collection.insertOne({ productId: new mongoose.Types.ObjectId(String(plan._id)), userId: customer._id, isServicePlan: true });
   assert.equal((await save({ action: 'retire', planId: String(plan._id) })).data.action, 'retired');
   const restored = await post(`/admin/plans/${plan._id}/reactivate`);
   assert.equal(restored.status, 200, restored.message);
-  assert.equal(restored.data.isHidden, true);
-  assert.equal((await productModel.findById(plan._id).lean()).isHidden, true);
+  assert.equal(restored.data.isHidden, false);
+  assert.equal((await productModel.findById(plan._id).lean()).isHidden, false);
 
   // Fixed plans still go on sale.
   const fixed = await save({ ...portalStarterBody, creating: true, categoryKey: 'website_updates', isHidden: true });

@@ -122,4 +122,20 @@ const setUploadStatusController = handle('Failed to change the upload status', a
   res.json({ message: 'Upload status saved', success: true, error: false, data });
 });
 
-module.exports = { startPlanForClient, setReleaseMode, setUploadStatusController };
+// POST /api/admin/service-plans/:orderId/work-updates  { text }
+// For plans without uploads: our team says what was done; the client sees it on the plan page
+// and gets a mail (WhatsApp mirrors it).
+const addWorkUpdate = handle('Failed to post the work update', async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) fail('Write what was done');
+  if (text.length > 2000) fail('Keep the work update under 2000 characters');
+  const order = await Order.findOne({ _id: req.params.orderId, isServicePlan: true }).select('servicePlanSnapshot.capability').lean().catch(() => null);
+  if (!order) fail('Plan order not found', 404);
+  if (order.servicePlanSnapshot?.capability !== 'send_reminders') fail('Work updates are for plans without uploads. Use the upload status for this plan.', 422);
+  const entry = { _id: new mongoose.Types.ObjectId(), text, at: new Date() };
+  const saved = await Order.findByIdAndUpdate(order._id, { $push: { serviceWorkUpdates: entry } }, { new: true }).select('serviceWorkUpdates').lean();
+  require('../../helpers/servicePlanNotifications').notifyWorkUpdate(order._id, String(entry._id));
+  res.status(201).json({ message: 'Work update posted', success: true, error: false, data: { orderId: order._id, workUpdates: saved.serviceWorkUpdates } });
+});
+
+module.exports = { startPlanForClient, setReleaseMode, setUploadStatusController, addWorkUpdate };

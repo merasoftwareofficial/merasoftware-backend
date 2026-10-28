@@ -1032,4 +1032,22 @@ definitions['plan.upload.rejected'] = {
     return request?.userId?.email ? { to: [request.userId.email], values: uploadValues(request, order, note) } : null;
   },
 };
+// A plan without uploads: our team tells the client what was done (servicePlanNotifications.js).
+definitions['plan.work_update'] = {
+  subject: 'Work update for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'Here is what we did for **{{plan}}** on {{postedOn}}:', '',
+    '{{work}}', '',
+    'Reply if you have any question.', '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: {
+    name: NAME, plan: PLAN, postedOn: detail('Posted on', '28 Oct 2026, 11:30 am IST', 'When our team posted the update'),
+    work: detail('What was done', 'Live chat is now on every page of your website.'), link: PLAN_LINK,
+  },
+  blocks: {},
+  build(order, entry) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    return { to: [user.email], values: { name: text(user.name), plan: planTitle(order), postedOn: moment(entry?.at), work: text(entry?.text), link: planLink(order) } };
+  },
+};
 module.exports = { definitions, refundTable };

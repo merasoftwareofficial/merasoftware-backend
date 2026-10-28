@@ -12,13 +12,14 @@
 //              exact name typed.
 //   hide / unhide -> not while retired; it is the retire lifecycle that owns isHidden then.
 //
-// Flexible plans stay hidden until the new customer plan builder is live (owner, 28 Oct 2026):
-// the current portal purchase pages show the stored per-cycle price, which a flexible plan does
-// not have. Turned on in Phase 2b by setting FLEXIBLE_PLANS_ON_SALE to true.
+// Flexible plans were held hidden until the customer plan builder existed (owner, 28 Oct 2026):
+// the old portal purchase pages showed the stored per-cycle price, which a flexible plan does
+// not have. Phase 2b ships the builder, so the switch is on. Put a flexible plan on sale only
+// after the Phase 2b portal is deployed (deploy order backend → website → portal).
 const productModel = require('../models/productModel');
 const orderModel = require('../models/orderProductModel');
 
-const FLEXIBLE_PLANS_ON_SALE = false;
+const FLEXIBLE_PLANS_ON_SALE = true;
 
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 

@@ -232,6 +232,7 @@ router.patch("/admin/plan-catalogue/quote", authToken, require('../controller/ad
 // Flexible Plans admin actions (controller/admin/servicePlanAdmin.js).
 router.post("/admin/clients/:customerId/service-plans", authToken, require('../controller/admin/servicePlanAdmin').startPlanForClient);
 router.patch("/admin/service-plans/:orderId/release-mode", authToken, require('../controller/admin/servicePlanAdmin').setReleaseMode);
+router.post("/admin/service-plans/:orderId/work-updates", authToken, require('../controller/admin/servicePlanAdmin').addWorkUpdate);
 router.post("/admin/uploads/:requestId/status", authToken, require('../controller/admin/servicePlanAdmin').setUploadStatusController);
 router.get("/admin/message-templates", authToken, getMessageTemplatesController);
 router.post("/admin/message-templates", authToken, createMessageTemplateController);
