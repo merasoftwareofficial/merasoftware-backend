@@ -1,11 +1,10 @@
 const Product = require('../../models/productModel');
 const { quoteServicePlan, planQuoteKey, priceRange } = require('../../helpers/servicePlanPricing');
-const { listPlanCategories } = require('../../helpers/planCategories');
+const { ON_SALE, readSaleCatalogue } = require('../../helpers/servicePlanPublicCatalogue');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 
 // Quotes for the plan builder (portal) and the public plans page (website). Every price comes from
 // helpers/servicePlanPricing.js; the purchase re-quotes and refuses a quoteKey that changed.
-const ON_SALE = { category: 'service_plan', isServicePlan: true, isHidden: { $ne: true }, retiredAt: null, archivedAt: null };
 
 const respond = (fn) => async (req, res) => {
   try { await fn(req, res); }
@@ -62,15 +61,21 @@ const customerQuote = respond(async (req, res) => {
   res.set('Cache-Control', 'no-store').json({ success: true, data: await quoteFor(req.body) });
 });
 
+// Browser-safe, customer-authenticated catalogue. Keeps the nested portal plan shape.
+const customerCatalogue = respond(async (req, res) => {
+  if (req.userRole !== 'customer') return res.status(403).json({ success: false, error: true, message: 'Switch to your customer role to browse services.' });
+  res.set('Cache-Control', 'no-store').json({ success: true, data: await readSaleCatalogue() });
+});
+
 // GET /api/integration/plan-catalogue (website server): plans on sale + active categories.
 const integrationCatalogue = respond(async (req, res) => {
   requireIntegration(req);
-  const [plans, categories] = await Promise.all([Product.find(ON_SALE).sort({ createdAt: -1 }).lean(), listPlanCategories()]);
+  const { plans, categories } = await readSaleCatalogue();
   res.set('Cache-Control', 'no-store').json({
     success: true,
     data: {
       plans: plans.map(publicPlan),
-      categories: categories.filter((entry) => entry.status === 'active').map(({ key, label, description, sortOrder }) => ({ key, label, description, sortOrder })),
+      categories,
     },
   });
 });
@@ -82,4 +87,4 @@ const integrationQuote = respond(async (req, res) => {
   res.set('Cache-Control', 'no-store').json({ success: true, data: { planId: req.body.planId, quote } });
 });
 
-module.exports = { customerQuote, integrationCatalogue, integrationQuote, publicPlan };
+module.exports = { customerQuote, customerCatalogue, integrationCatalogue, integrationQuote, publicPlan };

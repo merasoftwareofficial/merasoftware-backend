@@ -327,6 +327,7 @@ router.post("/create-order", authToken, createOrder)
 // Single service: wallet, UPI or combined. Bulk: wallet only (doc 55 §10).
 router.post("/customer/service-plan-order", authToken, customerCreateServicePlanOrder)
 router.post("/customer/service-plan-quote", authToken, require('../controller/order/servicePlanQuote').customerQuote)
+router.get('/customer/service-plan-catalogue', authToken, require('../controller/order/servicePlanQuote').customerCatalogue)
 router.get('/customer/service-plan-offers/:planId', authToken, require('../controller/order/servicePlanOffers'))
 router.post("/customer/custom-project-order", authToken, customerCreateCustomProjectOrder)
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)
