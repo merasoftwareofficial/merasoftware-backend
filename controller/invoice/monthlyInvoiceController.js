@@ -1,5 +1,4 @@
 const {
-  updateOverdueInvoicesAndPausePlans,
   markInvoicePaidAndResumePlan,
 } = require("../../helpers/invoiceLifecycle");
 const transactionModel = require("../../models/transactionModel");
@@ -25,28 +24,6 @@ const requireAdmin = (req, res) => {
   }
 
   return true;
-};
-
-const updateOverdueInvoices = async (req, res) => {
-  try {
-    if (!requireAdmin(req, res)) return;
-
-    const result = await updateOverdueInvoicesAndPausePlans();
-
-    return res.status(200).json({
-      message: "Overdue invoices updated successfully",
-      success: true,
-      error: false,
-      data: result,
-    });
-  } catch (error) {
-    console.error("Error updating overdue invoices:", error);
-    return res.status(500).json({
-      message: error.message || "Failed to update overdue invoices",
-      success: false,
-      error: true,
-    });
-  }
 };
 
 const markInvoiceAsPaid = async (req, res) => {
@@ -328,7 +305,6 @@ const sendPaymentRecordReminder = async (req, res) => {
 };
 
 module.exports = {
-  updateOverdueInvoices,
   markInvoiceAsPaid,
   getPaymentRecordDetail,
   downloadPaymentRecordInvoice,

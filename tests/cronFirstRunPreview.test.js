@@ -63,9 +63,10 @@ test('file cleanup lists only expired Drive files as permanent deletes', () => {
   assert.match(report.fileCleanup[0].customer, /Ravi <ravi@example.test>/);
 });
 
-test('overdue monthly bill pauses its legacy plan, and the legacy plan renews', () => {
-  assert.deepEqual(report.overdueMonthly.map(row => [row.invoice, row.planPaused]), [['INV-1', true]]);
-  assert.deepEqual(report.legacyRenewals.map(row => [row.orderId, row.invoiceAmount]), [[String(ids.legacyOrder), 1200]]);
+test('retired legacy job neither renews plans nor changes old bill statuses', async () => {
+  assert.deepEqual(report.overdueMonthly, []);
+  assert.deepEqual(report.legacyRenewals, []);
+  assert.equal((await MonthlyInvoice.collection.findOne({ invoiceNumber: 'INV-1' })).status, 'unpaid');
 });
 
 test('service renewals: inactive before its ending is flagged, a due cycle bills and pauses, a final cycle expires', () => {

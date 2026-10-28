@@ -102,3 +102,64 @@ test('non-admins cannot read or save', async () => {
   assert.equal((await call({ user: customer, body: { creating: true, key: 'x_key', label: 'X' } })).status, 403);
   assert.equal(await PlanCategory.countDocuments(), 0);
 });
+
+
+test('project choice explicitly creates one linked category and repeated/concurrent confirms reuse it', async () => {
+  const body = { action: 'use_project_category', projectCategoryKey: 'standard_websites' };
+  const results = await Promise.all(Array.from({ length: 6 }, () => save(body)));
+  results.forEach(row => assert.equal(row.status, 200, row.message));
+  assert.equal(new Set(results.map(row => row.data.category.key)).size, 1);
+  assert.equal(await PlanCategory.countDocuments({ linkedProjectCategory: 'standard_websites' }), 1);
+  const category = results[0].data.category;
+  assert.equal(category.label, 'Standard Website');
+  assert.equal(category.linkedProjectCategory, 'standard_websites');
+  await save({ key: category.key, label: 'My showcase label' });
+  const reused = await save(body);
+  assert.equal(reused.data.category.label, 'My showcase label');
+});
+
+test('multiple links and archived links require an explicit choice or revision-checked restore', async () => {
+  await save({ creating: true, key: 'first_link', label: 'First', linkedProjectCategory: 'standard_websites' });
+  await save({ creating: true, key: 'second_link', label: 'Second', linkedProjectCategory: 'standard_websites' });
+  const body = { action: 'use_project_category', projectCategoryKey: 'standard_websites' };
+  const choose = await save(body);
+  assert.equal(choose.data.status, 'choose');
+  assert.equal(choose.data.categories.length, 2);
+  for (const category of choose.data.categories) await save({ key: category.key, status: 'archived' });
+  const archived = await save(body);
+  assert.equal(archived.data.status, 'archived');
+  assert.equal(await PlanCategory.countDocuments(), 2);
+  const selected = archived.data.categories[0];
+  const restored = await save({ key: selected.key, status: 'active', expectedUpdatedAt: selected.updatedAt });
+  assert.equal(restored.status, 200);
+  const stale = await save({ key: selected.key, label: 'Stale rename', expectedUpdatedAt: selected.updatedAt });
+  assert.equal(stale.status, 409);
+  assert.equal((await save(body)).data.category.key, selected.key);
+});
+
+test('project choice rejects invalid/archived links, wrong roles and unrelated deterministic-key collisions', async () => {
+  const ProjectCategory = require('../models/categoryBasePriceModel');
+  await ProjectCategory.create({ category: 'custom_archived', label: 'Archived project', status: 'archived' });
+  for (const projectCategoryKey of ['no_such_project', 'Bad Key', 'custom_archived']) {
+    assert.equal((await save({ action: 'use_project_category', projectCategoryKey })).status, 400);
+  }
+  const body = { action: 'use_project_category', projectCategoryKey: 'standard_websites' };
+  assert.equal((await call({ user: customer, body })).status, 403);
+  const { projectPlanCategoryKey } = require('../helpers/planCategories');
+  const key = projectPlanCategoryKey('standard_websites');
+  await save({ creating: true, key, label: 'Independent category', linkedProjectCategory: null });
+  assert.equal((await save(body)).status, 409);
+  assert.equal((await PlanCategory.findOne({ key }).lean()).linkedProjectCategory, null);
+  assert.equal(await PlanCategory.countDocuments(), 1);
+});
+
+test('custom project labels remain references; independent categories remain unlinked', async () => {
+  const ProjectCategory = require('../models/categoryBasePriceModel');
+  await ProjectCategory.create({ category: 'custom_active', label: 'Custom Project', status: 'active', sortOrder: 7 });
+  const linked = await save({ action: 'use_project_category', projectCategoryKey: 'custom_active' });
+  assert.equal(linked.data.category.linkedProjectCategory, 'custom_active');
+  assert.equal(linked.data.category.label, 'Custom Project');
+  assert.equal(linked.data.category.sortOrder, 7);
+  const independent = await save({ creating: true, key: 'showcase_only', label: 'Showcase only', linkedProjectCategory: null });
+  assert.equal(independent.data.linkedProjectCategory, null);
+});

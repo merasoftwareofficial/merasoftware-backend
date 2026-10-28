@@ -1,5 +1,5 @@
 const User = require('../../models/userModel');
-const { listPlanCategories, planCategoryUsage, savePlanCategory } = require('../../helpers/planCategories');
+const { listPlanCategories, planCategoryUsage, savePlanCategory, useProjectCategory } = require('../../helpers/planCategories');
 
 // Admin plan categories. Called by the website admin control panel (salesBackend pattern:
 // GET reads, PATCH saves), so the admin role is checked on the token and on the stored user.
@@ -38,7 +38,11 @@ const listPlanCategoriesController = async (req, res) => {
 const savePlanCategoryController = async (req, res) => {
   try {
     if (!await isAdmin(req)) return res.status(403).json({ message: 'Forbidden', error: true, success: false });
-    const data = await savePlanCategory(req.body, req.userId);
+    const body = req.body || {};
+    if (body.action !== undefined && body.action !== 'use_project_category') return res.status(400).json({ success: false, error: true, message: 'Unknown category action' });
+    const data = body.action === 'use_project_category'
+      ? await useProjectCategory(body.projectCategoryKey, req.userId)
+      : await savePlanCategory(body, req.userId);
     return res.json({
       message: req.body?.creating === true ? 'Plan category created' : 'Plan category saved',
       success: true,

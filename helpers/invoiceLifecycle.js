@@ -6,17 +6,6 @@ const { preparePaymentEvidence } = require("./paymentEvidence");
 const isMonthlyPlan = (order) =>
   Boolean(order?.productId?.isMonthlyRenewablePlan || order?.productId?.isMonthlyLimitedPlan);
 
-const pauseOrderForOverdueInvoice = async (order, session = null) => {
-  if (!order || !isMonthlyPlan(order) || order.planStatus === "closed") {
-    return false;
-  }
-
-  order.isActive = false;
-  order.autoRenewalStatus = "paused";
-  await order.save({ session });
-  return true;
-};
-
 const resumeOrderForPaidInvoice = async (order, session = null) => {
   if (!order || !isMonthlyPlan(order) || order.planStatus === "closed") {
     return false;
@@ -48,39 +37,6 @@ const resumeOrderForPaidInvoice = async (order, session = null) => {
   order.autoRenewalStatus = "active";
   await order.save({ session });
   return true;
-};
-
-const updateOverdueInvoicesAndPausePlans = async ({ now = new Date(), session = null } = {}) => {
-  const overdueInvoices = await monthlyInvoiceModel
-    .find({
-      status: "unpaid",
-      dueDate: { $lt: now },
-    })
-    .populate({
-      path: "orderId",
-      populate: { path: "productId" },
-    })
-    .session(session);
-
-  const results = [];
-
-  for (const invoice of overdueInvoices) {
-    invoice.status = "overdue";
-    await invoice.save({ session });
-
-    const planPaused = await pauseOrderForOverdueInvoice(invoice.orderId, session);
-    results.push({
-      invoiceId: invoice._id,
-      orderId: invoice.orderId?._id,
-      invoiceNumber: invoice.invoiceNumber,
-      planPaused,
-    });
-  }
-
-  return {
-    processed: results.length,
-    results,
-  };
 };
 
 const generateInvoiceTransactionId = (invoice) => {
@@ -223,6 +179,5 @@ const markInvoicePaidAndResumePlan = async ({
 };
 
 module.exports = {
-  updateOverdueInvoicesAndPausePlans,
   markInvoicePaidAndResumePlan,
 };

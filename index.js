@@ -7,7 +7,6 @@ require('./helpers/sessionToken').sessionSecret()
 const connnectDB = require("./config/db")
 const router = require("./routes")
 const fileCleanupScheduler = require('./helpers/fileCleanupScheduler');
-const { scheduleAutoRenewal } = require('./cron/autoRenewalCron');
 const { scheduleServicePlanRenewals } = require('./cron/servicePlanRenewalCron');
 const cron = require("node-cron");
 const axios = require("axios");
@@ -27,12 +26,11 @@ const server = http.createServer(app)
 const cronsEnabled = process.env.ENABLE_CRONS === 'true';
 if (cronsEnabled) {
   fileCleanupScheduler.scheduleCleanup();
-  scheduleAutoRenewal();
   scheduleServicePlanRenewals();
   require('./cron/offerPaymentReminderCron').scheduleOfferPaymentReminders();
   scheduleChessCleanup();
   console.log('File cleanup scheduler initialized');
-  console.log('Auto-renewal scheduler initialized');
+  console.log('Service-plan renewal scheduler initialized');
 } else {
   console.log('Crons disabled (ENABLE_CRONS is not "true") — skipping cleanup/renewal/chess-cleanup schedulers.');
 }

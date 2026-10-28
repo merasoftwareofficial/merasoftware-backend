@@ -1,5 +1,11 @@
 # Current reservation/payment audit — 25 October 2026
 
+## Flexible Plans cleanup review — 28 October 2026
+
+- Reviewed approved legacy route/controller/cron/script deletions across backend, portal and website: no remaining runtime caller found for deleted items. Current service renewal cron and monthlyInvoiceModel/payment readers/handlers remain. Q5 retains eight old bills and leaves three overdue statuses unchanged; no live database action performed.
+- Fresh backend suite 336/336; fixture proof retains eight old bills through explicit admin settlement, protects other overdue bills/current service order, denies customer mark-paid, and reuses the receipt on sequential retry. This does not establish concurrent payment atomicity or live delivery. Logs/proof: `E:/Allprojects/backup/backend/work29-plans-review/`.
+- Both editors pass category create/reuse/restore/save/reopen browser proof. Review also reproduces lost unconfirmed inline category name on navigation: picker-local state is outside existing dirty guards. No app fix in this audit. Current fixed-plan validation/pricing still uses limitScope; preserve it and bill schema. Full remaining gates/next action: `E:/Allprojects/merasoftware/src/docs/plan.md`.
+
 Cross-app context and next steps: [RESERVATION_AGENT_HANDOVER.md](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md). The sections labelled historical below are superseded for reservation/revision implementation status.
 
 Local corrections completed against backend `d169db6`, portal `4c1ab35`, website `2d1cf55`. Production deployment, flags, indexes and real provider delivery were not changed or verified.

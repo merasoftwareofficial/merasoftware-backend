@@ -5,11 +5,10 @@
 // will each cron do to the live data?" Production crons have been off since the new backend
 // went live (~28 Sep 2026), so the first run catches up on everything that waited.
 //
-// Each section mirrors one job as it ships today (commit a0e0141). If a job's code changes,
+// Each section mirrors one job as it ships today. If a job's code changes,
 // update its section here too:
 //
 //   00:00      helpers/fileCleanupScheduler.js   cleanupExpiredFiles()       Drive delete — PERMANENT
-//   01:00      cron/autoRenewalCron.js           processAutoRenewal()        overdue + legacy renewals
 //   01:05 IST  cron/servicePlanRenewalCron.js    processServicePlanRenewals()
 //   */15 min   cron/offerPaymentReminderCron.js  processOfferPaymentReminders()  emails — cannot be unsent
 //   every 2 h  chess/chessCleanupCron.js         expireStaleEndRequests(12)
@@ -47,7 +46,6 @@ const HOUR = 3600000;
 async function collectFirstRunPreview(now = new Date()) {
   const Order = require("../models/orderProductModel");
   const Invoice = require("../models/invoiceModel");
-  const MonthlyInvoice = require("../models/monthlyInvoiceModel");
   const UpdateRequest = require("../models/updateRequestModel");
   const User = require("../models/userModel");
   require("../models/productModel"); // registers 'product' for populate
@@ -79,23 +77,10 @@ async function collectFirstRunPreview(now = new Date()) {
     });
   }
 
-  // 2a. Monthly invoices that turn overdue; legacy monthly plans get paused.
+  // Legacy monthly renewal/overdue processing has been retired.
+  // Keep empty report fields for consumers of earlier preview output.
   const overdueMonthly = [];
-  for (const invoice of await MonthlyInvoice.find({ status: "unpaid", dueDate: { $lt: now } }).populate({ path: "orderId", populate: { path: "productId" } }).lean()) {
-    const order = invoice.orderId;
-    const monthlyPlan = Boolean(order?.productId?.isMonthlyRenewablePlan || order?.productId?.isMonthlyLimitedPlan);
-    overdueMonthly.push({ invoice: invoice.invoiceNumber || String(invoice._id), customer: await who(invoice.userId), dueDate: invoice.dueDate,
-      planPaused: Boolean(order && monthlyPlan && order.planStatus !== "closed") });
-  }
-
-  // 2b. Legacy monthly-limited renewals (Render runs in UTC, so "tomorrow" is the next UTC midnight).
-  const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
   const legacyRenewals = [];
-  for (const plan of await Order.find({ currentMonthExpiryDate: { $lt: tomorrow }, totalYearlyDaysRemaining: { $gt: 0 } }).populate("productId").lean()) {
-    if (plan.productId?.isMonthlyLimitedPlan !== true || plan.planStatus === "closed") continue;
-    legacyRenewals.push({ orderId: String(plan._id), customer: await who(plan.userId), periodEnded: plan.currentMonthExpiryDate,
-      invoiceAmount: plan.productId.monthlyRenewalPrice || 3000 });
-  }
 
   // 3. Service plan renewals.
   const serviceRenewals = [];
@@ -185,12 +170,7 @@ function printReport(r) {
     if (row.recordsRemovedWithoutDrive) out(`    + ${row.recordsRemovedWithoutDrive} expired record(s) without a Drive file removed from the list`);
   }
 
-  head(`2a. MONTHLY INVOICES → OVERDUE (01:00) — ${r.overdueMonthly.length} invoice(s), ${r.overdueMonthly.filter((x) => x.planPaused).length} plan(s) paused`);
-  for (const row of r.overdueMonthly) out(`  ${row.invoice}  due ${date(row.dueDate)}  ${row.customer}${row.planPaused ? "  → plan PAUSED" : ""}`);
-
-  head(`2b. LEGACY MONTHLY-LIMITED RENEWALS (01:00) — ${r.legacyRenewals.length} plan(s)`);
-  for (const row of r.legacyRenewals) out(`  order ${row.orderId}  period ended ${date(row.periodEnded)}  new unpaid bill ₹${row.invoiceAmount}  ${row.customer}`);
-  if (r.legacyRenewals.length) out("  Note: catches up one 30-day period per night.");
+  head("2. LEGACY MONTHLY RENEWAL / OVERDUE JOB — retired; existing bills unchanged");
 
   head(`3. SERVICE PLAN RENEWALS (01:05 IST) — ${r.serviceRenewals.length} plan(s) due`);
   for (const row of r.serviceRenewals) {

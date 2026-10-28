@@ -4,6 +4,7 @@
 const PlanCategory = require('../models/servicePlanCategoryModel');
 const { assertRevision, nextTime, conflict } = require('./catalogueRevision');
 const { getProjectCategory } = require('./projectCategories');
+const { createHash } = require('node:crypto');
 
 const KEY_PATTERN = /^[a-z][a-z0-9_]{2,39}$/;
 
@@ -107,6 +108,34 @@ async function savePlanCategory(body, actorId) {
   return normalise(row);
 }
 
+// Explicit admin confirmation only. Reuse existing links rather than cloning project categories.
+const projectPlanCategoryKey = (key) => `project_${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+async function useProjectCategory(projectKey, actorId) {
+  const project = await getProjectCategory(projectKey);
+  if (!project || project.status !== 'active') fail('Choose an active project category');
+  const linked = (await PlanCategory.find({ linkedProjectCategory: project.category }).lean()).map(normalise);
+  const active = linked.filter(row => row.status === 'active');
+  if (active.length === 1) return { status: 'selected', category: active[0] };
+  if (active.length > 1) return { status: 'choose', categories: active };
+  if (linked.length) return { status: 'archived', categories: linked };
+  const key = projectPlanCategoryKey(project.category);
+  const collision = await getPlanCategory(key);
+  if (collision) {
+    if (collision.linkedProjectCategory !== project.category) fail('A different category already owns this key. Choose or link an existing category explicitly.', 409);
+    return collision.status === 'active' ? { status: 'selected', category: collision } : { status: 'archived', categories: [collision] };
+  }
+  try {
+    const category = await savePlanCategory({ creating: true, key, label: project.label, linkedProjectCategory: project.category, status: 'active', sortOrder: project.sortOrder }, actorId);
+    return { status: 'selected', category };
+  } catch (error) {
+    // Two confirmations may race on the same deterministic key. Only reuse the correct winner.
+    if (error.statusCode !== 409) throw error;
+    const winner = await getPlanCategory(key);
+    if (!winner || winner.linkedProjectCategory !== project.category) throw error;
+    return winner.status === 'active' ? { status: 'selected', category: winner } : { status: 'archived', categories: [winner] };
+  }
+}
+
 module.exports = {
   KEY_PATTERN,
   listPlanCategories,
@@ -114,4 +143,6 @@ module.exports = {
   requireActivePlanCategory,
   planCategoryUsage,
   savePlanCategory,
+  useProjectCategory,
+  projectPlanCategoryKey,
 };

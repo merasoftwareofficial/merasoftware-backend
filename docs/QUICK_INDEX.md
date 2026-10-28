@@ -1,5 +1,10 @@
 # Backend work index
 
+## Flexible Plans review — 28 October 2026
+
+- Current cross-repo handoff: `E:/Allprojects/merasoftware/src/docs/plan.md` (resume + independent review). Category linking: `helpers/planCategories.js`, `controller/admin/planCategories.js`; current renewals: `cron/servicePlanRenewalCron.js`; retained old-bill settlement: `helpers/invoiceLifecycle.js`, `controller/invoice/monthlyInvoiceController.js`.
+- Approved A-D/F legacy cleanup applied locally. Fresh backend 336/336 and isolated old-bill read/settlement proof pass. No production action. Inline category-draft navigation warning gap remains in both editors; website cutover/schema cleanup remain gated. Evidence: `E:/Allprojects/backup/backend/work29-plans-review/`.
+
 **Next agent: start with the [cross-repo reservation handover](../../merasoftware/src/docs/RESERVATION_AGENT_HANDOVER.md).** It explains business decisions, local completion, exact test commands, working-tree state, backups and pending live rollout. Do not infer deployment from passing local tests.
 
 ## Package pages (Pricing & Packages menu) — 25 October 2026

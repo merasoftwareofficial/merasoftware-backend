@@ -67,15 +67,10 @@ const getGuestSlidesController = require('../controller/welcomeBanner/getGuestSl
 const uploadGuestSlidesController = require('../controller/welcomeBanner/uploadGuestSlidesController')
 const getUserWelcomeController = require('../controller/welcomeBanner/getUserWelcomeController')
 const uploadUserWelcomeController = require('../controller/welcomeBanner/uploadUserWelcomeController')
-const validateUpdatePlan = require('../controller/order/validateUpdatePlan')
-const toggleUpdatePlan = require('../controller/order/toggleUpdatePlan')
-const renewMonthlyPlan = require('../controller/order/renewMonthlyPlan')
-const { getUserRenewalStatus, manualRenewalCheck } = require('../controller/order/checkRenewalStatus')
 const updateGuestSlidesController = require('../controller/welcomeBanner/updateGuestSlidesController')
 const updateUserWelcomeController = require('../controller/welcomeBanner/updateUserWelcomeController')
 const deleteUserWelcomeController = require('../controller/welcomeBanner/deleteUserWelcomeController')
 const deleteGuestSlidesController = require('../controller/welcomeBanner/deleteGuestSlidesController')
-const getUserUpdatePlans = require('../controller/user/getUserUpdatePlans');
 const submitUpdateRequest = require('../controller/user/submitUpdateRequest');
 const getUserUpdateRequests = require('../controller/user/getUserUpdateRequests');
 const getOrderUploads = require('../controller/order/getOrderUploads');
@@ -150,11 +145,8 @@ const updatePartnerCustomer = require('../controller/user/updatePartnerCustomer'
 const { addBankAccount, updateBankAccount, deleteBankAccount, getBankAccounts } = require('../controller/user/bankAccountController');
 const getUserKycStatusController = require('../controller/user/getUserKycStatusController');
 
-// New renewal system controllers
-const createRenewalOrder = require('../controller/order/createRenewalOrder');
-const checkPendingRenewal = require('../controller/order/checkPendingRenewal');
+// Existing monthly bill payment/document handlers
 const {
-  updateOverdueInvoices,
   markInvoiceAsPaid,
   getPaymentRecordDetail,
   downloadPaymentRecordInvoice,
@@ -270,7 +262,6 @@ router.post("/update-partner-customer/:customerId", authToken, updatePartnerCust
 
 // Add role to user
 router.post("/addRole", authToken, addRoleToUserController)
-router.get("/user-update-plans", authToken, getUserUpdatePlans)
 router.post("/user-request-update", authToken, upload.any(), submitUpdateRequest)
 router.get('/upload-progress/:uploadId', authToken, require('../controller/user/getUploadProgress'));
 router.get("/get-update-requests", authToken, getUserUpdateRequests)
@@ -333,18 +324,8 @@ router.post("/customer/custom-project-order", authToken, customerCreateCustomPro
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)
 router.get("/customer/project-categories", authToken, require('../controller/order/getCustomerProjectCategories'))
 router.post("/customer/service-plan/stop-renewal", authToken, stopServiceRenewal)
-router.post("/validate-update-plan", authToken, validateUpdatePlan)
-router.post("/toggle-update-plan", authToken, toggleUpdatePlan)
 
-// OLD RENEWAL - DEPRECATED (kept for backward compatibility)
-router.post("/renew-monthly-plan", authToken, renewMonthlyPlan)
-
-// NEW RENEWAL SYSTEM (Approval-based flow)
-router.post("/create-renewal", authToken, createRenewalOrder)  // User creates renewal request
-router.get("/check-pending-renewal", authToken, checkPendingRenewal)  // Check if plan has pending renewal
-router.get("/user-renewal-status", authToken, getUserRenewalStatus)
-router.post("/manual-renewal-check", authToken, manualRenewalCheck)
-router.post("/invoices/update-overdue", authToken, updateOverdueInvoices)
+// Existing monthly bill settlement
 router.post("/invoices/:invoiceId/mark-paid", authToken, markInvoiceAsPaid)
 // One document surface for every invoice, customer and admin alike. The admin-only
 // /admin/project-final-invoices download|view pair was retired into these two — it rendered the
