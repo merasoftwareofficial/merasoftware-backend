@@ -323,6 +323,9 @@ router.get('/customer/service-plan-offers/:planId', authToken, require('../contr
 router.post("/customer/custom-project-order", authToken, customerCreateCustomProjectOrder)
 router.get("/customer/category-base-price", authToken, getCustomerCategoryBasePrice)
 router.get("/customer/project-categories", authToken, require('../controller/order/getCustomerProjectCategories'))
+// Get a Service → Start a Project: callback request saved as a lead.
+router.get("/customer/project-request/categories", authToken, require('../controller/lead/customerProjectRequest').getProjectRequestCategories)
+router.post("/customer/project-request", authToken, require('../controller/lead/customerProjectRequest').createProjectRequest)
 router.post("/customer/service-plan/stop-renewal", authToken, stopServiceRenewal)
 
 // Existing monthly bill settlement

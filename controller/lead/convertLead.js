@@ -44,6 +44,15 @@ const convertLeadController = async (req, res) => {
       });
     }
 
+    // A project request sent from the portal comes from someone who is already a client.
+    if (lead.requestedByUserId) {
+      return res.status(409).json({
+        message: "This request came from an existing client account, so there is nothing to convert. Open the client from the notes instead.",
+        error: true,
+        success: false,
+      });
+    }
+
     const cleanPhone = (lead.phone || "").trim();
     const cleanEmail = (lead.email || "").trim().toLowerCase();
 

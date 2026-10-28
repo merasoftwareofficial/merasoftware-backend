@@ -177,6 +177,14 @@ const leadSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "user",
   },
+  // Set when an existing portal client sent this lead themselves (Get a Service → Start a
+  // Project, controller/lead/customerProjectRequest.js). Such a lead is never converted: the
+  // person is already a client. Additive + default null so existing leads are unaffected.
+  requestedByUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "user",
+    default: null,
+  },
 }, {
   timestamps: true,
 });
