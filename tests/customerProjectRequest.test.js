@@ -21,6 +21,7 @@ async function call(path, { user = customer, body } = {}) {
   return { status: response.status, ...await response.json() };
 }
 const ask = (body, user) => call('/customer/project-request', { body, user });
+const REQUIRED = { budget: 'not_sure', callTime: 'any' };
 
 before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-project-request-secret';
@@ -56,7 +57,7 @@ test('categories: active and opened to customers, price not needed; clients only
 });
 
 test('a request becomes a New lead linked to the client, with readable notes', async () => {
-  const sent = await ask({ category: 'dynamic_websites', phone: ' 98765 43210 ', budget: '30k_1l', start: 'within_month', callTime: 'evening', details: 'A site for my bakery' });
+  const sent = await ask({ category: 'dynamic_websites', phone: ' 98765 43210 ', budget: '30k_1l', callTime: 'evening', details: 'A site for my bakery' });
   assert.equal(sent.status, 201);
   const [lead] = await leadModel.find().lean();
   assert.equal(lead.source, SOURCE);
@@ -65,34 +66,38 @@ test('a request becomes a New lead linked to the client, with readable notes', a
   assert.equal(lead.convertedToUserId, null);
   assert.equal(lead.email, 'asha@example.test');
   assert.equal(lead.phone, '98765 43210');
-  for (const text of ['Project type: Dynamic Website', 'Budget: ₹30,000 – ₹1 lakh', 'Start: Within a month', 'Best time to call: Evening', 'What they need: A site for my bakery', `account ${customer._id}`]) {
+  for (const text of ['Project type: Dynamic Website', 'Budget: ₹30,000 – ₹1 lakh', 'Best time to call: Evening', 'What they need: A site for my bakery', `account ${customer._id}`]) {
     assert.ok(lead.notes.includes(text), text);
   }
 });
 
-test('skip sends only the type and phone; bad input is refused', async () => {
-  assert.equal((await ask({ category: 'nope', phone: '9876543210' })).status, 400);
-  assert.equal((await ask({ category: 'standard_websites', phone: '12' })).status, 400);
-  assert.equal((await ask({ category: 'standard_websites', phone: '9876543210', budget: 'lots' })).status, 400);
-  assert.equal((await ask({ category: 'standard_websites', phone: '9876543210', details: 'x'.repeat(301) })).status, 400);
-  assert.equal((await ask({ category: 'standard_websites', phone: '9876543210' }, admin)).status, 403);
+test('budget, call time and phone are required; the note is optional; bad input is refused', async () => {
+  const ok = { category: 'standard_websites', phone: '9876543210', ...REQUIRED };
+  assert.equal((await ask({ ...ok, category: 'nope' })).status, 400);
+  assert.equal((await ask({ ...ok, phone: '12' })).status, 400);
+  assert.equal((await ask({ ...ok, budget: undefined })).status, 400);
+  assert.equal((await ask({ ...ok, callTime: '' })).status, 400);
+  assert.equal((await ask({ ...ok, budget: 'lots' })).status, 400);
+  assert.equal((await ask({ ...ok, skipped: true, budget: undefined, callTime: undefined })).status, 400);
+  assert.equal((await ask({ ...ok, details: 'x'.repeat(301) })).status, 400);
+  assert.equal((await ask(ok, admin)).status, 403);
   assert.equal(await leadModel.countDocuments(), 0);
-  const sent = await ask({ category: 'standard_websites', phone: '9876543210', skipped: true, budget: 'ignored-when-skipped' });
-  assert.equal(sent.status, 201);
+  assert.equal((await ask(ok)).status, 201);
   const lead = await leadModel.findOne().lean();
-  assert.ok(lead.notes.includes('Questions skipped'));
-  assert.ok(!lead.notes.includes('Budget'));
+  assert.ok(lead.notes.includes('Budget: Not sure yet'));
+  assert.ok(lead.notes.includes('Best time to call: Any time'));
+  assert.ok(!lead.notes.includes('What they need'));
 });
 
 test('one open request per client: a quick repeat changes nothing, a later one is added as a follow-up', async () => {
-  await ask({ category: 'standard_websites', phone: '9876543210' });
-  const again = await ask({ category: 'standard_websites', phone: '9876543210' });
+  await ask({ category: 'standard_websites', phone: '9876543210', ...REQUIRED });
+  const again = await ask({ category: 'standard_websites', phone: '9876543210', ...REQUIRED });
   assert.equal(again.status, 200);
   assert.equal(again.data.repeated, true);
   assert.equal(await leadModel.countDocuments(), 1);
 
   await leadModel.collection.updateOne({}, { $set: { createdAt: new Date(Date.now() - REPEAT_WINDOW_MS - 1000) } });
-  const later = await ask({ category: 'dynamic_websites', phone: '9876543210', budget: 'not_sure' });
+  const later = await ask({ category: 'dynamic_websites', phone: '9876543210', ...REQUIRED });
   assert.equal(later.status, 200);
   assert.equal(later.data.repeated, false);
   const [lead] = await leadModel.find().lean();
@@ -102,12 +107,12 @@ test('one open request per client: a quick repeat changes nothing, a later one i
 
   // Once the team closes it, the next request opens a fresh lead.
   await leadModel.updateOne({}, { status: 'Won' });
-  assert.equal((await ask({ category: 'standard_websites', phone: '9876543210' })).status, 201);
+  assert.equal((await ask({ category: 'standard_websites', phone: '9876543210', ...REQUIRED })).status, 201);
   assert.equal(await leadModel.countDocuments(), 2);
 });
 
 test('a portal request cannot be converted: the person is already a client', async () => {
-  await ask({ category: 'standard_websites', phone: '9876543210' });
+  await ask({ category: 'standard_websites', phone: '9876543210', ...REQUIRED });
   const lead = await leadModel.findOne().lean();
   const convert = await call(`/admin/leads/${lead._id}/convert`, { user: admin, body: {} });
   assert.equal(convert.status, 409);

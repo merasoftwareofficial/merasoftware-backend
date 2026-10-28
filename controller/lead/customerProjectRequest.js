@@ -2,8 +2,9 @@ const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const { listProjectCategories } = require("../../helpers/projectCategories");
 
-// Portal "Get a Service" → "Start a Project": a client picks a project category, optionally
-// answers a few questions, and asks for a callback. The request is saved as a lead
+// Portal "Get a Service" → "Start a Project": a client picks a project category, gives a budget,
+// a time to call and a phone number (plus an optional note), and asks for a callback. The
+// request is saved as a lead
 // (source SOURCE, requestedByUserId = the client) so the team works it in the admin Leads list.
 // Nothing is priced or ordered here; online orders stay in customerCreateCustomProjectOrder.js.
 
@@ -11,9 +12,9 @@ const SOURCE = "Portal – project request";
 const REPEAT_WINDOW_MS = 10 * 60 * 1000;
 const OPEN_STATUSES = ["New", "Contacted"];
 
+// Both answers are required; the portal form (pages/StartProjectRequestDetails.js) uses the same keys.
 const ANSWERS = {
   budget: { label: "Budget", options: { under_30k: "Under ₹30,000", "30k_1l": "₹30,000 – ₹1 lakh", above_1l: "Above ₹1 lakh", not_sure: "Not sure yet" } },
-  start: { label: "Start", options: { asap: "As soon as possible", within_month: "Within a month", exploring: "Just exploring" } },
   callTime: { label: "Best time to call", options: { morning: "Morning", afternoon: "Afternoon", evening: "Evening", any: "Any time" } },
 };
 const DETAILS_MAX = 300;
@@ -45,21 +46,15 @@ const getProjectRequestCategories = async (req, res) => {
 const cleanPhone = (value) => String(value || "").trim().replace(/\s+/g, " ");
 const validPhone = (value) => /^\+?[0-9 -]{7,20}$/.test(value) && value.replace(/\D/g, "").length >= 7 && value.replace(/\D/g, "").length <= 15;
 
-const noteFor = ({ user, category, phone, answers, skipped }) => {
+const noteFor = ({ user, category, phone, answers }) => {
   const lines = [
     "Project request from the client portal",
     `Client: ${user.name || "—"} <${user.email || "no email"}> (account ${user._id})`,
     `Project type: ${category.label}`,
     `Phone to call: ${phone}`,
+    ...Object.entries(ANSWERS).map(([key, { label, options }]) => `${label}: ${options[answers[key]]}`),
   ];
-  if (skipped) {
-    lines.push("Questions skipped: please call to discuss.");
-  } else {
-    Object.entries(ANSWERS).forEach(([key, { label, options }]) => {
-      if (answers[key]) lines.push(`${label}: ${options[answers[key]]}`);
-    });
-    if (answers.details) lines.push(`What they need: ${answers.details}`);
-  }
+  if (answers.details) lines.push(`What they need: ${answers.details}`);
   return lines.join("\n");
 };
 
@@ -75,20 +70,15 @@ const createProjectRequest = async (req, res) => {
     const phone = cleanPhone(body.phone);
     if (!validPhone(phone)) return reply(res, 400, "Please enter a valid phone number so we can call you.");
 
-    const skipped = body.skipped === true;
     const answers = {};
-    if (!skipped) {
-      for (const key of Object.keys(ANSWERS)) {
-        const value = body[key];
-        if (value === undefined || value === null || value === "") continue;
-        if (!Object.prototype.hasOwnProperty.call(ANSWERS[key].options, value)) return reply(res, 400, `Please choose a valid option for "${ANSWERS[key].label}".`);
-        answers[key] = value;
-      }
-      const details = String(body.details || "").trim();
-      if (details.length > DETAILS_MAX) return reply(res, 400, `Please keep the description under ${DETAILS_MAX} characters.`);
-      if (details) answers.details = details;
+    for (const [key, { label, options }] of Object.entries(ANSWERS)) {
+      if (!Object.prototype.hasOwnProperty.call(options, body[key])) return reply(res, 400, `Please choose "${label}".`);
+      answers[key] = body[key];
     }
-    const note = noteFor({ user, category, phone, answers, skipped });
+    const details = String(body.details || "").trim();
+    if (details.length > DETAILS_MAX) return reply(res, 400, `Please keep the description under ${DETAILS_MAX} characters.`);
+    if (details) answers.details = details;
+    const note = noteFor({ user, category, phone, answers });
 
     // One open request per client: a new request is added to it, and a repeat within
     // REPEAT_WINDOW_MS (a double click or a quick resend) changes nothing.
