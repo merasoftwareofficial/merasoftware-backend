@@ -142,6 +142,7 @@ const deleteOrderController = async (req, res) => {
       await updateRequestModel.deleteMany({ updatePlanId: orderObjectId }).session(session);
       await monthlyInvoiceModel.deleteMany({ orderId: orderObjectId }).session(session);
       await partnerCommissionModel.deleteMany({ orderId: orderObjectId }).session(session);
+      await require('../../helpers/reservationRelease').releaseProjectReservation({ projectId: orderObjectId, actorId: req.userId, deleting: true, session });
       await orderModel.deleteOne({ _id: orderObjectId }).session(session);
 
       await session.commitTransaction();

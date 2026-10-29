@@ -413,3 +413,161 @@ test('a phone entered with a rejected reservation is not saved', async () => {
   await assert.rejects(reserve(member, { quoteKey: 'stale', countryCode: '+91', phone: '9876500009' }), /changed/);
   assert.equal((await User.findById(member._id)).phone, undefined);
 });
+
+// Cancellation/deletion releases must preserve the commercial snapshot and original clock.
+const { releaseProjectReservation, repairUserReservationLinks } = require('../helpers/reservationRelease');
+async function releaseInTransaction(projectId, extra = {}) {
+  return mongoose.connection.transaction(session => releaseProjectReservation({ projectId, session, ...extra }));
+}
+test('cancelled unpaid reservation is repaired, reused once and keeps its original clock', async () => {
+  await reserve(customer);
+  assert.equal((await project()).statusCode, 201);
+  const old = await Order.findOne();
+  const before = await Reservation.findOne();
+  await Reservation.updateOne({ _id: before._id }, { $set: { resolution: { status: 'unchanged', closedAt: new Date(), at: new Date() } } });
+  await Order.updateOne({ _id: old._id }, { $set: { orderVisibility: 'cancelled' } });
+  await listReservations(customer._id);
+  const released = await Reservation.findById(before._id);
+  assert.equal(released.projectId, null);
+  assert.equal(released.resolution, null);
+  assert.equal(released.releases.length, 1);
+  assert.equal(released.releases[0].resolution.status, 'unchanged');
+  assert.equal(released.expiresAt.getTime(), before.expiresAt.getTime());
+  assert.deepEqual(released.offerSnapshot, before.offerSnapshot);
+  assert.equal((await Order.findById(old._id)).offerReservationId, null);
+  await repairUserReservationLinks(customer._id);
+  assert.equal((await Reservation.findById(before._id)).releases.length, 1);
+  assert.equal((await project({ offerReservationId: String(before._id) })).statusCode, 201);
+  const attached = await Reservation.findById(before._id);
+  assert.notEqual(String(attached.projectId), String(old._id));
+  assert.equal(attached.expiresAt.getTime(), before.expiresAt.getTime());
+  assert.notEqual((await project({ offerReservationId: String(before._id) })).statusCode, 201);
+});
+test('release never detaches a running project and rolls back with deletion', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await releaseInTransaction(row.projectId);
+  assert.ok((await Reservation.findById(row._id)).projectId);
+  await assert.rejects(mongoose.connection.transaction(async session => {
+    await releaseProjectReservation({ projectId: row.projectId, deleting: true, session });
+    await Order.deleteOne({ _id: row.projectId }).session(session);
+    throw new Error('rollback');
+  }), /rollback/);
+  assert.ok((await Reservation.findById(row._id)).projectId);
+  assert.ok(await Order.findById(row.projectId));
+  await releaseInTransaction(row.projectId, { deleting: true });
+  assert.equal((await Reservation.findById(row._id)).projectId, null);
+});
+test('historical missing project is repaired without renewing an expired reservation', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  // Immutable deadline represents a genuinely old reservation, not a fresh hold.
+  await Reservation.collection.updateOne({ _id: row._id }, { $set: { expiresAt: new Date(0) } });
+  await Order.deleteOne({ _id: row.projectId });
+  await repairUserReservationLinks(customer._id);
+  assert.equal((await Reservation.findById(row._id)).projectId, null);
+  const result = await project({ offerReservationId: String(row._id) });
+  assert.notEqual(result.statusCode, 200);
+  assert.equal((await Reservation.findById(row._id)).expiresAt.getTime(), 0);
+});
+test('pending and completed payments prevent automatic reservation reuse', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await Order.updateOne({ _id: row.projectId }, { $set: { orderVisibility: 'cancelled' } });
+  for (const status of ['pending', 'completed']) {
+    const payment = await Transaction.create({ userId: customer._id, orderId: row.projectId, amount: 100,
+      type: 'payment', status, description: 'Release guard fixture', paymentMethod: 'upi', transactionId: 'release-' + status });
+    await releaseInTransaction(row.projectId);
+    assert.ok((await Reservation.findById(row._id)).projectId);
+    await Transaction.deleteOne({ _id: payment._id });
+  }
+});
+test('price lock and prior force-apply are never reset by release', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await Order.updateOne({ _id: row.projectId }, { $set: { orderVisibility: 'cancelled' } });
+  await Reservation.updateOne({ _id: row._id }, { $set: { confirmedAt: new Date() } });
+  await releaseInTransaction(row.projectId);
+  assert.ok((await Reservation.findById(row._id)).projectId);
+  await Reservation.updateOne({ _id: row._id }, { $set: { confirmedAt: null, resolution: { status: 'force_applied', at: new Date() } } });
+  await releaseInTransaction(row.projectId);
+  assert.ok((await Reservation.findById(row._id)).projectId);
+});
+
+test('actual cancel and delete endpoints release unpaid offers', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  const admin = await User.findOne({ email: 'admin@example.test' });
+  const cancelResponse = response();
+  await require('../controller/order/cancelProjectOrder').cancelProjectOrder({ userId: admin._id, userRole: 'admin',
+    params: { orderId: String(row.projectId) }, body: { reason: 'Client changed the scope' } }, cancelResponse);
+  assert.equal(cancelResponse.statusCode, 200, JSON.stringify(cancelResponse.body));
+  assert.equal((await Reservation.findById(row._id)).projectId, null);
+  assert.equal((await Order.findById(row.projectId)).orderVisibility, 'cancelled');
+  await project({ offerReservationId: String(row._id) });
+  const linked = await Reservation.findById(row._id);
+  const plan = await require('../helpers/orderDeletePlan')(linked.projectId);
+  const deleteResponse = response();
+  await require('../controller/order/deleteOrder')({ userId: admin._id, userRole: 'admin',
+    params: { orderId: String(linked.projectId) }, body: { selectedSections: plan.requiredSectionKeys } }, deleteResponse);
+  assert.equal(deleteResponse.statusCode, 200, JSON.stringify(deleteResponse.body));
+  assert.equal(await Order.findById(linked.projectId), null);
+  assert.equal((await Reservation.findById(row._id)).projectId, null);
+  assert.equal((await Reservation.findById(row._id)).releases.length, 2);
+});
+test('concurrent repairs and project creation attach the released reservation only once', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await Order.updateOne({ _id: row.projectId }, { $set: { orderVisibility: 'cancelled' } });
+  await Promise.all([repairUserReservationLinks(customer._id), repairUserReservationLinks(customer._id)]);
+  assert.equal((await Reservation.findById(row._id)).releases.length, 1);
+  const results = await Promise.all([project({ offerReservationId: String(row._id) }), project({ offerReservationId: String(row._id) })]);
+  assert.equal(results.filter(result => result.statusCode === 201).length, 1);
+  assert.equal(await Order.countDocuments({ orderVisibility: { $ne: 'cancelled' } }), 1);
+});
+
+test('paid invoice evidence blocks reuse and is explained in the reservation list', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await Order.updateOne({ _id: row.projectId }, { $set: { orderVisibility: 'cancelled' } });
+  await Invoice.updateOne({ orderId: row.projectId, invoiceType: 'project' }, { $set: { amountPaid: 100 } });
+  const list = await listReservations(customer._id);
+  assert.equal(list.reservations[0].reuseNeedsReview, true);
+  assert.equal(list.reservations[0].projectId, String(row.projectId));
+});
+test('failed release rolls back cancellation and leaves the original reservation attached', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  const admin = await User.findOne({ email: 'admin@example.test' });
+  const release = require('../helpers/reservationRelease');
+  const original = release.releaseProjectReservation;
+  release.releaseProjectReservation = async () => { throw new Error('Injected release failure'); };
+  const res = response();
+  try {
+    await require('../controller/order/cancelProjectOrder').cancelProjectOrder({ userId: admin._id, userRole: 'admin',
+      params: { orderId: String(row.projectId) }, body: {} }, res);
+  } finally { release.releaseProjectReservation = original; }
+  assert.equal(res.statusCode, 500);
+  assert.notEqual((await Order.findById(row.projectId)).orderVisibility, 'cancelled');
+  assert.equal(String((await Reservation.findById(row._id)).projectId), String(row.projectId));
+});
+test('a reused reservation still reprices the new project after its original deadline', async () => {
+  await project();
+  const row = await Reservation.findOne();
+  await Order.updateOne({ _id: row.projectId }, { $set: { orderVisibility: 'cancelled' } });
+  await Reservation.updateOne({ _id: row._id }, { $set: { resolution: { status: 'unchanged', at: new Date(), closedAt: new Date() } } });
+  const created = await project({ offerReservationId: String(row._id) });
+  assert.equal(created.statusCode, 201);
+  const fresh = await Reservation.findById(row._id);
+  await Reservation.collection.updateOne({ _id: row._id }, { $set: { expiresAt: new Date(0) } });
+  const enabled = process.env.OFFER_RESERVATION_REPRICING_ENABLED;
+  process.env.OFFER_RESERVATION_REPRICING_ENABLED = 'true';
+  try {
+    const result = await require('../helpers/reservationRepricing').reconcileReservation(row._id, { catalogue: { offers: [] } });
+    assert.equal(result.status, 'repriced');
+    assert.equal((await Order.findById(fresh.projectId)).totalAmount, 10000);
+  } finally {
+    if (enabled === undefined) delete process.env.OFFER_RESERVATION_REPRICING_ENABLED;
+    else process.env.OFFER_RESERVATION_REPRICING_ENABLED = enabled;
+  }
+});

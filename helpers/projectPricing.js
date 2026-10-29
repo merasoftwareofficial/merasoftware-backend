@@ -5,6 +5,7 @@ const { freezePaymentPolicy } = require('./offerPaymentPolicy');
 // Resolve the commercial agreement before writing an order, invoice or payment.
 async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal, userId }) {
   if (!body.packageId && !body.offerSlug) return null; // Existing custom-project pricing stays available.
+  if (body.offerSlug && userId) await require('./reservationRelease').repairUserReservationLinks(userId);
   let reserved = null;
   if (body.offerReservationId) {
     if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);

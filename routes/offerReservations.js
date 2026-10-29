@@ -28,7 +28,7 @@ router.get('/user/:userId', wrap(async req => {
   // Admins also see the saved snapshot, extension audit and what happened after the deadline.
   return { ...list, reservations: list.reservations.map(view => {
     const row = rows.find(item => String(item._id) === view.id);
-    return { ...view, offerSnapshot: row.offerSnapshot, extensions: row.extensions || [], resolutionNote: row.resolution?.note || '' };
+    return { ...view, offerSnapshot: row.offerSnapshot, extensions: row.extensions || [], releases: row.releases || [], resolutionNote: row.resolution?.note || '' };
   }) };
 }));
 router.post('/:id/extend', wrap(async req => {

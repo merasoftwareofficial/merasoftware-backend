@@ -41,12 +41,17 @@ async function activeOwner(userId, session) {
 }
 async function listReservations(userId) {
   await activeOwner(userId);
+  await require('./reservationRelease').repairUserReservationLinks(userId);
   // Bring any due unpaid project to its post-deadline price before showing it (no-op unless enabled).
   await require('./reservationRepricing').reconcileUserReservations(userId);
   const now = Date.now();
   const rows = await Reservation.find({ userId }).sort({ reservedAt: -1 }).lean();
   const underReview = await reviewedReservationIds(userId, rows);
-  return { reservations: rows.map(row => reservationView(row, now, underReview.has(String(row._id)))), serverNow: new Date(now) };
+  const linkedProjects = await require('../models/orderProductModel').find({ _id: { $in: rows.filter(row => row.projectId).map(row => row.projectId) } })
+    .select('_id orderVisibility').lean();
+  const openProjects = new Set(linkedProjects.filter(order => order.orderVisibility !== 'cancelled').map(order => String(order._id)));
+  return { reservations: rows.map(row => ({ ...reservationView(row, now, underReview.has(String(row._id))),
+    reuseNeedsReview: Boolean(row.projectId && !openProjects.has(String(row.projectId))) })), serverNow: new Date(now) };
 }
 // How many hours before an offer ends public Reserve opens. Each offer sets it on the website
 // (owner decision 25 Oct 2026; website src/lib/offers.ts reserveWindowHours, 1–720). Offers

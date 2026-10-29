@@ -148,7 +148,10 @@ const cancelOneOrder = async ({ order, actorId, reason, refundOptions = {} }) =>
     // cron's sights even after the status filter is corrected.
     cancelled.serviceNextBillingDate = null;
   }
-  await cancelled.save();
+  await mongoose.connection.transaction(async session => {
+    await cancelled.save({ session });
+    await require('../../helpers/reservationRelease').releaseProjectReservation({ projectId: cancelled._id, actorId, session });
+  });
 
   return { order: cancelled, refunds, refundTotal };
 };

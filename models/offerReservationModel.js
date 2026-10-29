@@ -18,6 +18,8 @@ const schema = new mongoose.Schema({
   origin: { type: String, enum: ['customer', 'admin_project'], required: true, immutable: true },
   leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'lead', default: null },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'order', default: null },
+  releases: [{ _id: false, projectId: mongoose.Schema.Types.ObjectId, actorId: mongoose.Schema.Types.ObjectId,
+    at: Date, reason: String, resolution: mongoose.Schema.Types.Mixed }],
   confirmedAt: { type: Date, default: null },
   // What happened to the linked project after an unpaid deadline, set once by the shared operation.
   resolution: {
