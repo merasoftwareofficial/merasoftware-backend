@@ -184,7 +184,8 @@ test('website reads the public catalogue and quotes with its key only', async ()
   assert.equal(catalogue.status, 200, catalogue.message);
   assert.deepEqual(catalogue.data.plans.map((p) => p.serviceName), ['Website Update · Flexible']);
   assert.deepEqual(catalogue.data.plans[0].priceRange, { unit: 'update', from: 500, to: 4300 });
-  assert.equal(catalogue.data.categories[0].key, 'website_updates');
+  assert.ok(catalogue.data.categories.some(category => category.key === 'website_updates'));
+  assert.ok(catalogue.data.categories.some(category => category.key === 'standard_websites'));
   const quoted = await call('/integration/plan-catalogue/quote', { method: 'PATCH', bearer: SECRET, body: { planId: String(plan._id), purchase: 'one_time', files: 20, updates: 2 } });
   assert.equal(quoted.data.quote.totalPrice, 3000);
 });

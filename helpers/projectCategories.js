@@ -75,16 +75,20 @@ async function categoryUsage() {
   const Order = require('../models/orderProductModel');
   const Product = require('../models/productModel');
   const { readPackages } = require('./salesPackages');
-  const [projects, features, packages] = await Promise.all([
+  const [projects, features, packages, plans, legacyCategories] = await Promise.all([
     Order.aggregate([{ $match: { 'projectSnapshot.category': { $type: 'string' } } }, { $group: { _id: '$projectSnapshot.category', count: { $sum: 1 } } }]),
     Product.aggregate([{ $match: { category: 'feature_upgrades' } }, { $unwind: '$compatibleWith' }, { $group: { _id: '$compatibleWith', count: { $sum: 1 } } }]),
     readPackages(),
+    Product.find({ isServicePlan: true, archivedAt: null }).select('servicePlan.categoryKey servicePlan.projectCategoryKey').lean(),
+    require('./planCategories').listPlanCategories(),
   ]);
   const usage = {};
-  const add = (key, field, count) => { usage[key] = usage[key] || { projects: 0, features: 0, packages: 0 }; usage[key][field] += count; };
+  const add = (key, field, count) => { usage[key] = usage[key] || { projects: 0, features: 0, packages: 0, plans: 0 }; usage[key][field] += count; };
   projects.forEach(row => add(row._id, 'projects', row.count));
   features.forEach(row => add(row._id, 'features', row.count));
   packages.forEach(item => add(item.category, 'packages', 1));
+  const links = new Map(legacyCategories.filter(row => row.linkedProjectCategory).map(row => [row.key, row.linkedProjectCategory]));
+  plans.forEach(plan => { const key = plan.servicePlan?.categoryKey; const mainKey = plan.servicePlan?.projectCategoryKey || links.get(key); if (mainKey) add(mainKey, 'plans', 1); });
   return usage;
 }
 
@@ -134,6 +138,12 @@ async function saveProjectCategory(body, actorId) {
   if (body.customerSelectable !== undefined) {
     if (typeof body.customerSelectable !== 'boolean') fail('Choose whether customers can order this category');
     update.customerSelectable = body.customerSelectable;
+  }
+
+  if (update.label !== undefined) {
+    const folded = value => value.trim().replace(/\s+/g, ' ').toLowerCase();
+    const clash = (await listProjectCategories()).find(row => row.category !== key && folded(row.label) === folded(update.label));
+    if (clash) fail('A category with this name already exists. Choose the existing category.', 409);
   }
 
   const next = normalise({ ...(existing || { category: key, customerSelectable: false }), ...update });

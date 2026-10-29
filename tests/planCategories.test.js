@@ -163,3 +163,19 @@ test('custom project labels remain references; independent categories remain unl
   const independent = await save({ creating: true, key: 'showcase_only', label: 'Showcase only', linkedProjectCategory: null });
   assert.equal(independent.data.linkedProjectCategory, null);
 });
+
+test('plan dialog creates a main category through shared validation and role checks', async () => {
+  const Category = require('../models/categoryBasePriceModel');
+  const body = { action: 'save_project_category', creating: true, category: 'digital_campaigns', label: 'Digital Campaigns' };
+  try {
+    assert.equal((await call({ user: customer, body })).status, 403);
+    const results = await Promise.all([save(body), save(body)]);
+    assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+    assert.equal(await Category.countDocuments({ category: body.category }), 1);
+    assert.equal(await PlanCategory.countDocuments({ key: body.category }), 0);
+    const main = await require('../helpers/projectCategories').getProjectCategory(body.category);
+    assert.equal(main.customerSelectable, false);
+    assert.equal(main.basePrice, null);
+    assert.equal((await save({ ...body, category: 'service_plan' })).status, 400);
+  } finally { await Category.deleteOne({ category: body.category }); }
+});

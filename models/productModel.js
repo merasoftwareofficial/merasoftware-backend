@@ -309,7 +309,8 @@ const productSchema = new mongoose.Schema({
     // ── Flexible Plans (merasoftware/src/docs/plan.md §4) ──
     // All optional: a plan saved before these existed is read as pricingMode 'fixed' by
     // helpers/servicePlanPricing.js, which is the only place a price is worked out.
-    categoryKey: String, // helpers/planCategories.js key
+    categoryKey: String, // Main project key for new plans; legacy keys remain readable.
+    projectCategoryKey: String, // Explicit shared-category identity; avoids legacy key collisions.
     pricingMode: {
       type: String,
       enum: ['fixed', 'flexible']

@@ -55,9 +55,10 @@ test('portal and website share on-sale eligibility and public category metadata 
   assert.deepEqual(portal.data.plans.map(row => row._id).sort(), [String(live._id), String(fallback._id)].sort());
   assert.deepEqual(web.data.plans.map(row => row._id).sort(), portal.data.plans.map(row => row._id).sort());
   assert.deepEqual(portal.data.categories, web.data.categories);
-  assert.deepEqual(portal.data.categories.map(row => row.key), ['features', 'updates']);
-  assert.equal(portal.data.categories[1].description, 'Send your work');
-  assert.equal(portal.data.categories[1].usage, undefined);
+  assert.deepEqual(portal.data.categories.filter(row => ['features', 'updates'].includes(row.key)).map(row => row.key), ['features', 'updates']);
+  assert.ok(portal.data.categories.some(row => row.key === 'app_development'));
+  assert.equal(portal.data.categories.find(row => row.key === 'updates').description, 'Send your work');
+  assert.equal(portal.data.categories.find(row => row.key === 'updates').usage, undefined);
   const nested = portal.data.plans.find(row => row._id === String(live._id));
   assert.equal(nested.servicePlan.filesLimit, 20); assert.equal(nested.priceRange.from, 100);
   const quote = await call('/customer/service-plan-quote', customer, { planId: nested._id, purchase: 'monthly', tenureMonths: 1 });

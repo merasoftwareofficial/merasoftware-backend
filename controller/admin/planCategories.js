@@ -5,8 +5,8 @@ const { listPlanCategories, planCategoryUsage, savePlanCategory, useProjectCateg
 // GET reads, PATCH saves), so the admin role is checked on the token and on the stored user.
 async function isAdmin(req) {
   if (req.userRole !== 'admin') return false;
-  const user = await User.findById(req.userId).select('roles').lean();
-  return Boolean(user?.roles?.includes('admin'));
+  const user = await User.findById(req.userId).select('roles isActive deletedAt').lean();
+  return Boolean(user?.roles?.includes('admin') && user.isActive !== false && !user.deletedAt);
 }
 
 const respondError = (res, error, fallback) => {
@@ -39,6 +39,11 @@ const savePlanCategoryController = async (req, res) => {
   try {
     if (!await isAdmin(req)) return res.status(403).json({ message: 'Forbidden', error: true, success: false });
     const body = req.body || {};
+    if (body.action === 'save_project_category') {
+      const { action, ...category } = body;
+      const data = await require('../../helpers/projectCategories').saveProjectCategory(category, req.userId);
+      return res.json({ success: true, error: false, data });
+    }
     if (body.action !== undefined && body.action !== 'use_project_category') return res.status(400).json({ success: false, error: true, message: 'Unknown category action' });
     const data = body.action === 'use_project_category'
       ? await useProjectCategory(body.projectCategoryKey, req.userId)

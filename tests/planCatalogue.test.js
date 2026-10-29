@@ -83,7 +83,8 @@ test('website creates a flexible plan; list shows its card range', async () => {
   const list = await call('/admin/plan-catalogue');
   assert.equal(list.status, 200);
   assert.deepEqual(list.data.plans[0].priceRange, { unit: 'update', from: 500, to: 4300 });
-  assert.deepEqual(list.data.categories.map((c) => c.key), ['old_category', 'website_updates']);
+  assert.deepEqual(list.data.categories.filter(c => c.legacy).map(c => c.key), ['old_category', 'website_updates']);
+  assert.equal(list.data.categories.filter(c => !c.legacy).length, 4);
 });
 
 test('invalid settings are refused and nothing is saved', async () => {
@@ -289,4 +290,49 @@ test('category edits reject a stale revision; catalogue supplies full project-li
   assert.ok(catalogue.data.projectCategories.some(row => row.category === 'standard_websites'));
   assert.equal(catalogue.data.categories.find(row => row.key === category.key).usage.plans, 0);
   assert.equal((await listPlanCategories()).find(row => row.key === category.key).label, 'Winner category');
+});
+
+test('main project category is selected directly without creating a plan category', async () => {
+  const created = await save(flexibleBody({ categoryKey: 'app_development', isHidden: false }));
+  assert.equal(created.status, 200, created.message);
+  assert.equal(created.data.servicePlan.projectCategoryKey, 'app_development');
+  assert.equal(await PlanCategory.countDocuments({ key: 'app_development' }), 0);
+  const list = await call('/admin/plan-catalogue');
+  assert.equal(list.data.categories.find(c => c.key === 'app_development').usage.plans, 1);
+  const sale = await require('../helpers/servicePlanPublicCatalogue').readSaleCatalogue();
+  assert.equal(sale.plans[0].servicePlan.categoryKey, 'app_development');
+  assert.equal(sale.categories.find(c => c.key === 'app_development').label, 'App Development');
+  const usage = await require('../helpers/projectCategories').categoryUsage();
+  assert.equal(usage.app_development.plans, 1);
+});
+test('explicit legacy mapping groups old plans without rewriting their stored keys', async () => {
+  const created = await save(flexibleBody({ isHidden: false }));
+  await PlanCategory.updateOne({ key: 'website_updates' }, { $set: { linkedProjectCategory: 'standard_websites' } });
+  const list = await call('/admin/plan-catalogue');
+  assert.equal(list.data.plans[0].servicePlan.categoryKey, 'standard_websites');
+  assert.equal((await productModel.findById(created.data._id)).servicePlan.categoryKey, 'website_updates');
+  const sale = await require('../helpers/servicePlanPublicCatalogue').readSaleCatalogue();
+  assert.equal(sale.plans[0].servicePlan.categoryKey, 'standard_websites');
+  assert.equal(sale.categories.filter(c => c.key === 'standard_websites').length, 1);
+});
+test('same name or same key never implicitly merges an independent legacy group', async () => {
+  await PlanCategory.create({ key: 'app_development', label: 'App Development' });
+  const old = await productModel.create({ serviceName: 'Legacy app plan', category: 'service_plan', isServicePlan: true,
+    servicePlan: { categoryKey: 'app_development' } });
+  const created = await save(flexibleBody({ categoryKey: 'app_development' }));
+  assert.equal(created.status, 200);
+  const list = await call('/admin/plan-catalogue');
+  assert.equal(list.data.plans.find(p => String(p._id) === String(old._id)).servicePlan.categoryKey, 'legacy:app_development');
+  assert.equal(list.data.plans.find(p => String(p._id) === String(created.data._id)).servicePlan.categoryKey, 'app_development');
+});
+test('archived main category blocks new selection but an existing assigned plan remains editable', async () => {
+  const Category = require('../models/categoryBasePriceModel');
+  await Category.create({ category: 'marketing_work', label: 'Marketing', status: 'active' });
+  try {
+    const created = await save(flexibleBody({ categoryKey: 'marketing_work' }));
+    assert.equal(created.status, 200);
+    await Category.updateOne({ category: 'marketing_work' }, { $set: { status: 'archived' } });
+    assert.equal((await save(flexibleBody({ categoryKey: 'marketing_work' }))).status, 400);
+    assert.equal((await save(flexibleBody({ creating: false, planId: created.data._id, expectedUpdatedAt: created.data.updatedAt, categoryKey: 'marketing_work' }))).status, 200);
+  } finally { await Category.deleteOne({ category: 'marketing_work' }); }
 });

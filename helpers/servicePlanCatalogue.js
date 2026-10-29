@@ -8,9 +8,9 @@
 // customer already bought: every order keeps its own snapshot (servicePlanPurchase.js).
 const Product = require('../models/productModel');
 const { saveRevision } = require('./catalogueRevision');
-const { listProjectCategories } = require('./projectCategories');
+const { listProjectCategories, getProjectCategory } = require('./projectCategories');
 const { MAX_SERVICE_FILES_PER_UPLOAD } = require('../config/uploadLimits');
-const { requireActivePlanCategory, listPlanCategories, planCategoryUsage } = require('./planCategories');
+const { requireActivePlanCategory, listPlanCategories } = require('./planCategories');
 const { CYCLE_MONTHS, assertPricingConfig, cyclePriceFromMonthly, priceRange, rupees } = require('./servicePlanPricing');
 const { assertCanBeOnSale, canBeOnSale } = require('./servicePlanLifecycle');
 
@@ -70,7 +70,22 @@ async function planFieldsFrom(body, existing, { requireCategory }) {
   // The website plan form requires a category. An edit may keep a category archived since, but a
   // change must pick an active one. The older portal create page has no category field.
   let categoryKey = existing?.servicePlan?.categoryKey;
-  if (given(body.categoryKey) && body.categoryKey !== categoryKey) categoryKey = (await requireActivePlanCategory(body.categoryKey)).key;
+  let projectCategoryKey = existing?.servicePlan?.projectCategoryKey;
+  const selected = body.categoryKey;
+  if (typeof selected === 'string' && selected.startsWith('legacy:')) {
+    if (!existing || selected.slice(7) !== categoryKey || projectCategoryKey) fail('Choose a main project category');
+  } else if (given(selected)) {
+    const projectCategory = await getProjectCategory(selected);
+    if (projectCategory) {
+      const previousLink = existing && !projectCategoryKey ? await require('./planCategories').getPlanCategory(categoryKey) : null;
+      const unchanged = projectCategoryKey === selected || previousLink?.linkedProjectCategory === selected;
+      if (projectCategory.status !== 'active' && !unchanged) fail('Choose an active project category');
+      categoryKey = selected; projectCategoryKey = selected;
+    } else if (selected !== categoryKey) {
+      categoryKey = (await requireActivePlanCategory(selected)).key;
+      projectCategoryKey = undefined;
+    }
+  }
   if (!categoryKey && requireCategory) fail('Choose a plan category');
 
   const pricingMode = body.pricingMode === 'flexible' ? 'flexible' : 'fixed';
@@ -81,6 +96,7 @@ async function planFieldsFrom(body, existing, { requireCategory }) {
     dependency,
     capability,
     categoryKey,
+    projectCategoryKey,
     pricingMode,
     // Kept for the readers that still use it (uploadOrderPolicy.js).
     serviceBehavior: isUpload ? 'portal_access_control' : 'reminder_only',
@@ -181,14 +197,15 @@ async function savePlan(body = {}, { requireCategory = true } = {}) {
 
 // Admin catalogue: every service plan (retired ones flagged) with its card price, plus categories.
 async function listPlanCatalogue() {
-  const [plans, categories, projectCategories, usage] = await Promise.all([
+  const [plans, categories, projectCategories] = await Promise.all([
     Product.find({ category: 'service_plan', isServicePlan: true, archivedAt: null }).sort({ createdAt: -1 }).lean(),
     listPlanCategories(),
     listProjectCategories(),
-    planCategoryUsage(),
   ]);
+  const shared = require('./planProjectCategories').projectPlanCatalogue(plans, categories, projectCategories);
   return {
-    plans: plans.map((plan) => ({
+    legacyCategories: categories,
+    plans: shared.plans.map((plan) => ({
       _id: plan._id,
       serviceName: plan.serviceName,
       description: plan.formattedDescriptions?.[0]?.content || '',
@@ -200,8 +217,8 @@ async function listPlanCatalogue() {
       priceRange: (() => { try { return priceRange(plan); } catch { return null; } })(),
       updatedAt: plan.updatedAt,
     })),
-    categories: categories.map(category => ({ ...category, usage: { plans: usage[category.key] || 0 } })),
-    projectCategories: projectCategories.map(({ category, label, status }) => ({ category, label, status })),
+    categories: shared.categories,
+    projectCategories,
   };
 }
 
