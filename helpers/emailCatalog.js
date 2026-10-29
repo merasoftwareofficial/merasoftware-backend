@@ -5,6 +5,8 @@
 const events = [
   ['lead.created', 'Leads', 'New lead welcome'],
   ['sendClientAccountCreatedEmail', 'Leads', 'Client account created'],
+  ['plan.request.admin', 'Leads', 'Plan request (admin)', 'Plan request'],
+  ['plan.request.received', 'Leads', 'Plan request received', 'Plan request'],
   ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)', 'Update request'],
   ['sendUserConfirmation', 'Updates', 'Update request received', 'Update request'],
   ['sendDeveloperAssignedNotification', 'Updates', 'Developer assigned (customer)', 'Developer assigned'],
@@ -46,7 +48,10 @@ const events = [
 ];
 // Mail a customer's own portal action starts. It never asks anyone: the action is On (mail
 // sends at once) or Off (no mail). Every other action's user reviews its mail first.
-const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserConfirmation', 'sendAdminUPIPendingNotification']);
+// A website plan request (controller/lead/planRequest.js) is started by the visitor too, so it is Off
+// until an admin turns it On (merasoftware/src/docs/plan.md §8.3: new actions start Off).
+const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserConfirmation', 'sendAdminUPIPendingNotification',
+  'plan.request.admin', 'plan.request.received']);
 // Sent by the server itself (scheduler or a committed reservation operation), never a draft.
 // Plan steps are system mail too: they go out the moment the step happens (the client is told at
 // every step), whichever request or job caused it (helpers/servicePlanNotifications.js).

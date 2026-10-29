@@ -65,6 +65,49 @@ const definitions = {
       return email ? { to: [email], values: { name: text(name) } } : null;
     },
   },
+  // A website plan request (controller/lead/planRequest.js): request = { lead, planName, contact, choice, price }.
+  'plan.request.admin': {
+    subject: 'New plan request - {{plan}}',
+    text: lines(
+      'Someone asked for a plan on the website. Please call them back.', '',
+      '**Plan:** {{plan}}', '**Choice:** {{choice}}', '**Price shown:** {{price}}', '',
+      '**Name:** {{customerName}}', '**Email:** {{customerEmail}}', '**Phone:** {{phone}}', '',
+      '**Open the lead:** {{leadLink}}', '', ...SYSTEM_SIGN_OFF,
+    ),
+    variables: {
+      plan: PLAN, choice: detail('Chosen options', '20 files × 2 updates a month, every 3 months for 6 months'),
+      price: detail('Price shown', '₹4,336 every 3 months (2 payments, ₹8,672 in total)', 'The price the website showed for the choice'),
+      customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, phone: detail('Phone', '+919876543210'),
+      leadLink: detail('Lead link', 'https://portal.example.com/admin-panel/leads/123', 'The lead in the admin Leads list'),
+    },
+    blocks: {},
+    build(request) {
+      if (!request?.lead) return null;
+      return { to: ADMIN_EMAILS, values: {
+        plan: text(request.planName), choice: text(request.choice), price: text(request.price),
+        customerName: text(request.contact?.name), customerEmail: text(request.contact?.email), phone: text(request.contact?.phone),
+        leadLink: adminLink(`/admin-panel/leads/${request.lead._id}`),
+      } };
+    },
+  },
+  'plan.request.received': {
+    subject: 'We have received your request for {{plan}}',
+    text: lines(
+      'Hello {{name}},', '',
+      'Thank you for your interest in **{{plan}}**.', '',
+      '**Your choice:** {{choice}}', '**Price shown:** {{price}}', '',
+      'Our team will contact you soon to help you get started. Nothing has been charged.', '', ...SIGN_OFF,
+    ),
+    variables: {
+      name: NAME, plan: PLAN, choice: detail('Chosen options', '20 files × 2 updates a month, every 3 months for 6 months'),
+      price: detail('Price shown', '₹4,336 every 3 months (2 payments, ₹8,672 in total)'),
+    },
+    blocks: {},
+    build(request) {
+      const email = request?.contact?.email;
+      return email ? { to: [email], values: { name: text(request.contact.name), plan: text(request.planName), choice: text(request.choice), price: text(request.price) } } : null;
+    },
+  },
   sendClientAccountCreatedEmail: {
     subject: 'Welcome to Mera Software — your client account is ready',
     text: lines(

@@ -30,6 +30,9 @@ const userDetailsController = require('../controller/user/userDetails')
 const addRoleToUserController = require('../controller/user/addRoleToUser')
 const authToken = require('../middleware/authToken')
 router.use('/offer-reservations', authToken, require('./offerReservations'));
+// Website plan page "Get this plan" for a non-client: a signed-in member here, a visitor through the
+// website server below (controller/lead/planRequest.js). Clients buy in the portal instead.
+router.post('/plan-request', authToken, require('../controller/lead/planRequest').memberPlanRequest);
 const userLogout = require('../controller/user/userLogout')
 const allUsers = require('../controller/user/allUsers')
 const getPartnerCustomers = require('../controller/user/partnerCustomers')
@@ -201,6 +204,7 @@ router.get('/integration/sales-packages', require('../controller/order/salesPack
 // Flexible Plans: public plan catalogue + estimator quote for the website (bearer, helpers/integrationAuth.js).
 router.get('/integration/plan-catalogue', require('../controller/order/servicePlanQuote').integrationCatalogue);
 router.patch('/integration/plan-catalogue/quote', require('../controller/order/servicePlanQuote').integrationQuote);
+router.patch('/integration/plan-request', require('../controller/lead/planRequest').integrationPlanRequest);
 router.post("/admin/clients/:customerId/documents", authToken, upload.any(), uploadClientDocumentController);
 router.get("/admin/clients/:customerId/documents", authToken, getAdminClientDocumentsController);
 router.get("/admin/clients/:customerId/credentials", authToken, getClientCredentialsController);

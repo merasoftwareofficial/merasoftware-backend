@@ -74,7 +74,11 @@ async function prepareMail(event, mail, extraValues) {
   if (scope.system && byKey.get(event).trigger !== 'system') return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';
   if (publicIntake && !['website.subscription.confirm', 'website.subscription.manage'].includes(event)) return suppressed();
-  if (!publicIntake && !scope.system) {
+  // A visitor's plan request, sent by the website server (controller/lead/planRequest.js, integration
+  // bearer already checked): only that request's own two mails, and only while their action is On.
+  const planIntake = scope.req.planRequestIntake === true;
+  if (planIntake && !['plan.request.admin', 'plan.request.received'].includes(event)) return suppressed();
+  if (!publicIntake && !planIntake && !scope.system) {
     if (!scope.req.userId) return suppressed();
     const actor = await userModel.findById(scope.req.userId).select('isGuest isActive').lean();
     if (!actor || actor.isGuest || actor.isActive === false) return suppressed();
