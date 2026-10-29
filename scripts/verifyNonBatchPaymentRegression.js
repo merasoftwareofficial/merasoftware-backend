@@ -69,6 +69,7 @@ const createdOrderIds = [];
     await singleController(
       {
         userId,
+        userRole: "customer", // the purchase API sells only to the customer role
         body: {
           planId: String(plan._id),
           paymentDetails: { transactionId: txnId, upiTransactionId: upiTxnId },

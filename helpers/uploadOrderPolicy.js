@@ -16,8 +16,10 @@ async function assertUploadOrder(order, { fileCount, serviceOrderId }) {
     if (s.capability !== 'upload_data' && s.serviceBehavior !== 'portal_access_control') reject('This service does not allow data upload');
     if (order.servicePlanStatus !== 'active') reject('This service is not active');
     if (order.orderVisibility === 'cancelled' || order.orderVisibility === 'payment-rejected') reject('This service cannot accept uploads');
+    // Owner rule (plan.md decision 10): no upload until the payment is confirmed. A wallet-only
+    // purchase is approved at once; any UPI part keeps the order pending until an admin approves it.
+    if (order.orderVisibility === 'pending-approval') reject('This service is awaiting payment approval');
     if (order.paymentPolicy) {
-      if (order.orderVisibility === 'pending-approval') reject('This service is awaiting payment approval');
       if (order.servicePlanEndDate && new Date(order.servicePlanEndDate) <= new Date()) reject('This service has expired');
       const access = await require('./offerPaymentPolicy').getPaymentAccess(order);
       if (!access.allowed) reject(access.reason);

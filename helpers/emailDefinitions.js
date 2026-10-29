@@ -1093,4 +1093,78 @@ definitions['plan.work_update'] = {
     return { to: [user.email], values: { name: text(user.name), plan: planTitle(order), postedOn: moment(entry?.at), work: text(entry?.text), link: planLink(order) } };
   },
 };
+
+// --- Plan payment (plan.md 4.1): the client sent a UPI payment, an admin rejected it, and the admin's
+// copy of every plan purchase. Prepared in the request that caused them (servicePlanNotifications.js);
+// customer-started, so each is Off until an admin turns it On in Communication.
+const UPI_REFERENCE = detail('UPI reference', '412345678901', 'The 12-digit reference the client entered');
+definitions['plan.payment.submitted'] = {
+  subject: 'Payment submitted for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'We have received your payment details for **{{plan}}**. Our team will check the payment and tell you as soon as it is approved.', '',
+    '**Paid from wallet:** {{walletPaid}}', '**Sent by UPI:** {{upiAmount}}', '**UPI reference:** {{upiReference}}', '',
+    'You can send your data from your plan page once the payment is approved.',
+    '**Your plan:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: NAME, plan: PLAN, walletPaid: detail('Paid from wallet', '₹1,000', 'Empty when nothing came from the wallet'),
+    upiAmount: detail('Sent by UPI', '₹3,336'), upiReference: UPI_REFERENCE, link: PLAN_LINK },
+  blocks: {},
+  build(order, payment = {}) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    return { to: [user.email], values: {
+      name: text(user.name), plan: planTitle(order), walletPaid: payment.walletPaid > 0 ? money(payment.walletPaid) : '',
+      upiAmount: money(payment.upiPending), upiReference: text(payment.upiReference), link: planLink(order),
+    } };
+  },
+};
+definitions['plan.payment.rejected'] = {
+  subject: 'Payment not approved for {{plan}}',
+  text: lines('Hello {{name}},', '',
+    'We could not approve your UPI payment for **{{plan}}**, so this plan has not started.', '',
+    '**Amount:** {{amount}}', '**UPI reference:** {{upiReference}}', '**Reason:** {{reason}}', '',
+    '{{refund}}', '',
+    'To get this plan, please buy it again from the plan page. Reply to this message if you think this is a mistake.',
+    '**Plan page:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: NAME, plan: PLAN, amount: detail('UPI amount', '₹3,336'), upiReference: UPI_REFERENCE,
+    reason: detail('Rejection reason', 'Payment not received'),
+    refund: detail('Wallet refund', 'The ₹1,000 paid from your wallet has been returned to your wallet.', 'Empty when nothing came from the wallet'),
+    link: detail('Plan page link', 'https://app.merasoftware.com/service-plan-detail/123', 'Where the client can buy the plan again') },
+  blocks: {},
+  build(order, transaction, reason) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    const walletPart = Math.max(0, Number(order.totalAmount || 0) - Number(transaction?.amount || 0));
+    return { to: [user.email], values: {
+      name: text(user.name), plan: planTitle(order), amount: money(transaction?.amount), upiReference: text(transaction?.upiTransactionId),
+      reason: text(reason), refund: walletPart > 0 ? `The ${money(walletPart)} paid from your wallet has been returned to your wallet.` : '',
+      link: link(process.env.ADMIN_DASHBOARD_URL, `/service-plan-detail/${order.productId?._id || order.productId}`),
+    } };
+  },
+};
+// Admin recipients are ADMIN_EMAILS until the admin settings page exists (plan.md 4.3).
+definitions['plan.purchase.admin'] = {
+  subject: 'New plan purchase - {{customerName}} - {{plan}}',
+  text: lines('{{customerName}} ({{customerEmail}}) bought **{{plan}}**.', '',
+    '**Price:** {{price}}', '**Paid from wallet:** {{walletPaid}}', '**UPI to approve:** {{upiAmount}}', '**UPI reference:** {{upiReference}}', '',
+    '{{action}}', '',
+    '**Client page:** {{clientLink}}', '', ...SYSTEM_SIGN_OFF),
+  variables: { customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, plan: PLAN, price: detail('Price', '₹4,336'),
+    walletPaid: detail('Paid from wallet', '₹1,000', 'Empty when nothing came from the wallet'),
+    upiAmount: detail('UPI to approve', '₹3,336', 'Empty when the wallet paid everything'), upiReference: UPI_REFERENCE,
+    action: detail('What to do', 'Action needed: check the UPI payment and approve or reject it.'),
+    clientLink: detail('Client page', 'https://app.merasoftware.com/admin-panel/clients/123', 'The client in the admin panel') },
+  blocks: {},
+  build(order, payment = {}) {
+    const user = order?.userId;
+    if (!user?.email) return null;
+    const upi = Number(payment.upiPending || 0) > 0;
+    return { to: ADMIN_EMAILS, values: {
+      customerName: text(user.name), customerEmail: text(user.email), plan: planTitle(order), price: money(order.totalAmount),
+      walletPaid: payment.walletPaid > 0 ? money(payment.walletPaid) : '', upiAmount: upi ? money(payment.upiPending) : '',
+      upiReference: text(payment.upiReference),
+      action: upi ? 'Action needed: check the UPI payment and approve or reject it.' : 'Paid in full from the wallet. The plan is active.',
+      clientLink: adminLink(`/admin-panel/clients/${user._id}`),
+    } };
+  },
+};
 module.exports = { definitions, refundTable };

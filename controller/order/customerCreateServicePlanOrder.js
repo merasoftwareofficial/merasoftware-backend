@@ -52,6 +52,12 @@ const customerCreateServicePlanOrder = async (req, res) => {
         success: false,
       });
     }
+    // Only a client buys (plan.md 4.2). A staff + client account signed in under its staff role is
+    // told to switch, as the customer catalogue does (servicePlanQuote.js customerCatalogue).
+    // The admin's "start plan for client" is a different controller (servicePlanAdmin.js).
+    if (req.userRole !== 'customer') {
+      return res.status(403).json({ success: false, error: true, message: 'Switch to your customer role to buy a plan.' });
+    }
 
     const {
       planId,
@@ -175,8 +181,11 @@ const customerCreateServicePlanOrder = async (req, res) => {
     const paymentPolicy = await require('../../helpers/serviceOfferPolicy').resolveServiceOffer(plan, req.body);
     const deferred = require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(paymentPolicy);
     if (req.body.deferPayment && !deferred) throw new Error('The selected offer does not allow deferred payment');
+    // One purchase attempt = one order and one charge (plan.md 4.2). The key is required for a
+    // deferred offer and optional otherwise, so older callers keep working; both portal callers send it.
+    // A repeat with the same key and choice answers with the earlier order and takes no money.
     let purchaseKey, purchaseHash;
-    if (req.body.deferPayment) {
+    if (req.body.deferPayment || req.body.purchaseKey != null) {
       if (typeof req.body.purchaseKey !== 'string' || !/^[a-f\d-]{36}$/i.test(req.body.purchaseKey)) throw new Error('A purchase identifier is required. Refresh and retry.');
       purchaseKey = `${userId}:${req.body.purchaseKey}`;
       purchaseHash = require('node:crypto').createHash('sha256').update(JSON.stringify({ planId: String(plan._id), offer: req.body.offerQuoteKey, linkedProjectOrderId: linkedOrder ? String(linkedOrder._id) : null, billingSelection, choice: purchase ? { files: purchase.quote.files, updates: purchase.quote.updates, releaseMode: purchase.quote.releaseMode, purchase: purchase.quote.purchase } : null })).digest('hex');
@@ -184,8 +193,11 @@ const customerCreateServicePlanOrder = async (req, res) => {
       if (previous) {
         if (previous.serviceOfferPurchaseHash !== purchaseHash) throw new Error('This purchase identifier belongs to different selections');
         const bill = await require('../../models/invoiceModel').findOne({ orderId: previous._id, serviceCycleNumber: 1, invoiceType: 'project' });
-        if (!bill) throw new Error('Previous purchase needs review; no duplicate purchase was created');
-        return res.status(200).json({ success: true, data: { orderId: previous._id, invoiceId: bill._id, finalPrice: previous.totalAmount, paymentPending: bill.status !== 'paid' } });
+        // A paid attempt left a payment record (wallet debit or UPI waiting for approval). One that
+        // stopped before any money moved is not repeated blindly: a person checks it.
+        const settled = bill && (req.body.deferPayment || await require('../../models/transactionModel').exists({ orderId: previous._id }));
+        if (!settled) throw new Error('Previous purchase needs review; no duplicate purchase was created');
+        return res.status(200).json({ success: true, data: { orderId: previous._id, invoiceId: bill._id, finalPrice: previous.totalAmount, paymentPending: bill.status !== 'paid', repeated: true } });
       }
     }
     // Validate payment evidence before any order/invoice write, including no-offer purchases.
@@ -334,6 +346,10 @@ const customerCreateServicePlanOrder = async (req, res) => {
     if (upiPart === 0 && invoice.status === "paid") {
       await settleServiceCycle({ orderId: order._id, invoice });
     }
+    // Client "payment submitted" (UPI part) and the admin's copy; Off until turned On (plan.md 4.1).
+    await require('../../helpers/servicePlanNotifications').preparePurchaseMails(order._id, {
+      walletPaid, upiPending, upiReference: upiPart > 0 ? paymentDetails.upiTransactionId : '',
+    });
 
     return res.status(201).json({
       message: "Service plan purchased successfully",
@@ -352,6 +368,11 @@ const customerCreateServicePlanOrder = async (req, res) => {
       },
     });
   } catch (error) {
+    // Two requests with one purchase key at the same moment: the unique index lets only one order
+    // be saved, before any money moves. The other is told to check, never charged twice.
+    if (error.code === 11000 && error.keyPattern?.serviceOfferPurchaseKey) {
+      return res.status(409).json({ message: "This purchase is already being processed. Check your plans before trying again.", error: true, success: false });
+    }
     return res.status(error.statusCode || 400).json({
       message: error.message || "Failed to purchase service plan",
       error: true,

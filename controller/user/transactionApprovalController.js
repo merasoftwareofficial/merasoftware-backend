@@ -547,6 +547,8 @@ const rejectTransaction = async (req, res) => {
     await transaction.save();
 
     const order = await rejectLinkedOrderPayment(transaction, rejectionReason);
+    // A plan's UPI payment was rejected: the client is told why (plan.md 4.1; Off until turned On).
+    if (order?.isServicePlan) await require('../../helpers/servicePlanNotifications').preparePaymentRejected(order._id, transaction, rejectionReason);
 
     const updatedTransaction = await transactionModel
       .findById(transaction._id)

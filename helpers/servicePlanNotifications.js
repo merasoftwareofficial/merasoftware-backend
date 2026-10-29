@@ -70,7 +70,32 @@ async function workUpdate(orderId, entryId) {
   return sendPlanMail('plan.work_update', `plan-work-update:${orderId}:${entryId}`, order, entry);
 }
 
+// --- Plan payment mails (plan.md 4.1). Unlike the steps above, these are customer-started mail:
+// prepared inside the request that caused them (purchase or the admin's rejection) and sent when that
+// request succeeds, only while the action is On. They must be awaited before the response, and a
+// failure is logged, never thrown: the money has already moved.
+async function prepareInRequest(event, ...args) {
+  try { return await require('./emailService').prepareTemplatedMail(event, ...args); }
+  catch (error) { console.error(`[plan mail] ${event} was not prepared:`, error.message); return null; }
+}
+
+// After a purchase: the admin always hears of it; the client is told a UPI part is being checked
+// (a wallet-only purchase is already told "plan started" by serviceCycleSettlement.js).
+async function preparePurchaseMails(orderId, payment) {
+  const order = await withCustomer(orderId);
+  if (!order) return;
+  if (payment.upiPending > 0) await prepareInRequest('plan.payment.submitted', order, payment);
+  await prepareInRequest('plan.purchase.admin', order, payment);
+}
+
+async function preparePaymentRejected(orderId, transaction, reason) {
+  const order = await withCustomer(orderId);
+  if (order?.isServicePlan) await prepareInRequest('plan.payment.rejected', order, transaction, reason);
+}
+
 module.exports = {
+  preparePurchaseMails,
+  preparePaymentRejected,
   notifyPlanStarted: (orderId, invoice) => later('plan started', () => planStarted(orderId, invoice)),
   notifyCyclePaid: (orderId, invoice) => later('plan payment', () => cyclePaid(orderId, invoice)),
   notifyUploadStatus: (requestId, status, note, step) => later(`upload ${status}`, () => uploadStatus(requestId, status, note, step)),
