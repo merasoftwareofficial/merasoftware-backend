@@ -44,6 +44,11 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
   console.log('Offer reservation jobs initialized');
 }
 
+// Broadcast feeds the existing WhatsApp queue; this switch never enables other production crons.
+if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
+  cron.schedule('* * * * *', () => require('./helpers/broadcastJobs').dispatch().catch(error => console.error('[broadcast]', error.message)));
+}
+
 const allowedOrigins = getAllowedOrigins();
 
 initChessSocket(server, allowedOrigins);
@@ -82,6 +87,7 @@ app.use(cookieParser())
 app.use("/api", require("./helpers/emailController").requestMiddleware)
 app.use("/api/email-control", require("./routes/emailControl"))
 app.use("/api/whatsapp-control", require("./routes/whatsappControl"))
+app.use("/api/broadcast", require("./routes/broadcast"))
 app.use("/api", router)
 
 app.use('/uploads', express.static('uploads'));

@@ -30,8 +30,8 @@ const updateMessageTemplateController = async (req, res) => {
       });
     }
 
-    const updated = await messageTemplateModel.findByIdAndUpdate(
-      templateId,
+    const updated = await messageTemplateModel.findOneAndUpdate(
+      { _id: templateId, purpose: { $ne: 'broadcast' } },
       { message },
       { new: true }
     );

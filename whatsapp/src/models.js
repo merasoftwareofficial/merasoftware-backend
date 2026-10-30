@@ -16,6 +16,7 @@ const queueSchema = new mongoose.Schema({
   event: String, // email action key, e.g. sendProjectCreatedEmail
   application: { type: String, enum: ['website', 'portal'] },
   emailDraftId: mongoose.Schema.Types.ObjectId, // the sent email this WhatsApp copies
+  broadcastRecipientId: mongoose.Schema.Types.ObjectId,
   email: { type: String, lowercase: true, trim: true }, // that email's recipient; one row per recipient
   // pending → sending → sent | failed; skipped = no usable phone; expired = waited more than a day.
   status: { type: String, enum: QUEUE_STATUSES, default: 'pending' },
@@ -27,6 +28,7 @@ const queueSchema = new mongoose.Schema({
   expiresAt: { type: Date, index: { expireAfterSeconds: 0 } }, // set when finished; Mongo deletes the row then
 }, { timestamps: true, collection: 'whatsapp_queue' });
 queueSchema.index({ status: 1, nextAttemptAt: 1, createdAt: 1 });
+queueSchema.index({ broadcastRecipientId: 1 }, { unique: true, partialFilterExpression: { broadcastRecipientId: { $type: 'objectId' } } });
 // An email retried or reviewed twice still gives each recipient one WhatsApp.
 queueSchema.index({ emailDraftId: 1, email: 1 }, { unique: true, partialFilterExpression: { emailDraftId: { $exists: true } } });
 

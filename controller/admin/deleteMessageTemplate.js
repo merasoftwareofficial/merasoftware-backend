@@ -21,7 +21,7 @@ const deleteMessageTemplateController = async (req, res) => {
       });
     }
 
-    const deleted = await messageTemplateModel.findByIdAndDelete(templateId);
+    const deleted = await messageTemplateModel.findOneAndDelete({ _id: templateId, purpose: { $ne: 'broadcast' } });
 
     if (!deleted) {
       return res.status(404).json({

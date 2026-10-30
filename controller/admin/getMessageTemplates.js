@@ -10,7 +10,7 @@ const getMessageTemplatesController = async (req, res) => {
       });
     }
 
-    const data = await messageTemplateModel.find().sort({ createdAt: 1 }).lean();
+    const data = await messageTemplateModel.find({ purpose: { $ne: 'broadcast' } }).sort({ createdAt: 1 }).lean();
 
     return res.json({
       message: "Message templates",
