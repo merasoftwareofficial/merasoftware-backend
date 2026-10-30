@@ -6,6 +6,7 @@ const { ON_SALE } = require("../../helpers/servicePlanPublicCatalogue");
 const { requireIntegration } = require("../../helpers/integrationAuth");
 const { parsePhone } = require("../../helpers/phoneNumber");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
+const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
 
 // Website plan page (merasoftware/src/app/plans/[plan]) → "Get this plan" by someone who is not a
 // portal client. Clients buy in the portal; everyone else asks, and the team calls them back.
@@ -26,7 +27,6 @@ const { prepareTemplatedMail } = require("../../helpers/emailService");
 const SOURCE = "Website – plan request";
 const NOTE_TITLE = "Plan request from the website";
 const REPEAT_WINDOW_MS = 10 * 60 * 1000;
-const OPEN_STATUSES = ["New", "Contacted"];
 const PERIOD_WORDS = { monthly: "monthly", quarterly: "every 3 months", half_yearly: "every 6 months", yearly: "yearly" };
 
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -121,7 +121,7 @@ const memberPlanRequest = respond(async (req) => {
   let created = false;
   if (!lead) {
     try {
-      lead = await leadModel.create({ name: contact.name, email: contact.email, phone: contact.phone, source: SOURCE, notes: note, status: "New", reservationUserId: user._id, createdBy: user._id });
+      lead = await leadModel.create({ name: contact.name, email: contact.email, phone: contact.phone, source: SOURCE, notes: note, reservationUserId: user._id, createdBy: user._id });
       created = true;
     } catch (error) {
       // Two requests at once: the unique reservationUserId index lets one create win.
@@ -150,14 +150,14 @@ const integrationPlanRequest = respond(async (req) => {
   const note = noteFor({ plan, quote, contact });
 
   const open = await leadModel
-    .findOne({ phone, deletedAt: null, convertedToUserId: null, status: { $in: OPEN_STATUSES } })
+    .findOne({ phone, deletedAt: null, convertedToUserId: null, status: { $in: OPEN_LEAD_STATUSES } })
     .sort({ updatedAt: -1 });
   if (open) {
     const repeated = await addToLead(open, note);
     if (!repeated) await notify({ lead: open, plan, quote, contact });
     return { created: false, repeated };
   }
-  const lead = await leadModel.create({ name, email, phone, source: SOURCE, notes: note, status: "New" });
+  const lead = await leadModel.create({ name, email, phone, source: SOURCE, notes: note });
   await notify({ lead, plan, quote, contact });
   return { created: true, repeated: false };
 });

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { LEAD_STATUSES, DEFAULT_LEAD_STATUS } = require("../helpers/leadStatuses");
 
 // Attachment for a follow-up (optional). Reuses the same shape/Drive fields as
 // proposalSchema below so file handling stays a single pattern across the model.
@@ -31,12 +32,12 @@ const followUpSchema = new mongoose.Schema({
     required: true,
   },
   // Pipeline-stage badge captured on this follow-up (the stage the lead was moved
-  // to at this point in time). Same 4 stages as the lead's own status enum, so the
+  // to at this point in time). Same stages as the lead's own status enum, so the
   // follow-up timeline shows how the pipeline progressed over time.
   badge: {
     type: String,
-    enum: ["New", "Contacted", "Proposal Sent", "Negative", "Won"],
-    default: "New",
+    enum: LEAD_STATUSES,
+    default: DEFAULT_LEAD_STATUS,
   },
   // Optional file attached to this follow-up (uploaded to Google Drive).
   attachment: {
@@ -122,8 +123,8 @@ const leadSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["New", "Contacted", "Proposal Sent", "Negative", "Won"],
-    default: "New",
+    enum: LEAD_STATUSES,
+    default: DEFAULT_LEAD_STATUS,
   },
   // Versioned proposal/quotation files (Phase 6A). Each upload is a new version
   // so the full revision history / timeline is preserved (client changes over time).

@@ -56,12 +56,12 @@ test('categories: active and opened to customers, price not needed; clients only
   assert.equal((await call('/customer/project-request/categories', { user: admin })).status, 403);
 });
 
-test('a request becomes a New lead linked to the client, with readable notes', async () => {
+test('a request becomes a Contacted lead linked to the client, with readable notes', async () => {
   const sent = await ask({ category: 'dynamic_websites', phone: ' 98765 43210 ', budget: '30k_1l', callTime: 'evening', details: 'A site for my bakery' });
   assert.equal(sent.status, 201);
   const [lead] = await leadModel.find().lean();
   assert.equal(lead.source, SOURCE);
-  assert.equal(lead.status, 'New');
+  assert.equal(lead.status, 'Contacted');
   assert.equal(String(lead.requestedByUserId), String(customer._id));
   assert.equal(lead.convertedToUserId, null);
   assert.equal(lead.email, 'asha@example.test');

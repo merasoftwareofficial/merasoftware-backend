@@ -78,7 +78,7 @@ test('a visitor request needs the website server key and becomes a New lead with
   assert.equal(sent.data.repeated, false);
   const [lead] = await leadModel.find().lean();
   assert.equal(lead.source, SOURCE);
-  assert.equal(lead.status, 'New');
+  assert.equal(lead.status, 'Contacted');
   assert.equal(lead.name, 'Ravi Kumar');
   assert.equal(lead.email, 'ravi@example.test');
   assert.equal(lead.phone, '+919876543210');

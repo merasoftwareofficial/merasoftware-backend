@@ -1,6 +1,7 @@
 const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const { listProjectCategories } = require("../../helpers/projectCategories");
+const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
 
 // Portal "Get a Service" → "Start a Project": a client picks a project category, gives a budget,
 // a time to call and a phone number (plus an optional note), and asks for a callback. The
@@ -10,7 +11,6 @@ const { listProjectCategories } = require("../../helpers/projectCategories");
 
 const SOURCE = "Portal – project request";
 const REPEAT_WINDOW_MS = 10 * 60 * 1000;
-const OPEN_STATUSES = ["New", "Contacted"];
 
 // Both answers are required; the portal form (pages/StartProjectRequestDetails.js) uses the same keys.
 const ANSWERS = {
@@ -83,7 +83,7 @@ const createProjectRequest = async (req, res) => {
     // One open request per client: a new request is added to it, and a repeat within
     // REPEAT_WINDOW_MS (a double click or a quick resend) changes nothing.
     const open = await leadModel
-      .findOne({ requestedByUserId: user._id, deletedAt: null, status: { $in: OPEN_STATUSES } })
+      .findOne({ requestedByUserId: user._id, deletedAt: null, status: { $in: OPEN_LEAD_STATUSES } })
       .sort({ updatedAt: -1 });
     if (open) {
       const own = (open.followUps || []).filter((item) => String(item.createdBy) === String(user._id)).map((item) => item.createdAt);
@@ -100,7 +100,6 @@ const createProjectRequest = async (req, res) => {
       email: String(user.email || "").trim().toLowerCase(),
       source: SOURCE,
       notes: note,
-      status: "New",
       requestedByUserId: user._id,
       createdBy: user._id,
     });

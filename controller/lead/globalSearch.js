@@ -1,5 +1,6 @@
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
+const { DEFAULT_LEAD_STATUS } = require("../../helpers/leadStatuses");
 
 const RESULT_LIMIT = 12;
 
@@ -58,7 +59,7 @@ const globalSearchController = async (req, res) => {
       name: lead.name || "",
       email: lead.email || "",
       phone: lead.phone || "",
-      status: lead.status || "New",
+      status: lead.status || DEFAULT_LEAD_STATUS,
     }));
 
     // Clients first, then leads.

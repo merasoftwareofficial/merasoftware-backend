@@ -1,6 +1,7 @@
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
 const { expiryCutoff, daysLeft } = require("./trashConstants");
+const { DEFAULT_LEAD_STATUS } = require("../../helpers/leadStatuses");
 
 // Returns everything currently in Trash — soft-deleted clients + leads — merged and
 // badge-tagged (type: "client" | "lead"), each with daysLeft before auto-purge.
@@ -49,7 +50,7 @@ const getTrashController = async (req, res) => {
       name: l.name || "",
       email: l.email || "",
       phone: l.phone || "",
-      status: l.status || "New",
+      status: l.status || DEFAULT_LEAD_STATUS,
       deletedAt: l.deletedAt,
       daysLeft: daysLeft(l.deletedAt),
     }));

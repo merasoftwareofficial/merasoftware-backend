@@ -1,6 +1,7 @@
 const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
+const { statusAfterFirstProposal } = require("../../helpers/leadStatuses");
 
 // Path to the Google Drive credentials file (same resolution as submitUpdateRequest.js)
 let KEY_FILE_PATH;
@@ -80,8 +81,8 @@ const uploadProposalController = async (req, res) => {
     });
 
     // First proposal auto-advances the pipeline to "Proposal Sent".
-    if (nextVersion === 1 && lead.status !== "Won" && lead.status !== "Lost") {
-      lead.status = "Proposal Sent";
+    if (nextVersion === 1) {
+      lead.status = statusAfterFirstProposal(lead.status);
     }
 
     await lead.save();

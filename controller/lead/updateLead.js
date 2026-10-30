@@ -2,8 +2,7 @@ const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
-
-const ALLOWED_STATUSES = ["New", "Contacted", "Proposal Sent", "Negative"];
+const { SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
 let KEY_FILE_PATH;
