@@ -8,6 +8,13 @@ const { enqueueWhatsAppForEmail } = require('./whatsappQueue');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
+// Reattach a persisted review after a business request/response interruption.
+function registerReviewDraft(draft) {
+  const scope = requestScope.getStore();
+  if (!scope || scope.closed || !['staged', 'pending', 'failed'].includes(draft.status) || draft.expiresAt <= new Date()) return false;
+  if (!scope.ids.some(id => String(id) === String(draft._id))) scope.ids.push(draft._id);
+  return true;
+}
 function plainText(html = '') {
   return html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, '$2 ($1)').replace(/<\/(p|div|h[1-6]|tr)>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\n\s*\n\s*\n/g, '\n\n').trim();
 }
@@ -325,4 +332,4 @@ async function sendSystemMail(event, mail, dedupeKey, source) {
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
   return decision.status === 'sent' ? 'sent' : 'paused';
 }
-module.exports = { queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };
+module.exports = { registerReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
 const templateSchema = new Schema({
+  legacySourceId: { type: Schema.Types.ObjectId, unique: true, sparse: true },
   event: { type: String, required: true, index: true },
   name: { type: String, required: true },
   subject: { type: String, required: true },

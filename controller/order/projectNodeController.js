@@ -9,6 +9,8 @@ const {
   softDeleteProjectNodes,
 } = require("../../helpers/projectNodeService");
 const { activateAfterProjectServices } = require('../../helpers/serviceLifecycle');
+const { safePrepareNodeMessage } = require('../../helpers/projectNodeCommunication');
+const { createHash } = require('node:crypto');
 
 const requireAdmin = (req, res) => {
   if (req.userRole !== "admin") {
@@ -25,7 +27,7 @@ const getOrderForAdmin = async (req, res) => {
     return null;
   }
 
-  const order = await orderProductModel.findById(orderId);
+  const order = await orderProductModel.findById(orderId).populate('productId', 'serviceName category');
   if (!order) {
     res.status(404).json({ success: false, error: true, message: "Project order not found" });
     return null;
@@ -34,7 +36,7 @@ const getOrderForAdmin = async (req, res) => {
     res.status(400).json({ success: false, error: true, message: "Node operations are supported only for projects" });
     return null;
   }
-  if (order.offerReservationId && !await require('../../models/userModel').exists({ _id: req.userId, roles: 'admin', isActive: { $ne: false }, deletedAt: null })) {
+  if (!await require('../../models/userModel').exists({ _id: req.userId, roles: 'admin', isGuest: { $ne: true }, isActive: { $ne: false }, deletedAt: null })) {
     res.status(403).json({ success: false, error: true, message: 'Current portal admin access required' });
     return null;
   }
@@ -62,18 +64,39 @@ const saveResponse = async (res, order, message, actorId) => {
   return res.status(200).json({ success: true, error: false, message, data: order });
 };
 
+async function respondWithSavedNode(req, res, order, node) {
+  let serviceActivationPending = false;
+  if (order.projectProgress >= 100) {
+    try { await activateAfterProjectServices({ projectOrderId: order._id, actorId: req.userId }); }
+    catch (error) { serviceActivationPending = true; console.error('[project-node] Service activation pending:', error.message); }
+  }
+  const communication = await safePrepareNodeMessage(req, order, node);
+  return res.json({ success: true, message: 'Project node saved', data: order, savedNodeId: node.nodeId, serviceActivationPending, ...communication });
+}
+
 const createProjectNode = async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return;
     const order = await getOrderForAdmin(req, res);
     if (!order) return;
 
+    const requestId = req.body?.requestId;
+    if (requestId !== undefined && (typeof requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(requestId))) throw new Error('Valid request ID required');
+    const fingerprint = createHash('sha256').update(JSON.stringify([String(req.userId), String(req.body?.title || '').trim(), Number(req.body?.cumulativeProgress), String(req.body?.message || '').trim()])).digest('hex');
+    const previous = requestId && order.projectNodes.find(node => node.clientRequestId === requestId);
+    if (previous) {
+      if (previous.requestFingerprint !== fingerprint) return res.status(409).json({ success: false, message: 'This request ID belongs to another node update' });
+      return await respondWithSavedNode(req, res, order, previous);
+    }
     const node = appendProjectNode({
       order,
       title: req.body?.title,
       cumulativeProgress: req.body?.cumulativeProgress,
       actorId: req.userId,
     });
+    const savedNode = order.projectNodes.find(row => row.nodeId === node.nodeId);
+    savedNode.clientRequestId = requestId;
+    savedNode.requestFingerprint = fingerprint;
 
     const messageText = String(req.body?.message || "").trim();
     if (messageText) {
@@ -87,14 +110,30 @@ const createProjectNode = async (req, res) => {
         runId: node.runId,
       });
       const savedMessage = order.messages[order.messages.length - 1];
-      node.messageIds.push(String(savedMessage._id));
+      savedNode.messageIds.push(String(savedMessage._id));
     }
 
-    return await saveResponse(res, order, "Project node created successfully", req.userId);
+    // Compare-and-set prevents concurrent requests from appending duplicate work.
+    order.$where = { ...order.$where, __v: order.__v };
+    order.increment();
+    await order.save();
+    return await respondWithSavedNode(req, res, order, savedNode);
   } catch (error) {
+    if (error.name === 'VersionError' || error.name === 'DocumentNotFoundError') return res.status(409).json({ success: false, message: 'The timeline changed. Retry the same node details to confirm the saved update.' });
     console.error("Error creating project node:", error);
     return res.status(400).json({ success: false, error: true, message: error.message });
   }
+};
+
+const prepareProjectNodeMessage = async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return;
+    const order = await getOrderForAdmin(req, res);
+    if (!order) return;
+    const node = order.projectNodes.find(row => row.nodeId === req.body?.nodeId);
+    if (!node) return res.status(404).json({ success: false, message: 'Node not found' });
+    return res.json({ success: true, savedNodeId: node.nodeId, ...await safePrepareNodeMessage(req, order, node) });
+  } catch (error) { return res.status(400).json({ success: false, message: error.message }); }
 };
 
 const editProjectNodeController = async (req, res) => {
@@ -195,6 +234,7 @@ const resetProjectNodes = async (req, res) => {
 };
 
 module.exports = {
+  prepareProjectNodeMessage,
   createProjectNode,
   editProjectNode: editProjectNodeController,
   deleteProjectNodes,

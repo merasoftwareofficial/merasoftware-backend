@@ -649,30 +649,28 @@ const definitions = {
     },
   },
   sendProjectUpdateEmail: {
-    subject: 'Project Update: {{project}} - Milestone Completed',
+    subject: 'Project update: {{project}}',
     text: lines(
       'Hello {{name}},', '',
-      'We have an exciting update on your website project **{{project}}**!', '',
-      '## Milestone Completed',
-      '**{{milestone}}** is now complete!',
+      'A new update has been added to your project **{{project}}**.', '',
+      '**Update:** {{milestone}}',
       '{{message}}', '',
-      '**Project Progress:** {{progress}} complete', '',
-      '{{developer}} is working diligently to move your project forward. If you have any questions or need clarification, please do not hesitate to reach out.', '',
-      'You can log in to your account to view detailed updates and provide feedback.', '',
-      'Thank you for your continued collaboration!', '',
+      '**Project progress:** {{progress}}', '',
+      'Open your client portal to view your project timeline and details.',
+      '{{portal}}', '',
       ...SIGN_OFF,
     ),
     variables: {
       name: NAME, project: PROJECT, milestone: detail('Milestone', 'Home page design'),
       message: detail('Update message', 'The home page is ready for your review.', 'What the developer wrote; links become “Text: URL”'),
-      progress: detail('Progress', '60%'), developer: DEVELOPER,
+      progress: detail('Progress', '60%'), developer: DEVELOPER, portal: detail('Client portal', 'https://portal.example.test/project-details/project'),
     },
     blocks: {},
     build(user, updateData = {}) {
-      if (!user?.email) return null;
-      return { to: [user.email], values: {
+      if (!user?.email && !user?.phone) return null;
+      return { to: user.email ? [user.email] : [], phone: user.phone, values: {
         name: text(updateData.clientName || user.name), project: text(updateData.projectName), milestone: text(updateData.checkpointName),
-        message: plainButtons(updateData.message), progress: updateData.projectProgress === undefined ? '' : `${updateData.projectProgress}%`, developer: text(updateData.developerName),
+        portal: text(updateData.portalUrl), message: plainButtons(updateData.message), progress: updateData.projectProgress === undefined ? '' : `${updateData.projectProgress}%`, developer: text(updateData.developerName),
       } };
     },
   },

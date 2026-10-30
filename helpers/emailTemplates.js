@@ -54,6 +54,11 @@ async function systemTemplate(event) {
   if (!hasSystemTemplate(event)) return null;
   const filter = { event, system: true };
   const { subject, text } = definitions[event];
+  if (event === 'sendProjectUpdateEmail') {
+    const legacy = require('./legacyProjectUpdateTemplate');
+    await EmailTemplate.updateOne({ ...filter, subject: legacy.subject, text: legacy.text }, { $set: { subject, text } });
+    await require('./migrateNodeTemplates').migrateNodeTemplates({ apply: true });
+  }
   try {
     return await EmailTemplate.findOneAndUpdate(filter, { $setOnInsert: { name: SYSTEM_NAME, subject, text } }, { upsert: true, new: true }).lean();
   } catch (error) {

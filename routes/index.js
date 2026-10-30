@@ -1,6 +1,8 @@
 const express = require('express')
 
 const router = express.Router()
+router.get('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
+router.patch('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
 const websitePreview = require('../controller/order/websitePreview');
 const previewAuth = require('../middleware/authToken');
 router.get('/projects/:projectId/website-preview', previewAuth, websitePreview.state);
@@ -350,6 +352,7 @@ router.post("/admin/clients/:customerId/payment-records/:recordType/:recordId/re
 router.get("/get-order", authToken, getUserOrders)
 router.get("/order-details/:orderId", authToken, getOrderDetails)
 router.post("/admin/projects/:orderId/nodes", authToken, projectNodeController.createProjectNode)
+router.post('/admin/projects/:orderId/nodes/message', authToken, projectNodeController.prepareProjectNodeMessage)
 router.post("/admin/projects/:orderId/nodes/edit", authToken, projectNodeController.editProjectNode)
 router.post("/admin/projects/:orderId/nodes/delete", authToken, projectNodeController.deleteProjectNodes)
 router.post("/admin/projects/:orderId/nodes/restore", authToken, projectNodeController.restoreProjectNodes)

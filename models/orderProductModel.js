@@ -64,6 +64,8 @@ const projectRunSchema = new mongoose.Schema({
 }, { _id: false });
 
 const projectNodeSchema = new mongoose.Schema({
+    clientRequestId: String,
+    requestFingerprint: String,
     nodeId: {
         type: String,
         required: true
