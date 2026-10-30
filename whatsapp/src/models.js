@@ -70,11 +70,14 @@ const lockSchema = new mongoose.Schema({ _id: String, owner: String, expiresAt: 
 const ruleSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   message: { type: String, required: true, trim: true, maxlength: 1_000 },
+  reply: String, // the owner's reply as a saved message document (helpers/broadcastContent.js); empty = the first reply (helpers/autoReplyContent.js)
 }, { timestamps: true, collection: 'whatsapp_auto_reply_rules' });
 
 // Auto Reply: one row per recognised message. A message that matches nothing is never saved.
 // new → closed by the backend job (helpers/autoReplyJobs.js); needs-attention = its real number wasn't found.
 export const INBOX_STATUSES = ['new', 'needs-attention', 'closed'];
+export const AUTO_REPLY_EVENT = 'auto-reply'; // the queue row's event, so a waiting reply can be found and cancelled
+export const OUR_SIDE_REPLIED = 'Not sent: a message already went to this person from our side.';
 const inboxSchema = new mongoose.Schema({
   messageId: { type: String, required: true, unique: true }, // WhatsApp's id: a repeat delivery can't count twice
   ruleId: mongoose.Schema.Types.ObjectId,
@@ -86,9 +89,16 @@ const inboxSchema = new mongoose.Schema({
   sentAt: Date,
   adMarker: { externalAdReply: Boolean, ctwaClid: Boolean, conversionSource: String },
   status: { type: String, enum: INBOX_STATUSES, default: 'new' },
-  outcome: String,
+  outcome: String, // what the job did, in one word (helpers/autoReplyJobs.js)
+  // Decided once and kept, so a job that stops halfway can't mistake the lead it just made for an old contact.
+  personKnown: Boolean,
+  ourSideReplied: Boolean, // a message went to this person from our side before the auto reply's turn
+  leadId: mongoose.Schema.Types.ObjectId,
+  replyText: String, // exactly what was queued, so a retry after a crash uses the same words
+  replyStatus: String, // the queue row's status, copied because queue rows expire after 30 days
 }, { timestamps: true, collection: 'whatsapp_inbox' });
 inboxSchema.index({ status: 1, createdAt: 1 });
+inboxSchema.index({ phone: 1, createdAt: 1 });
 
 export const Rule = mongoose.models.WhatsappAutoReplyRule || mongoose.model('WhatsappAutoReplyRule', ruleSchema);
 export const Inbox = mongoose.models.WhatsappInbox || mongoose.model('WhatsappInbox', inboxSchema);

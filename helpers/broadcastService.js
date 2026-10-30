@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const Template = require('../models/messageTemplateModel');
 const { Broadcast, BroadcastRecipient } = require('../models/broadcastModel');
 const { audience, groupQuery } = require('./broadcastAudience');
-const { content, encode, decode, title, fail } = require('./broadcastContent');
+const { content, encode, decode, title, usesName, fail } = require('./broadcastContent');
 const deterministicId = text => new mongoose.Types.ObjectId(crypto.createHash('sha256').update(text).digest('hex').slice(0, 24));
 const objectId = value => { if (!mongoose.isValidObjectId(value)) fail('Invalid record.'); return value; };
 async function templateInput(input) {
@@ -38,7 +38,8 @@ async function submit(input, userId) {
   let row = await Broadcast.findById(id);
   if (!row) {
     if (templateId && !await Template.exists({ _id: templateId, purpose: 'broadcast' })) fail('Saved message no longer exists.');
-    if (!(await audience(input.audience)).count) fail('This group has no eligible phone numbers.');
+    const requireName = usesName(decode(message));
+    if (!(await audience(input.audience, { requireName })).count) fail(requireName ? 'No one in this group has both a usable number and a name. Remove the name from the message, or choose another group.' : 'This group has no eligible phone numbers.');
     try {
       row = await Broadcast.create({ _id: id, createdBy: userId, requestKey: input.requestKey, fingerprint, audience: input.audience, message, templateId, origin: input.origin });
     } catch (error) { if (error.code !== 11000) throw error; row = await Broadcast.findById(id); }

@@ -2,7 +2,8 @@ const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
-const { SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const { CONTACTED, INQUIRY, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const { findLeadsByPhone } = require("../../helpers/leadPhone");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
 let KEY_FILE_PATH;
@@ -12,6 +13,9 @@ if (process.env.NODE_ENV === "production" && process.env.GOOGLE_DRIVE_CREDENTIAL
   KEY_FILE_PATH = path.join(__dirname, "../../config/google-drive-credentials.json");
 }
 const FOLLOWUP_FOLDER_NAME = "LeadFollowUpFiles";
+
+const NEEDS_NAME = { message: "Add this lead's name first: use Edit Lead.", error: true, success: false };
+const missingNameFor = (lead, status) => !lead.name && !NAME_OPTIONAL_STATUSES.includes(status);
 
 const updateLeadController = async (req, res) => {
   try {
@@ -57,6 +61,7 @@ const updateLeadController = async (req, res) => {
           success: false,
         });
       }
+      if (missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
 
       const note = (req.body.note || "").trim();
       if (!note) {
@@ -139,6 +144,7 @@ const updateLeadController = async (req, res) => {
           success: false,
         });
       }
+      if (badgeChanged && missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
 
       const note = (req.body.note || "").trim();
       if (!note) {
@@ -229,7 +235,7 @@ const updateLeadController = async (req, res) => {
       const existingLead = await leadModel
         .findOne({ _id: { $ne: lead._id }, $or: duplicateOr })
         .lean();
-      if (existingLead) {
+      if (existingLead || (await findLeadsByPhone(cleanPhone, { _id: { $ne: lead._id } })).length) {
         return res.status(409).json({
           message: "A lead with this phone or email already exists",
           error: true,
@@ -237,6 +243,8 @@ const updateLeadController = async (req, res) => {
         });
       }
 
+      // Owner rule: an Inquiry becomes a real lead the moment it gets a name.
+      if (lead.status === INQUIRY) lead.status = CONTACTED;
       lead.name = cleanName;
       lead.phone = cleanPhone;
       lead.email = cleanEmail;

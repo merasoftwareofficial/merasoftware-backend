@@ -2,6 +2,7 @@ const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const AdminSettings = require("../../models/adminSettingsModel");
 const { creditWalletInstant } = require("../../helpers/transactionService");
+const { findLeadsByPhone } = require("../../helpers/leadPhone");
 
 const createLeadController = async (req, res) => {
   try {
@@ -58,7 +59,7 @@ const createLeadController = async (req, res) => {
 
     if (duplicateOr.length) {
       const existingLead = await leadModel.findOne({ $or: duplicateOr }).lean();
-      if (existingLead) {
+      if (existingLead || (await findLeadsByPhone(cleanPhone)).length) {
         return res.status(409).json({
           message: "A lead with this phone or email already exists",
           error: true,

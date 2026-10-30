@@ -6,10 +6,11 @@ const { loadConfig } = require('../whatsapp/src/config.js');
 const { stoppedReason } = require('./whatsappReadiness');
 const { enqueueWhatsApp } = require('./whatsappQueue');
 const { audience, eligible } = require('./broadcastAudience');
-const { decode, render } = require('./broadcastContent');
+const { decode, render, usesName } = require('./broadcastContent');
 const { completeAcceptance } = require('./broadcastService');
 const ACTIVE = ['waiting', 'releasing', 'pending', 'sending'];
 const QUEUED = ['releasing', 'pending', 'sending'];
+const nameRule = broadcast => ({ requireName: usesName(decode(broadcast.message)) });
 
 async function reconcile() {
   for (const recipient of await Recipient.find({ state: { $in: QUEUED } }).lean()) {
@@ -19,7 +20,7 @@ async function reconcile() {
       continue; // a releasing recipient without queuedAt is recovered through the persistent gate
     }
     const broadcast = await Broadcast.findById(recipient.broadcastId).lean();
-    if (queued.status === 'pending' && (!broadcast || !await eligible(broadcast.audience, recipient))) {
+    if (queued.status === 'pending' && (!broadcast || !await eligible(broadcast.audience, recipient, nameRule(broadcast)))) {
       // Compare-and-set: do not cancel a row the real sender has already claimed.
       await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: 'Lead left the selected group or its number changed.', expiresAt: finishedExpiry(new Date()) } });
     }
@@ -50,7 +51,7 @@ async function dispatch({ now = new Date() } = {}) {
     const preparing = await Broadcast.findOne({ state: 'preparing' }).sort({ createdAt: 1 }).lean();
     if (preparing) {
       await completeAcceptance(preparing);
-      const { recipients } = await audience(preparing.audience);
+      const { recipients } = await audience(preparing.audience, nameRule(preparing));
       for (const recipient of recipients) {
         if (!await ownsLease()) return { reason: 'lease-lost' };
         await Recipient.updateOne({ broadcastId: preparing._id, phone: recipient.phone }, { $setOnInsert: { broadcastId: preparing._id, leadId: recipient.leadId, phone: recipient.phone, state: 'waiting' } }, { upsert: true });
@@ -84,7 +85,7 @@ async function dispatch({ now = new Date() } = {}) {
     const recipient = await Recipient.findById(gate.recipientId).lean();
     if (!recipient || !['waiting', 'releasing'].includes(recipient.state)) return { reason: 'waiting' };
     const broadcast = await Broadcast.findById(recipient.broadcastId).lean();
-    const lead = broadcast && await eligible(broadcast.audience, recipient);
+    const lead = broadcast && await eligible(broadcast.audience, recipient, nameRule(broadcast));
     if (!lead) {
       await Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'skipped', reason: 'Lead left the selected group or its number changed.' } });
       return { reason: 'skipped' };

@@ -12,7 +12,7 @@
     "portfolio:worker": "node scripts/portfolioWorker.js",
     "portfolio:sync": "node scripts/portfolioWorker.js --once",
     "test:portfolio": "node --test tests/portfolio.test.js",
-    "test:lead-status": "node --test tests/leadStatuses.test.js tests/proposalSentMigration.test.js tests/leadCorrection.test.js tests/customerProjectRequest.test.js tests/planRequest.test.js",
+    "test:lead-status": "node --test tests/leadStatuses.test.js tests/proposalSentMigration.test.js tests/leadCorrection.test.js tests/customerProjectRequest.test.js tests/planRequest.test.js tests/inquiryLead.test.js",
     "test:whatsapp": "node --test whatsapp/tests/sender.test.js whatsapp/tests/connection.test.js whatsapp/tests/inbound.test.js tests/whatsappQueue.test.js tests/whatsappControl.test.js tests/broadcast.test.js tests/autoReply.test.js",
     "test:broadcast": "node --test tests/broadcast.test.js",
     "test": "echo \"Error: no test specified\" && exit 1",

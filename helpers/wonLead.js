@@ -37,6 +37,7 @@ async function ensureWonLead(user, createdBy) {
   if (!open) return createWonLead(user, createdBy);
   open.convertedToUserId = user._id;
   open.status = WON;
+  open.name = open.name || user.name || user.email; // an Inquiry or Negative lead may have none, and Won needs one
   return open.save();
 }
 

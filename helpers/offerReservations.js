@@ -6,6 +6,7 @@ const Transaction = require('../models/transactionModel');
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { calculateBenefit, fail } = require('./salesPackages');
 const { parsePhone } = require('./phoneNumber');
+const { claimInquiryLead } = require('./leadPhone');
 const HOUR = 60 * 60 * 1000;
 const safeSlug = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
 // The existing payment state for a submitted project payment awaiting admin approval.
@@ -108,6 +109,7 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     if (!user.roles.includes('customer') && user.roles.includes('member')) {
       lead = await Lead.findOne({ reservationUserId: userId }).session(session);
       if (lead?.deletedAt || lead?.convertedToUserId) fail('The linked lead needs team review before another reservation', 409);
+      if (!lead) lead = await claimInquiryLead(user.phone, { name: user.name || user.email, email: user.email, reservationUserId: userId }, { session });
       if (!lead) [lead] = await Lead.create([{ name: user.name || user.email, email: user.email, phone: user.phone,
         source: 'Offer reservation', reservationUserId: userId }], { session });
       else if (!lead.phone) { lead.phone = user.phone; await lead.save({ session }); }

@@ -136,6 +136,35 @@ test('a member request uses the account: its own lead, the offer-reservation lea
   assert.equal((await asMember()).status, 409);
 });
 
+test('someone who wrote on WhatsApp: their Inquiry becomes the real lead, and a just-made one does not swallow the request', async () => {
+  const inquiry = await leadModel.create({ phone: '+919876543210', status: 'Inquiry', source: 'WhatsApp ad' });
+  const sent = await visitor();
+  assert.equal(sent.status, 200);
+  assert.equal(sent.data.repeated, false);
+  assert.equal(await leadModel.countDocuments(), 1);
+  const lead = await leadModel.findById(inquiry._id).lean();
+  assert.equal(lead.status, 'Contacted');
+  assert.equal(lead.name, 'Ravi Kumar');
+  assert.equal(lead.email, 'ravi@example.test');
+  assert.equal(lead.source, 'WhatsApp ad');
+  assert.equal(lead.followUps.length, 1);
+  assert.ok(lead.followUps[0].note.startsWith(NOTE_TITLE));
+});
+
+test('a member who wrote on WhatsApp: the Inquiry becomes their account\'s lead', async () => {
+  const inquiry = await leadModel.create({ phone: '9811111111', status: 'Inquiry', source: 'WhatsApp ad' });
+  const sent = await asMember();
+  assert.equal(sent.status, 200);
+  assert.equal(await leadModel.countDocuments(), 1);
+  const lead = await leadModel.findById(inquiry._id).lean();
+  assert.equal(lead.status, 'Contacted');
+  assert.equal(lead.name, 'Meera Member');
+  assert.equal(String(lead.reservationUserId), String(member._id));
+  assert.equal(lead.followUps.length, 1);
+  assert.equal((await asMember()).status, 200, 'the next request finds it by the account');
+  assert.equal(await leadModel.countDocuments(), 1);
+});
+
 test('a member without a phone adds it once; without a lead one is created for the account', async () => {
   await userModel.updateOne({ _id: member._id }, { $set: { phone: '' } });
   assert.equal((await asMember()).status, 428);

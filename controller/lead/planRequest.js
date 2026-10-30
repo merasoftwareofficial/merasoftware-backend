@@ -7,6 +7,7 @@ const { requireIntegration } = require("../../helpers/integrationAuth");
 const { parsePhone } = require("../../helpers/phoneNumber");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
+const { claimInquiryLead } = require("../../helpers/leadPhone");
 
 // Website plan page (merasoftware/src/app/plans/[plan]) → "Get this plan" by someone who is not a
 // portal client. Clients buy in the portal; everyone else asks, and the team calls them back.
@@ -81,6 +82,15 @@ async function addToLead(lead, note, createdBy) {
   return false;
 }
 
+// Someone who wrote on WhatsApp now asks for a plan: their Inquiry lead takes this request instead of a second lead.
+// Not addToLead: a recent Inquiry would look like a quick repeat, and this request would be lost.
+async function addToInquiry({ contact, note, createdBy, reservationUserId }) {
+  const lead = await claimInquiryLead(contact.phone, { name: contact.name, email: contact.email, ...(reservationUserId ? { reservationUserId } : {}) });
+  if (!lead) return null;
+  lead.followUps.push({ note, badge: lead.status, createdBy: createdBy || undefined });
+  return lead.save();
+}
+
 // The two mails' data (helpers/emailDefinitions.js plan.request.*): who asked, which plan, what choice.
 async function notify({ lead, plan, quote, contact }) {
   const request = { lead, planName: plan.serviceName, contact, ...choiceText(plan, quote) };
@@ -120,6 +130,11 @@ const memberPlanRequest = respond(async (req) => {
   if (lead?.deletedAt || lead?.convertedToUserId) fail("Your earlier request is with our team. Please contact us directly.", 409);
   let created = false;
   if (!lead) {
+    const inquiry = await addToInquiry({ contact, note, createdBy: user._id, reservationUserId: user._id });
+    if (inquiry) {
+      await notify({ lead: inquiry, plan, quote, contact });
+      return { created: false, repeated: false };
+    }
     try {
       lead = await leadModel.create({ name: contact.name, email: contact.email, phone: contact.phone, source: SOURCE, notes: note, reservationUserId: user._id, createdBy: user._id });
       created = true;
@@ -149,6 +164,11 @@ const integrationPlanRequest = respond(async (req) => {
   const contact = { name, email, phone };
   const note = noteFor({ plan, quote, contact });
 
+  const inquiry = await addToInquiry({ contact, note });
+  if (inquiry) {
+    await notify({ lead: inquiry, plan, quote, contact });
+    return { created: false, repeated: false };
+  }
   const open = await leadModel
     .findOne({ phone, deletedAt: null, convertedToUserId: null, status: { $in: OPEN_LEAD_STATUSES } })
     .sort({ updatedAt: -1 });

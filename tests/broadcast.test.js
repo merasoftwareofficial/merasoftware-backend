@@ -53,7 +53,7 @@ test('stage groups ignore badges; proposal audience includes only badged Contact
   assert.equal((await audience('Proposal Sent')).count, 2);
   await Lead.create([{ name: 'Duplicate', phone: '+91 9876543200' }, { name: 'Bad', phone: '123' }, { name: 'Trash', phone: '9876543299', deletedAt: new Date() }]);
   const result = await audience('Contacted');
-  assert.equal(result.count, 2); assert.deepEqual(result.excluded, { invalidPhone: 1, duplicatePhone: 1 });
+  assert.equal(result.count, 2); assert.deepEqual(result.excluded, { invalidPhone: 1, duplicatePhone: 1, noName: 0 });
 });
 test('codec round-trips formatting and field chips; values are literal; unsupported fields/structures are rejected', () => {
   const canonical = content(named());

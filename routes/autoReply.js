@@ -3,10 +3,13 @@ const communicationAdmin = require('../middleware/communicationAdmin');
 const { Inbox, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { DEFAULT_AD_MESSAGE, MIN_AD_MESSAGE, RULE_KEY, cleanText } = require('../whatsapp/src/autoReplyRules.js');
 const { workerAlive } = require('../helpers/whatsappReadiness');
+const { encodeReply, replyDoc } = require('../helpers/autoReplyContent');
+const { cancelWaitingReplies } = require('../helpers/autoReplyJobs');
 
 // The Auto Reply box (website Communication, through its /api/auto-reply proxy). Admins only: it holds people's messages.
 const router = express.Router();
 const RECENT_ROWS = 20;
+const SWITCHES = ['recognise', 'sendReplies', 'addLeads'];
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(communicationAdmin);
 const handle = fn => async (req, res) => {
@@ -18,30 +21,35 @@ const ensureRule = () => Rule.findOneAndUpdate({ key: RULE_KEY }, { $setOnInsert
   { upsert: true, new: true }).lean();
 
 router.get('/status', handle(async () => {
-  const [state, rule, rows, total, needsAttention] = await Promise.all([
+  const [state, rule, rows, total, needsAttention, repliesSent, repliesWaiting, newLeads] = await Promise.all([
     State.findById(STATE_ID).lean(),
     ensureRule(),
     Inbox.find().sort({ createdAt: -1 }).limit(RECENT_ROWS)
-      .select('phone text profileName deliveredAs sentAt adMarker status createdAt').lean(),
+      .select('phone text profileName deliveredAs sentAt adMarker status outcome replyStatus createdAt').lean(),
     Inbox.countDocuments(),
     Inbox.countDocuments({ status: 'needs-attention' }),
+    Inbox.countDocuments({ replyStatus: 'sent' }),
+    Inbox.countDocuments({ replyStatus: { $in: ['pending', 'sending'] } }),
+    Inbox.countDocuments({ leadId: { $exists: true } }),
   ]);
   return {
-    switches: { recognise: !!state?.autoReply?.recognise, sendReplies: !!state?.autoReply?.sendReplies, addLeads: !!state?.autoReply?.addLeads },
+    switches: Object.fromEntries(SWITCHES.map(key => [key, !!state?.autoReply?.[key]])),
     // Recognising needs the worker running and the number linked, whatever the switch says.
     listening: process.env.ENABLE_WHATSAPP === 'true' && workerAlive(state, new Date()) && state?.connection === 'connected',
     message: rule.message,
     minMessage: MIN_AD_MESSAGE,
-    detected: { rows, total, needsAttention },
+    reply: replyDoc(rule),
+    detected: { rows, total, needsAttention, repliesSent, repliesWaiting, newLeads },
   };
 }));
 
-// Only recognising exists so far. The other two switches are added with the steps that make them do something.
 router.post('/switches', handle(async req => {
-  const { recognise } = req.body || {};
-  if (typeof recognise !== 'boolean') fail('Choose On or Off.');
-  await State.updateOne({ _id: STATE_ID }, { $set: { 'autoReply.recognise': recognise } }, { upsert: true });
-  return { recognise };
+  const changes = Object.entries(req.body || {});
+  if (!changes.length || changes.some(([key, value]) => !SWITCHES.includes(key) || typeof value !== 'boolean')) fail('Choose On or Off.');
+  await State.updateOne({ _id: STATE_ID }, { $set: Object.fromEntries(changes.map(([key, value]) => [`autoReply.${key}`, value])) }, { upsert: true });
+  // Off means no auto reply goes out from now on, including those still waiting in the queue.
+  const stopsReplies = changes.some(([key, value]) => ['recognise', 'sendReplies'].includes(key) && value === false);
+  return { cancelled: stopsReplies ? await cancelWaitingReplies() : 0 };
 }));
 
 router.post('/message', handle(async req => {
@@ -51,6 +59,14 @@ router.post('/message', handle(async req => {
   await ensureRule();
   await Rule.updateOne({ key: RULE_KEY }, { $set: { message } });
   return { message };
+}));
+
+// A reply already waiting in the queue keeps its words; this applies to the next person.
+router.post('/reply', handle(async req => {
+  const reply = encodeReply(req.body?.doc);
+  await ensureRule();
+  await Rule.updateOne({ key: RULE_KEY }, { $set: { reply } });
+  return { saved: true };
 }));
 
 module.exports = router;

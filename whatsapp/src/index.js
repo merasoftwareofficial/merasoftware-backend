@@ -33,7 +33,7 @@ console.log('Connected to DB');
 if (!config.senderEnabled) {
   console.log('Sender disabled (ENABLE_SENDER is not "true") — not connecting to WhatsApp, not sending.');
 } else {
-  const inbound = createInbound({ Inbox, Rule, State, logger });
+  const inbound = createInbound({ Inbox, Queue, Rule, State, logger });
   const connection = createConnection({ Auth, State, logger, onMessages: inbound.handle });
   const sender = createSender({ Queue, State, transport: connection.transport, config });
   const lease = createLease(Lock);

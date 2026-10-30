@@ -4,14 +4,14 @@ import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { DEFAULT_AD_MESSAGE, RULE_KEY, cleanText, matchesAdMessage } from '../src/autoReplyRules.js';
 import { createInbound, messageTime, senderPhone } from '../src/inbound.js';
-import { Inbox, Rule, State, STATE_ID } from '../src/models.js';
+import { Inbox, Queue, Rule, State, STATE_ID } from '../src/models.js';
 import { RECOMMENDED } from '../src/settings.js';
 
 const silent = { error() {}, warn() {}, info() {} };
 const NOW = new Date('2026-10-30T12:00:00Z');
 const PHONE = '919876543210';
 let mongo, serial = 0;
-const inbound = createInbound({ Inbox, Rule, State, logger: silent, now: () => NOW });
+const inbound = createInbound({ Inbox, Queue, Rule, State, logger: silent, now: () => NOW });
 const seconds = date => Math.floor(date.getTime() / 1000);
 const message = (fields = {}) => ({
   key: { id: `msg-${++serial}`, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: false },

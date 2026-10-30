@@ -12,7 +12,7 @@ function marksFor(value) {
     return { type: mark.type };
   });
 }
-function content(input) {
+function content(input, { fields = FIELDS } = {}) {
   let size = 0;
   function node(value, depth = 0) {
     if (!value || depth > 12 || ++size > 4000) fail('Message is too large.');
@@ -23,7 +23,7 @@ function content(input) {
       return { type, text: value.text, ...(marks.length ? { marks } : {}) };
     }
     if (type === 'emailVariable') {
-      if (!FIELDS.some(field => field.key === value.attrs?.key)) fail('Unknown message detail.');
+      if (!fields.some(field => field.key === value.attrs?.key)) fail('Unknown message detail.');
       const marks = marksFor(value);
       return { type, attrs: { key: value.attrs.key }, ...(marks.length ? { marks } : {}) };
     }
@@ -72,7 +72,14 @@ function render(doc, values = {}, { html = false } = {}) {
   }
   return visit(doc).trim();
 }
-const encode = doc => JSON.stringify(content(doc));
-const decode = message => content(JSON.parse(message));
+const encode = (doc, options) => JSON.stringify(content(doc, options));
+const decode = (message, options) => content(JSON.parse(message), options);
 const title = doc => render(doc, { name: 'Recipient' }).split('\n')[0].replace(/[*_]/g, '').slice(0, 100) || 'Message';
-module.exports = { FIELDS, content, encode, decode, render, title, fail };
+/** Does this message greet the recipient by name? A lead with no name can't receive such a message. */
+const usesName = node => node.type === 'emailVariable' ? node.attrs?.key === 'name' : (node.content || []).some(usesName);
+/** Plain text as a message document: a blank line starts a paragraph, a line break stays inside it. */
+const textToDoc = text => ({ type: 'doc', content: String(text).split(/\n{2,}/).map(paragraph => ({
+  type: 'paragraph',
+  content: paragraph.split('\n').flatMap((line, index) => [...(index ? [{ type: 'hardBreak' }] : []), { type: 'text', text: line }]),
+})) });
+module.exports = { FIELDS, content, encode, decode, render, title, usesName, textToDoc, fail };

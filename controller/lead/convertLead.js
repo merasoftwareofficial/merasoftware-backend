@@ -56,6 +56,15 @@ const convertLeadController = async (req, res) => {
     const cleanPhone = (lead.phone || "").trim();
     const cleanEmail = (lead.email || "").trim().toLowerCase();
 
+    // Checked before anything is created: an account made for a lead that then can't save would be left behind.
+    if (!(lead.name || "").trim()) {
+      return res.status(400).json({
+        message: "This lead has no name. Add a name before converting.",
+        error: true,
+        success: false,
+      });
+    }
+
     if (!cleanPhone) {
       return res.status(400).json({
         message: "This lead has no phone number. Add a phone before converting.",

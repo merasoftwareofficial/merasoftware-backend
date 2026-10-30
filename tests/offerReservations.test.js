@@ -79,6 +79,16 @@ test('member reservation creates one linked lead without promoting the account',
   assert.deepEqual((await User.findById(member._id)).roles, ['member']);
   assert.equal((await Reservation.findOne()).leadId.toString(), lead._id.toString());
 });
+test('a member who wrote on WhatsApp: reserving turns the Inquiry into their lead, not a second one', async () => {
+  const inquiry = await Lead.create({ phone: '9876500001', status: 'Inquiry', source: 'WhatsApp ad' });
+  assert.equal((await reserve()).reservation.status, 'reserved');
+  assert.equal(await Lead.countDocuments(), 1);
+  const lead = await Lead.findById(inquiry._id);
+  assert.equal(lead.status, 'Contacted');
+  assert.equal(lead.name, 'Member');
+  assert.equal(lead.reservationUserId.toString(), member._id.toString());
+  assert.equal((await Reservation.findOne()).leadId.toString(), lead._id.toString());
+});
 test('existing customer reserves without creating a lead', async () => {
   await reserve(customer); assert.equal(await Lead.countDocuments(), 0);
 });

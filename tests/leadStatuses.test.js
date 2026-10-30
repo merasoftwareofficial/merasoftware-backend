@@ -28,10 +28,10 @@ after(async () => {
   fs.rmSync(backupFile, { force: true });
 });
 
-test('the status list: New and Proposal Sent are gone, Won cannot be chosen, old badges stay valid', () => {
-  assert.deepEqual(LEAD_STATUSES, ['Contacted', 'Positive', 'Negative', 'Won']);
+test('the status list: New and Proposal Sent are gone, Won and Inquiry cannot be chosen, old badges stay valid', () => {
+  assert.deepEqual(LEAD_STATUSES, ['Inquiry', 'Contacted', 'Positive', 'Negative', 'Won']);
   assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Negative']);
-  assert.deepEqual(FOLLOW_UP_BADGES, ['Contacted', 'Positive', 'Negative', 'Won', 'Proposal Sent']);
+  assert.deepEqual(FOLLOW_UP_BADGES, ['Inquiry', 'Contacted', 'Positive', 'Negative', 'Won', 'Proposal Sent']);
 });
 
 test('Proposal Sent is refused as a status, kept on an old follow-up', async () => {

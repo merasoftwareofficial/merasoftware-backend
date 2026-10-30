@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS } = require("../helpers/leadStatuses");
+const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, NAME_OPTIONAL_STATUSES } = require("../helpers/leadStatuses");
 
 // Attachment for a follow-up (optional). Reuses the same shape/Drive fields as
 // proposalSchema below so file handling stays a single pattern across the model.
@@ -113,13 +113,24 @@ const leadSchema = new mongoose.Schema({
   reservationUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' },
   name: {
     type: String,
-    required: true,
+    required() { return !NAME_OPTIONAL_STATUSES.includes(this.status); },
     trim: true,
   },
   phone: {
     type: String,
     default: "",
     trim: true,
+  },
+  // Set when WhatsApp Auto Reply added this person (helpers/autoReplyJobs.js).
+  inquiry: {
+    type: new mongoose.Schema({
+      inboxId: { type: mongoose.Schema.Types.ObjectId },
+      message: { type: String, default: "" },
+      firstAt: { type: Date },
+      lastAt: { type: Date },
+      profileName: { type: String, default: "" }, // WhatsApp's display name: a hint, never the lead's real name
+    }, { _id: false }),
+    default: undefined,
   },
   email: {
     type: String,

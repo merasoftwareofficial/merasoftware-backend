@@ -50,6 +50,15 @@ const uploadProposalController = async (req, res) => {
       });
     }
 
+    // The proposal message greets the lead by name.
+    if (!(lead.name || "").trim()) {
+      return res.status(400).json({
+        message: "This lead has no name. Add a name before sending a proposal.",
+        error: true,
+        success: false,
+      });
+    }
+
     const file = (req.files && req.files[0]) || null;
     if (!file) {
       return res.status(400).json({
