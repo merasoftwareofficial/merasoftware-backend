@@ -1,24 +1,20 @@
 // The one list of lead statuses. The portal's copy for display is frontend/src/helpers/leadStatuses.js.
-// Contacted, Proposal Sent and Won are set by what happens to the lead; only these three are chosen by hand.
+// A lead has one status, chosen by the admin; only Won is set by the system. Whether a proposal has
+// gone out is not a status: it is the lead's permanent proposalSentAt, which no status change touches.
 const CONTACTED = "Contacted";
-const PROPOSAL_SENT = "Proposal Sent"; // set by adding a proposal (controller/lead/uploadProposal.js)
 const POSITIVE = "Positive";
 const NEGATIVE = "Negative";
 const WON = "Won"; // set only by a lead becoming a client (controller/lead/convertLead.js, helpers/wonLead.js)
+const PROPOSAL_SENT = "Proposal Sent"; // history only: old follow-ups keep this badge
 
-const LEAD_STATUSES = [CONTACTED, PROPOSAL_SENT, POSITIVE, NEGATIVE, WON];
+const LEAD_STATUSES = [CONTACTED, POSITIVE, NEGATIVE, WON];
 const SELECTABLE_LEAD_STATUSES = [CONTACTED, POSITIVE, NEGATIVE];
+const FOLLOW_UP_BADGES = [...LEAD_STATUSES, PROPOSAL_SENT];
 const DEFAULT_LEAD_STATUS = CONTACTED;
 // A new request is added to a lead in one of these instead of creating another lead.
 const OPEN_LEAD_STATUSES = [CONTACTED];
 
-/** The status after any proposal is added: it moves forward, never back from Positive or Won. */
-function statusAfterProposal(status) {
-  return status === WON || status === POSITIVE ? status : PROPOSAL_SENT;
-}
-
 module.exports = {
-  CONTACTED, PROPOSAL_SENT, POSITIVE, NEGATIVE, WON,
-  LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, DEFAULT_LEAD_STATUS, OPEN_LEAD_STATUSES,
-  statusAfterProposal,
+  CONTACTED, POSITIVE, NEGATIVE, WON, PROPOSAL_SENT,
+  LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, OPEN_LEAD_STATUSES,
 };

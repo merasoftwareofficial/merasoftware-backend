@@ -12,7 +12,7 @@ const getLeadsController = async (req, res) => {
 
     const leads = await leadModel
       .find({ deletedAt: null })
-      .select("name phone email source status convertedToUserId createdAt updatedAt")
+      .select("name phone email source status proposalSentAt convertedToUserId createdAt updatedAt")
       .sort({ updatedAt: -1 })
       .lean();
 

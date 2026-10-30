@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { LEAD_STATUSES, DEFAULT_LEAD_STATUS } = require("../helpers/leadStatuses");
+const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS } = require("../helpers/leadStatuses");
 
 // Attachment for a follow-up (optional). Reuses the same shape/Drive fields as
 // proposalSchema below so file handling stays a single pattern across the model.
@@ -36,7 +36,7 @@ const followUpSchema = new mongoose.Schema({
   // follow-up timeline shows how the pipeline progressed over time.
   badge: {
     type: String,
-    enum: LEAD_STATUSES,
+    enum: FOLLOW_UP_BADGES,
     default: DEFAULT_LEAD_STATUS,
   },
   // Optional file attached to this follow-up (uploaded to Google Drive).
@@ -146,6 +146,12 @@ const leadSchema = new mongoose.Schema({
   proposals: {
     type: [proposalSchema],
     default: [],
+  },
+  // When the first proposal went out. Set once and kept whatever the status becomes: this is the
+  // "Proposal Sent" badge. null = none yet.
+  proposalSentAt: {
+    type: Date,
+    default: null,
   },
   // Reserved for Phase 2 (follow-up log).
   followUps: {

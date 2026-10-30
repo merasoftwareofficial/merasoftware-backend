@@ -48,8 +48,8 @@ const updateLeadController = async (req, res) => {
     // remark, and an optional file. Adding the follow-up also moves the lead's
     // own status to the chosen badge (the two are merged into one action).
     if (action === "followUp") {
-      // No badge sent = keep the current status. A status set automatically can stay, not be chosen.
-      const badge = (req.body.badge || "").trim() || lead.status;
+      // The form always sends a status. The current one is accepted even if it can't be chosen (Won).
+      const badge = (req.body.badge || "").trim();
       if (badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
@@ -115,9 +115,9 @@ const updateLeadController = async (req, res) => {
       });
     }
 
-    // Edit an existing follow-up's badge/note in place. Editing the badge on the
-    // MOST RECENT follow-up also updates the lead's current status, since the
-    // lead's status always mirrors the latest follow-up's badge (same rule as add).
+    // Edit an existing follow-up's badge/note in place. Changing the badge on the
+    // MOST RECENT follow-up also updates the lead's current status (same rule as add);
+    // editing only the note never touches the status.
     if (action === "editFollowUp") {
       const { followUpId } = req.body;
       const followUp = lead.followUps.id(followUpId);
@@ -131,7 +131,8 @@ const updateLeadController = async (req, res) => {
 
       // An old badge that can no longer be chosen (Proposal Sent, Won) may stay when only the note changes.
       const badge = (req.body.badge || "").trim();
-      if (badge !== followUp.badge && !ALLOWED_STATUSES.includes(badge)) {
+      const badgeChanged = badge !== followUp.badge;
+      if (badgeChanged && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
           error: true,
@@ -154,7 +155,7 @@ const updateLeadController = async (req, res) => {
       const latestFollowUp = [...lead.followUps].sort(
         (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
       )[0];
-      if (latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {
+      if (badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {
         lead.status = badge;
       }
 

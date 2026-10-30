@@ -1,7 +1,6 @@
 const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
-const { statusAfterProposal } = require("../../helpers/leadStatuses");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { EVENT: PROPOSAL_MESSAGE, hasEmail, whatsappPreview } = require("../../helpers/leadProposalMessage");
 
@@ -103,8 +102,8 @@ const uploadProposalController = async (req, res) => {
     };
     lead.proposals.push(proposal);
 
-    // Adding a proposal is what sets "Proposal Sent", and the timeline records it.
-    lead.status = statusAfterProposal(lead.status);
+    // The first proposal sets the permanent Proposal Sent badge. The status stays the admin's choice.
+    if (!lead.proposalSentAt) lead.proposalSentAt = proposal.uploadedAt;
     const amountText = amount === null ? "" : `, ₹${amount.toLocaleString("en-IN")}`;
     lead.followUps.push({
       note: `Proposal v${nextVersion} added${amountText}${note ? `. ${note}` : ""}`,
@@ -132,7 +131,7 @@ const uploadProposalController = async (req, res) => {
 
     return res.json({
       message: "Proposal added",
-      data: { version: nextVersion, status: lead.status, whatsappPreview: whatsapp, messageUnavailable },
+      data: { version: nextVersion, whatsappPreview: whatsapp, messageUnavailable },
       success: true,
       error: false,
     });

@@ -6,7 +6,7 @@ const path = require('node:path');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const leadModel = require('../models/leadModel');
-const { LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, statusAfterProposal } = require('../helpers/leadStatuses');
+const { LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, FOLLOW_UP_BADGES } = require('../helpers/leadStatuses');
 const { mergeNewLeadStatus } = require('../scripts/mergeNewLeadStatus');
 
 let db;
@@ -28,9 +28,19 @@ after(async () => {
   fs.rmSync(backupFile, { force: true });
 });
 
-test('the status list: New is gone, and Proposal Sent and Won cannot be chosen', () => {
-  assert.deepEqual(LEAD_STATUSES, ['Contacted', 'Proposal Sent', 'Positive', 'Negative', 'Won']);
+test('the status list: New and Proposal Sent are gone, Won cannot be chosen, old badges stay valid', () => {
+  assert.deepEqual(LEAD_STATUSES, ['Contacted', 'Positive', 'Negative', 'Won']);
   assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Negative']);
+  assert.deepEqual(FOLLOW_UP_BADGES, ['Contacted', 'Positive', 'Negative', 'Won', 'Proposal Sent']);
+});
+
+test('Proposal Sent is refused as a status, kept on an old follow-up', async () => {
+  await assert.rejects(leadModel.create({ name: 'Lead', status: 'Proposal Sent' }), /not a valid enum value/);
+  const { insertedId } = await oldLead('Contacted', ['Proposal Sent']);
+  const lead = await leadModel.findById(insertedId);
+  lead.notes = 'Edited';
+  await lead.save();
+  assert.equal((await leadModel.findById(insertedId).lean()).followUps[0].badge, 'Proposal Sent');
 });
 
 test('a new lead starts as Contacted and the model refuses New', async () => {
@@ -43,14 +53,6 @@ test('a new lead starts as Contacted and the model refuses New', async () => {
   lead.followUps.push({ note: 'Note', badge: 'Positive' });
   await lead.save();
   assert.equal((await leadModel.findById(lead._id).lean()).followUps[0].badge, 'Positive');
-});
-
-test('a proposal moves a lead forward, never back from Positive or Won', () => {
-  assert.equal(statusAfterProposal('Contacted'), 'Proposal Sent');
-  assert.equal(statusAfterProposal('Negative'), 'Proposal Sent');
-  assert.equal(statusAfterProposal('Proposal Sent'), 'Proposal Sent');
-  assert.equal(statusAfterProposal('Positive'), 'Positive');
-  assert.equal(statusAfterProposal('Won'), 'Won');
 });
 
 test('without apply the merge only counts', async () => {

@@ -75,33 +75,58 @@ after(async () => {
   await db?.stop();
 });
 
-test('a proposal sets Proposal Sent, adds a timeline entry and keeps every version', async () => {
+test('a proposal sets the badge, adds a timeline entry and keeps every version', async () => {
   const { _id } = await lead();
+  assert.equal((await read(_id)).proposalSentAt, null);
   const first = await propose(_id, { amount: '25000', note: 'First offer' });
   assert.equal(first.status, 200);
   let row = await read(_id);
-  assert.equal(row.status, 'Proposal Sent');
+  const badgeDate = row.proposalSentAt;
+  assert.ok(badgeDate);
+  assert.equal(row.status, 'Contacted');
   assert.equal(row.proposals[0].amount, 25000);
   assert.equal(row.proposals[0].note, 'First offer');
   assert.equal(row.followUps[0].note, 'Proposal v1 added, ₹25,000. First offer');
-  assert.equal(row.followUps[0].badge, 'Proposal Sent');
+  assert.equal(row.followUps[0].badge, 'Contacted');
 
   await propose(_id);
   row = await read(_id);
+  assert.deepEqual(row.proposalSentAt, badgeDate, 'the first date stays');
   assert.deepEqual(row.proposals.map(item => item.version), [1, 2]);
   assert.equal(row.proposals[1].amount, null);
   assert.equal(row.followUps[1].note, 'Proposal v2 added');
 });
 
-test('any proposal brings a Negative lead back; Positive stays Positive', async () => {
-  const negative = await lead('Negative', { proposals: [{ version: 1, name: 'old' }] });
-  await propose(negative._id);
-  assert.equal((await read(negative._id)).status, 'Proposal Sent');
-  const positive = await lead('Positive');
-  await propose(positive._id);
-  const row = await read(positive._id);
-  assert.equal(row.status, 'Positive');
-  assert.equal(row.followUps[0].badge, 'Positive');
+test('a proposal never changes the stage, on any lead', async () => {
+  for (const status of ['Contacted', 'Positive', 'Negative', 'Won']) {
+    const { _id } = await lead(status);
+    assert.equal((await propose(_id)).status, 200, status);
+    const row = await read(_id);
+    assert.equal(row.status, status);
+    assert.equal(row.followUps[0].badge, status);
+    assert.ok(row.proposalSentAt, status);
+  }
+});
+
+test('the badge stays through every stage change', async () => {
+  const { _id } = await lead();
+  await propose(_id);
+  const { proposalSentAt } = await read(_id);
+  for (const badge of ['Positive', 'Negative', 'Contacted']) {
+    assert.equal((await send(`/admin/leads/${_id}`, { action: 'followUp', note: 'Moved', badge })).status, 200);
+    const row = await read(_id);
+    assert.equal(row.status, badge);
+    assert.deepEqual(row.proposalSentAt, proposalSentAt);
+  }
+});
+
+test('the lead list carries the badge', async () => {
+  const getLeads = require('../controller/lead/getLeads');
+  const { _id } = await lead();
+  await propose(_id);
+  let data;
+  await getLeads({ userRole: 'admin' }, { json: body => { data = body.data; } });
+  assert.ok(data[0].proposalSentAt);
 });
 
 test('refused proposals change nothing and say why, as JSON', async () => {
@@ -127,20 +152,22 @@ test('a converted lead takes no proposal', async () => {
   assert.equal((await propose(_id)).status, 409);
 });
 
-test('a follow-up without a badge keeps the status; only the three statuses can be chosen', async () => {
-  const { _id } = await lead('Proposal Sent');
+test('a follow-up needs a stage: the current one or one of the three', async () => {
+  const { _id } = await lead();
   const path = `/admin/leads/${_id}`;
-  assert.equal((await send(path, { action: 'followUp', note: 'Called' })).status, 200);
-  let row = await read(_id);
-  assert.equal(row.status, 'Proposal Sent');
-  assert.equal(row.followUps[0].badge, 'Proposal Sent');
-
+  assert.equal((await send(path, { action: 'followUp', note: 'Called', badge: 'Contacted' })).status, 200);
   assert.equal((await send(path, { action: 'followUp', note: 'Liked it', badge: 'Positive' })).status, 200);
   assert.equal((await read(_id)).status, 'Positive');
-  for (const badge of ['Proposal Sent', 'Won', 'New']) {
+  for (const badge of ['', 'Proposal Sent', 'Won', 'New']) {
     assert.equal((await send(path, { action: 'followUp', note: 'x', badge })).status, 400, badge);
   }
   assert.equal((await read(_id)).status, 'Positive');
+});
+
+test('an unconverted Won lead can keep Won on a follow-up', async () => {
+  const { _id } = await lead('Won');
+  assert.equal((await send(`/admin/leads/${_id}`, { action: 'followUp', note: 'Note', badge: 'Won' })).status, 200);
+  assert.equal((await read(_id)).status, 'Won');
 });
 
 test('an old Proposal Sent follow-up can be edited, but not chosen on another one', async () => {
@@ -150,6 +177,16 @@ test('an old Proposal Sent follow-up can be edited, but not chosen on another on
   assert.equal((await send(path, { action: 'editFollowUp', followUpId: String(old._id), badge: 'Proposal Sent', note: 'Edited' })).status, 200);
   assert.equal((await read(created._id)).followUps[0].note, 'Edited');
   assert.equal((await send(path, { action: 'editFollowUp', followUpId: String(newer._id), badge: 'Proposal Sent', note: 'x' })).status, 400);
+});
+
+test('editing only the note of the latest follow-up leaves the status; changing its badge moves it', async () => {
+  const created = await lead('Negative', { followUps: [{ note: 'Old', badge: 'Proposal Sent' }] });
+  const [latest] = created.followUps;
+  const path = `/admin/leads/${created._id}`;
+  assert.equal((await send(path, { action: 'editFollowUp', followUpId: String(latest._id), badge: 'Proposal Sent', note: 'Edited' })).status, 200);
+  assert.equal((await read(created._id)).status, 'Negative');
+  assert.equal((await send(path, { action: 'editFollowUp', followUpId: String(latest._id), badge: 'Positive', note: 'Edited' })).status, 200);
+  assert.equal((await read(created._id)).status, 'Positive');
 });
 
 test('a lead with an email gets a reviewed email; its WhatsApp copy goes only after Send', async () => {
