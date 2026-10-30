@@ -4,9 +4,9 @@ import QRCode from 'qrcode';
 import { STATE_ID } from './models.js';
 import { clearAuthState, useMongoAuthState } from './mongoAuthState.js';
 
-// The live WhatsApp Web link. It only sends: incoming messages are ignored and never marked read.
+// The live WhatsApp Web link. Incoming messages go only to onMessages (Auto Reply, inbound.js) and are never marked read.
 // makeSocket / fetchVersion are Baileys' own; tests pass fakes to play WhatsApp's side.
-export function createConnection({ Auth, State, logger, makeSocket = makeWASocket, fetchVersion = fetchLatestBaileysVersion, wait = sleep }) {
+export function createConnection({ Auth, State, logger, onMessages, makeSocket = makeWASocket, fetchVersion = fetchLatestBaileysVersion, wait = sleep }) {
   let sock = null;
   let connected = false;
   let running = false;
@@ -48,6 +48,10 @@ export function createConnection({ Auth, State, logger, makeSocket = makeWASocke
       saving = saving.then(saveCreds).catch(error => logger.error({ err: error }, 'could not save the WhatsApp login'));
     });
     socket.ev.on('message-capping.update', cap => setState({ messageCap: cap }));
+    socket.ev.on('messages.upsert', async upsert => {
+      if (sock !== socket || !onMessages) return;
+      await onMessages(upsert, socket).catch(error => logger.error({ err: error }, 'could not handle incoming messages'));
+    });
     socket.ev.on('connection.update', async update => {
       if (sock !== socket) return; // an older socket closing after a reconnect
       if (update.qr) {

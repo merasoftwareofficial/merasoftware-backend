@@ -26,7 +26,9 @@ async function recordHistory(draft, decidedBy, required = false) {
     await EmailHistory.updateOne({ draftId: draft._id }, { $set: {
       application: byKey.get(draft.event).application, event: draft.event, actor: draft.actor,
       ...(draft.dedupeKey ? { dedupeKey: draft.dedupeKey } : {}),
-      ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject, status: draft.status,
+      ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject,
+      status: draft.delivery?.channels?.length ? (draft.delivery.channels.includes('email') ? (draft.delivery.emailStatus === 'sent' ? 'sent' : draft.status) : (draft.status === 'failed' ? 'skipped' : draft.status)) : draft.status,
+      delivery: draft.delivery?.channels?.length ? { channels: draft.delivery.channels, emailStatus: draft.delivery.emailStatus, whatsappStatus: draft.delivery.whatsappStatus, failure: draft.delivery.failure } : undefined,
       providerId: draft.providerId, failure: draft.failure, expiresAt: draft.expiresAt, sentAt: draft.sentAt,
       source: draft.source, sender: draft.sender, templateName: draft.templateName,
       attemptCount: draft.attemptCount, lastAttemptAt: draft.lastAttemptAt, attempts: draft.attempts,
@@ -88,7 +90,7 @@ async function prepareMail(event, mail, extraValues) {
   const content = await applyDefault(event, mail, values);
   if (!content) return suppressed();
   const to = (Array.isArray(content.to) ? content.to : [content.to]).filter(Boolean);
-  if (!to.length || to.some(address => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return suppressed();
+  if ((!to.length && !(require('./whatsappQueue').normalizePhone(mail.phone) && process.env.ENABLE_WHATSAPP === 'true')) || to.some(address => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return suppressed();
   validateContent(content.subject, content.text);
   if (mail.dedupeKey) {
     if (scope.system) {
@@ -106,7 +108,8 @@ async function prepareMail(event, mail, extraValues) {
     baseSubject: mail.subject, baseText: mail.text || plainText(mail.html), values, blocks: mail.blocks,
     to, subject: content.subject, text: content.text, plain: content.plain,
     html: content.html || compose(content.text, mail.blocks).html,
-    templateName: content.templateName || REVIEWED_NAME,
+    templateName: content.templateName || REVIEWED_NAME, sourceTemplateId: content.sourceTemplateId,
+    whatsappTo: require('./whatsappQueue').normalizePhone(mail.phone),
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
@@ -158,7 +161,7 @@ function requestMiddleware(req, res, next) {
         if (leadDraft) {
           try {
             const result = await decide(String(leadDraft._id), req.userId, req.body.emailReview);
-            return json({ ...body, emailStatus: result.status });
+            return json({ ...body, emailStatus: result.status, ...(result.delivery ? { messageDelivery: result.delivery } : {}) });
           } catch {
             return json({ ...body, emailStatus: 'failed', emailDraftIds: scope.ids.map(String) });
           }
@@ -190,7 +193,7 @@ async function sendAutomatic(drafts) {
 }
 // This is the ONLY provider call. Content is locked on the first send attempt;
 // retries reuse the same Resend idempotency key and identical payload.
-async function decide(id, actor, decision, access = {}) {
+async function decideEmail(id, actor, decision, access = {}, options = {}) {
   if (!['send', 'skip'].includes(decision.choice)) throw new Error('Choose Send Mail or Don’t Send Mail');
   const query = { _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } };
   if (decision.choice === 'skip') {
@@ -244,7 +247,7 @@ async function decide(id, actor, decision, access = {}) {
     ]);
     if (writes.every(write => write.status === 'rejected')) throw new Error('Provider accepted mail; recording its result needs recovery. Do not resend.');
     // The same message goes out on WhatsApp. Not awaited: it can never delay or change this mail's result.
-    enqueueWhatsAppForEmail(draft).catch(error => console.error('[whatsapp] Could not queue this email for WhatsApp:', error.message));
+    if (!options.skipWhatsApp) enqueueWhatsAppForEmail(draft).catch(error => console.error('[whatsapp] Could not queue this email for WhatsApp:', error.message));
     if (draft.reminderInvoice) {
       try {
         await require('../models/monthlyInvoiceModel').updateOne({ _id: draft.reminderInvoice }, { $inc: { remindersSent: 1 }, $set: { lastReminderDate: new Date() } });
@@ -260,6 +263,17 @@ async function decide(id, actor, decision, access = {}) {
     await recordHistory(draft, actor);
     throw error;
   }
+}
+// A single channel coordinator wraps the existing email provider path. Legacy/automatic callers keep their behavior.
+async function decide(id, actor, decision, access = {}) {
+  if (decision.choice === 'send') {
+    const draft = await EmailDraft.findOne({ _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } }).lean();
+    if (decision.channels !== undefined || draft?.delivery?.channels?.length) {
+      if (!draft) throw new Error('Draft is unavailable');
+      return require('./reviewDelivery').deliver({ draft, actor, decision, access, sendEmail: payload => decideEmail(id, actor, payload, access, { skipWhatsApp: true }), recordHistory, reviewedMail, validateContent });
+    }
+  }
+  return decideEmail(id, actor, decision, access);
 }
 // Only this named event is allowed outside a user request. Explicit offer
 // reminder settings opt it in; all existing background builders stay suppressed.

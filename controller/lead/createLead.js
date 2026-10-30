@@ -115,15 +115,17 @@ const createLeadController = async (req, res) => {
 
     // The lead is saved regardless of the mail choice. Delivery happens only
     // after a successful response and an explicit, reviewed Send Mail decision.
-    if (cleanEmail && req.body.emailReview?.choice === 'send') {
+    if ((cleanEmail || req.body.emailReview?.channels === 'whatsapp') && req.body.emailReview?.choice === 'send') {
       try {
         const { queueMail } = require('../../helpers/emailController');
-        const { reviewTextFromEditor } = require('../../helpers/emailTemplates');
+        const { reviewTextFromEditor, reviewSubjectFromEditor, resolveTemplate } = require('../../helpers/emailTemplates');
         // The popup sends the editor's document; the send decision after the response reads this text.
         const text = reviewTextFromEditor('lead.created', req.body.emailReview, { name: cleanName }, {});
-        req.body.emailReview = { ...req.body.emailReview, text };
+        const subject = reviewSubjectFromEditor('lead.created', req.body.emailReview, { name: cleanName });
+        const original = req.body.emailReview.templateId && req.body.emailReview.templateId !== 'current' ? await resolveTemplate('lead.created', req.body.emailReview.templateId) : null;
+        req.body.emailReview = { ...req.body.emailReview, text, subject };
         await queueMail('lead.created', {
-          to: [cleanEmail], subject: req.body.emailReview.subject, text, reviewed: true,
+          to: cleanEmail ? [cleanEmail] : [], phone: cleanPhone, subject, text, reviewed: true, sourceTemplateId: original?._id,
         }, { name: cleanName });
       } catch (mailError) {
         console.error('Lead saved; email draft unavailable:', mailError.message);

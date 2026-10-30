@@ -3,7 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import mongoose from 'mongoose';
 import pino from 'pino';
 import { loadConfig } from './config.js';
-import { Auth, Lock, Queue, State, STATE_ID } from './models.js';
+import { Auth, Inbox, Lock, Queue, Rule, State, STATE_ID } from './models.js';
+import { createInbound } from './inbound.js';
 import { createLease } from './lease.js';
 import { createSender } from './sender.js';
 import { createConnection } from './whatsapp.js';
@@ -32,7 +33,8 @@ console.log('Connected to DB');
 if (!config.senderEnabled) {
   console.log('Sender disabled (ENABLE_SENDER is not "true") — not connecting to WhatsApp, not sending.');
 } else {
-  const connection = createConnection({ Auth, State, logger });
+  const inbound = createInbound({ Inbox, Rule, State, logger });
+  const connection = createConnection({ Auth, State, logger, onMessages: inbound.handle });
   const sender = createSender({ Queue, State, transport: connection.transport, config });
   const lease = createLease(Lock);
   let stopping = false;

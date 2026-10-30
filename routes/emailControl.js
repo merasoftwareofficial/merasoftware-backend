@@ -10,6 +10,8 @@ const { catalogFor, sampleContext, validateTemplateVariables, systemTemplate, en
 const { verifyWebsiteAccess } = require('../helpers/websiteEmailAccess');
 const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
 const { messageText } = require('../helpers/whatsappQueue');
+const { reviewSubjectFromEditor, templateOptions, editableReview } = require('../helpers/emailTemplates');
+const { availability } = require('../helpers/reviewDelivery');
 const router = express.Router();
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(async (req, res, next) => {
@@ -69,12 +71,6 @@ async function loadDraft(req) {
   if (!draft) throw new Error('Draft unavailable');
   return draft;
 }
-// The choices a review offers, built-in first.
-async function templateOptions(event) {
-  await systemTemplate(event);
-  const templates = await EmailTemplate.find({ event }).sort({ system: -1, name: 1 }).select('name system').lean();
-  return templates.map(row => ({ id: String(row._id), name: row.name, system: !!row.system }));
-}
 router.post('/website-drafts', handle(async (req, res) => {
   const { event, to, subject, text, headers, requiredLinks, reference, dedupeKey, values } = req.body;
   if (!['website.subscription.confirm', 'website.subscription.manage'].includes(event)) throw new Error('Unknown website email action');
@@ -115,10 +111,10 @@ router.get('/summary', handle(async (req, res) => {
   const ownership = draftAccess(req.userId, req.emailAccess);
   const now = new Date();
   const [waiting, latest] = await Promise.all([
-    EmailDraft.find({ ...ownership, status: { $in: UNDECIDED }, expiresAt: { $gt: now } }).select('status').lean(),
+    EmailDraft.find({ ...ownership, status: { $in: UNDECIDED }, expiresAt: { $gt: now } }).select('status delivery.channels').lean(),
     EmailHistory.find(ownership).sort({ updatedAt: -1 }).limit(RECENT).select('application event to subject status sentAt updatedAt expiresAt').lean(),
   ]);
-  const inFlight = waiting.filter(row => row.status !== 'pending').map(row => row._id);
+  const inFlight = waiting.filter(row => row.status !== 'pending' && !row.delivery?.channels?.length).map(row => row._id);
   const delivered = inFlight.length ? (await EmailHistory.distinct('draftId', { ...ownership, draftId: { $in: inFlight }, status: 'sent' })).length : 0;
   // Same status the history list shows: an undecided mail past its draft's expiry is "expired".
   const recent = latest.map(row => ({
@@ -160,7 +156,8 @@ router.put('/templates/:id', handle(async (req, res) => {
   allowedEvent(req, current.event);
   const fields = templateFromEditor(current.event, req.body);
   validateTemplate(current.event, fields);
-  const updated = await EmailTemplate.findByIdAndUpdate(current._id, { $set: { name: fields.name.trim(), subject: fields.subject, text: fields.text } }, { new: true, runValidators: true }).lean();
+  const updated = await EmailTemplate.findOneAndUpdate({ _id: current._id, ...(req.body.expectedUpdatedAt ? { updatedAt: new Date(req.body.expectedUpdatedAt) } : {}) }, { $set: { name: fields.name.trim(), subject: fields.subject, text: fields.text } }, { new: true, runValidators: true }).lean();
+  if (!updated) throw Object.assign(new Error('This template changed elsewhere. Reload it before saving.'), { status: 409 });
   res.json({ success: true, data: templateWithDocs(updated) });
 }));
 router.post('/templates/:id/reset', handle(async (req, res) => {
@@ -182,7 +179,10 @@ router.post('/templates/preview', handle(async (req, res) => {
 router.get('/drafts/:id', handle(async (req, res) => {
   const draft = await loadDraft(req);
   const review = { ...draft, ...reviewWithDoc(draft.event, draft.text, draft.values, draft.blocks) };
-  res.json({ success: true, data: req.emailIsAdmin ? { ...review, templateOptions: await templateOptions(draft.event) } : review });
+  const channels = await availability(draft);
+  const channelEditable = (draft.status === 'pending' && !draft.attemptCount) || draft.delivery?.channels?.length;
+  res.json({ success: true, data: { ...review, ...(channelEditable ? { channelOptions: channels.choices, defaultChannel: channels.defaultChannel } : {}),
+    ...(req.emailIsAdmin ? { templateOptions: await templateOptions(draft.event), ...await editableReview(draft) } : {}) } });
 }));
 // Two previews: { templateId } fills that template for this mail; { subject, doc } (or text
 // from older clients) shows how the reviewer's edited mail will be sent.
@@ -191,20 +191,22 @@ router.post('/drafts/:id/preview', handle(async (req, res) => {
   if (draft.status !== 'pending') throw new Error('The first send attempt locks the reviewed content');
   if (req.body.doc || typeof req.body.text === 'string') {
     const text = reviewTextFromEditor(draft.event, req.body, draft.values, draft.blocks);
-    validateContent(req.body.subject, text);
-    return res.json({ success: true, data: { html: reviewedMail(draft, withRequiredLinks(text, draft.requiredLinks)).html } });
+    const subject = reviewSubjectFromEditor(draft.event, req.body, draft.values);
+    validateContent(subject, text);
+    return res.json({ success: true, data: { subject, html: reviewedMail(draft, withRequiredLinks(text, draft.requiredLinks)).html } });
   }
   templateChoiceAllowed(req);
   const template = await resolveTemplate(draft.event, req.body.templateId);
   const mail = composeTemplate(template, draft.values || {}, draft.blocks, draft.requiredLinks);
   const { doc } = reviewWithDoc(draft.event, mail.text, draft.values, draft.blocks);
-  res.json({ success: true, data: { subject: mail.subject, text: mail.text, doc, html: reviewedMail(draft, mail.text).html } });
+  res.json({ success: true, data: { subject: mail.subject, text: mail.text, doc, html: reviewedMail(draft, mail.text).html, ...await editableReview(draft, template) } });
 }));
 router.post('/drafts/:id/decision', handle(async (req, res) => {
   if (req.body.templateId !== undefined && req.body.templateId !== 'current') templateChoiceAllowed(req);
   if (req.body.doc && req.body.choice === 'send') {
     const draft = await loadDraft(req);
     req.body.text = reviewTextFromEditor(draft.event, req.body, draft.values, draft.blocks);
+    req.body.subject = reviewSubjectFromEditor(draft.event, req.body, draft.values);
   }
   res.json({ success: true, data: await decide(req.params.id, req.userId, req.body, req.emailAccess) });
 }));
@@ -212,6 +214,21 @@ router.post('/lead-preview', handle(async (req, res) => {
   adminOnly(req); allowedEvent(req, 'lead.created');
   const name = String(req.body.name || 'Customer').slice(0, 200);
   const mail = await applyDefault('lead.created', {}, { name });
-  res.json({ success: true, data: mail && { to: [String(req.body.email || '')], subject: mail.subject, text: mail.text, event: 'lead.created', ...reviewWithDoc('lead.created', mail.text, { name }, {}) } });
+  if (!mail) return res.json({ success: true, data: null });
+  const draft = { to: req.body.email ? [String(req.body.email)] : [], whatsappTo: require('../helpers/whatsappQueue').normalizePhone(req.body.phone), subject: mail.subject, text: mail.text,
+    event: 'lead.created', sourceTemplateId: mail.sourceTemplateId, values: { name }, blocks: {} };
+  const channels = await availability(draft);
+  res.json({ success: true, data: { ...draft, ...reviewWithDoc(draft.event, mail.text, draft.values, {}),
+    ...await editableReview(draft), templateOptions: await templateOptions(draft.event), channelOptions: channels.choices, defaultChannel: channels.defaultChannel } });
+}));
+// Unsaved Add Lead and the existing phone-only proposal popup share original-template selection.
+// This endpoint only previews; final sending re-derives values/contacts from the saved business record.
+router.post('/review-preview', handle(async (req, res) => {
+  adminOnly(req); allowedEvent(req, req.body.event);
+  if (!['lead.created', 'lead.proposal'].includes(req.body.event)) throw new Error('Use the saved draft preview for this action.');
+  const template = await resolveTemplate(req.body.event, req.body.templateId);
+  const draft = { event: req.body.event, values: req.body.values || {}, blocks: {} };
+  const mail = composeTemplate(req.body.doc ? { ...template, ...templateFromEditor(draft.event, { ...req.body, name: template.name }) } : template, draft.values, {});
+  res.json({ success: true, data: { ...mail, ...await editableReview(draft, template) } });
 }));
 module.exports = router;

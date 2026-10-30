@@ -52,19 +52,29 @@ async function enqueueWhatsApp({ to, text, skipReason, ...fields }) {
  * Queues one WhatsApp per recipient of a sent email. A recipient without a usable phone gets a
  * 'skipped' row with the reason, so the admin page shows why nothing went. Off unless ENABLE_WHATSAPP.
  */
-async function enqueueWhatsAppForEmail(draft) {
-  if (process.env.ENABLE_WHATSAPP !== 'true') return;
+async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {}) {
+  if (process.env.ENABLE_WHATSAPP !== 'true') {
+    if (strict) throw new Error('WhatsApp is turned off.');
+    return;
+  }
   const text = messageText(draft);
-  for (const email of draft.to || []) {
+  const targets = recipients || (draft.to || []).map(email => ({ email }));
+  const failures = [];
+  for (const target of targets) {
+    const { email } = target;
     try {
-      const saved = await savedPhoneFor(email);
+      const saved = recipients ? target.phone : await savedPhoneFor(email);
       await enqueueWhatsApp({ to: normalizePhone(saved), skipReason: saved ? BAD_PHONE : NO_PHONE,
         emailDraftId: draft._id, email, event: draft.event, application: draft.application, text });
     } catch (error) {
       // 11000: this recipient is already queued. Any other error loses only this recipient's copy.
-      if (error.code !== 11000) console.error(`[whatsapp] Could not queue the WhatsApp copy of ${draft.event}:`, error.message);
+      if (error.code !== 11000) {
+        failures.push(error);
+        console.error(`[whatsapp] Could not queue the WhatsApp copy of ${draft.event}:`, error.message);
+      }
     }
   }
+  if (strict && failures.length) throw failures[0];
 }
 
 module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText };

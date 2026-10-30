@@ -6,7 +6,7 @@ const mongoose = require('mongoose');
 const { EmailTemplate } = require('../models/emailControlModel');
 const { byKey } = require('./emailCatalog');
 const { definitions } = require('./emailDefinitions');
-const { render, compose, placeholders, withRequiredLinks, asObject, has } = require('./emailMarkup');
+const { render, compose, placeholders, withRequiredLinks, asObject } = require('./emailMarkup');
 const { markupToDoc, subjectToDoc, docToMarkup, docToSubject } = require('./emailDoc');
 
 const SYSTEM_NAME = 'Standard';
@@ -86,7 +86,7 @@ async function resetSystemTemplate(id) {
 function composeTemplate(template, values, blocks, requiredLinks = []) {
   const text = withRequiredLinks(render(template.text, values, blocks), requiredLinks);
   const mail = compose(text, blocks);
-  return { templateName: template.name, subject: render(template.subject, values, {}, { plain: true }), text, html: mail.html, plain: mail.text };
+  return { sourceTemplateId: template._id, templateName: template.name, subject: render(template.subject, values, {}, { plain: true }), text, html: mail.html, plain: mail.text };
 }
 
 // --- Visual editor (emailDoc.js) -------------------------------------------------------
@@ -109,14 +109,14 @@ function templateFromEditor(event, body) {
   };
 }
 /**
- * The chips a review offers: details this mail has values for, and its sections. A reviewed
+ * The chips a review offers: its action's allowed details and sections, including empty optional values. A reviewed
  * text is filled with the same values (emailController.reviewedMail).
  */
 function reviewFields(event, values, blocks) {
   const { variables, blocks: sections } = variablesFor(event);
   return {
-    variables: Object.entries(asObject(values)).filter(([key]) => has(variables, key)).map(([key, value]) => ({ key, label: variables[key].label, ...(variables[key].hint ? { hint: variables[key].hint } : {}), value: String(value ?? '') })),
-    blocks: Object.keys(asObject(blocks)).filter(key => has(sections, key)).map(key => ({ key, label: sections[key].label, ...(sections[key].hint ? { hint: sections[key].hint } : {}) })),
+    variables: Object.entries(variables).map(([key, definition]) => ({ key, label: definition.label, ...(definition.hint ? { hint: definition.hint } : {}), value: String(asObject(values)[key] ?? '') })),
+    blocks: Object.entries(sections).map(([key, definition]) => ({ key, label: definition.label, ...(definition.hint ? { hint: definition.hint } : {}) })),
   };
 }
 const fieldKeys = fields => ({ variables: fields.variables.map(row => row.key), blocks: fields.blocks.map(row => row.key) });
@@ -129,6 +129,23 @@ function reviewWithDoc(event, text, values, blocks) {
 function reviewTextFromEditor(event, body, values, blocks) {
   return body.doc ? docToMarkup(body.doc, fieldKeys(reviewFields(event, values, blocks))) : body.text;
 }
+function reviewSubjectFromEditor(event, body, values) {
+  return body.subjectDoc ? render(docToSubject(body.subjectDoc, keysOf(event)), values, {}, { plain: true }) : body.subject;
+}
+async function templateOptions(event) {
+  await systemTemplate(event);
+  const rows = await EmailTemplate.find({ event }).sort({ system: -1, name: 1 }).select('name system').lean();
+  return rows.map(row => ({ id: String(row._id), name: row.name, system: !!row.system }));
+}
+async function editableReview(draft, template) {
+  const original = template || (draft.sourceTemplateId && await EmailTemplate.findOne({ _id: draft.sourceTemplateId, event: draft.event }).lean());
+  if (!original || draft.delivery?.lockedAt || (draft.status && draft.status !== 'pending')) return {};
+  const source = templateWithDocs(original);
+  const preview = composeTemplate(original, draft.values, draft.blocks, draft.requiredLinks);
+  return { templateDoc: source.doc, templateSubjectDoc: source.subjectDoc, selectedTemplateId: String(original._id), templateRevision: original.updatedAt,
+    templateLabel: original.name, templatePreviewHtml: preview.html, templatePreviewSubject: preview.subject,
+    editorFields: reviewFields(draft.event, draft.values, draft.blocks) };
+}
 
 /** The action's mail data ({ to, values, blocks, attachments }), or null without a recipient. */
 function buildTemplatedMail(event, ...args) {
@@ -139,5 +156,5 @@ function buildTemplatedMail(event, ...args) {
 module.exports = {
   REVIEWED_NAME, hasSystemTemplate, catalogFor, sampleContext, validateTemplateVariables,
   systemTemplate, ensureSystemTemplates, resolveTemplate, resetSystemTemplate, composeTemplate, buildTemplatedMail,
-  templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor,
+  templateWithDocs, templateFromEditor, reviewWithDoc, reviewTextFromEditor, reviewSubjectFromEditor, templateOptions, editableReview,
 };

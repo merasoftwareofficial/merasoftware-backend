@@ -49,6 +49,11 @@ if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
   cron.schedule('* * * * *', () => require('./helpers/broadcastJobs').dispatch().catch(error => console.error('[broadcast]', error.message)));
 }
 
+// Auto Reply: on with WhatsApp itself, no switch of its own; the admin's switches are in the database.
+if (process.env.ENABLE_WHATSAPP === 'true') {
+  cron.schedule('* * * * *', () => require('./helpers/autoReplyJobs').processInbox().catch(error => console.error('[auto reply]', error.message)));
+}
+
 const allowedOrigins = getAllowedOrigins();
 
 initChessSocket(server, allowedOrigins);
@@ -88,6 +93,7 @@ app.use("/api", require("./helpers/emailController").requestMiddleware)
 app.use("/api/email-control", require("./routes/emailControl"))
 app.use("/api/whatsapp-control", require("./routes/whatsappControl"))
 app.use("/api/broadcast", require("./routes/broadcast"))
+app.use("/api/auto-reply", require("./routes/autoReply"))
 app.use("/api", router)
 
 app.use('/uploads', express.static('uploads'));

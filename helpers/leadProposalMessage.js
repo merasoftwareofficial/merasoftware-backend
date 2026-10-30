@@ -1,5 +1,5 @@
 const { applyDefault, validateContent } = require("./emailController");
-const { reviewWithDoc, reviewTextFromEditor } = require("./emailTemplates");
+const { reviewWithDoc, reviewTextFromEditor, reviewSubjectFromEditor, editableReview, templateOptions } = require("./emailTemplates");
 const { render, compose, withRequiredLinks } = require("./emailMarkup");
 const { isAccountEmail } = require("./emailValidator");
 const { enqueueWhatsApp, normalizePhone, messageText } = require("./whatsappQueue");
@@ -24,7 +24,10 @@ async function whatsappPreview(lead, proposal) {
   const values = proposalValues(lead, proposal);
   const mail = await applyDefault(EVENT, { requiredLinks: [proposal.downloadLink] }, values);
   if (!mail) return null;
-  return { channel: "whatsapp", to: [to], subject: mail.subject, text: mail.text, event: EVENT, ...reviewWithDoc(EVENT, mail.text, values, {}) };
+  const draft = { to: [], whatsappTo: to, subject: mail.subject, text: mail.text, event: EVENT, values, sourceTemplateId: mail.sourceTemplateId };
+  const channels = await require('./reviewDelivery').availability(draft);
+  return { ...draft, channel: "whatsapp", to: [to], ...reviewWithDoc(EVENT, mail.text, values, {}), ...await editableReview(draft),
+    templateOptions: await templateOptions(EVENT), channelOptions: channels.choices, defaultChannel: 'whatsapp' };
 }
 
 /** The reviewed message, added to the WhatsApp queue. `body` is the popup's decision. */
@@ -32,11 +35,15 @@ async function queueProposalWhatsApp(lead, proposal, body) {
   const to = normalizePhone(lead.phone);
   if (!to) throw Object.assign(new Error("This lead has no valid WhatsApp number"), { status: 400 });
   if (process.env.ENABLE_WHATSAPP !== "true") throw Object.assign(new Error("WhatsApp is turned off"), { status: 409 });
+  if (body.channels && body.channels !== 'whatsapp') throw Object.assign(new Error('This lead can only receive WhatsApp.'), { status: 400 });
   const values = proposalValues(lead, proposal);
   const text = withRequiredLinks(reviewTextFromEditor(EVENT, body, values, {}), [proposal.downloadLink]);
-  validateContent(body.subject, text);
+  const subject = reviewSubjectFromEditor(EVENT, body, values);
+  validateContent(subject, text);
   const plain = compose(render(text, values, {}), {}).text;
-  return enqueueWhatsApp({ to, text: messageText({ subject: body.subject, plain }), event: EVENT, application: "portal" });
+  const id = new (require('mongoose').Types.ObjectId)(require('node:crypto').createHash('sha256').update(`lead-proposal:${lead._id}:${proposal.version}`).digest('hex').slice(0, 24));
+  try { return await enqueueWhatsApp({ _id: id, to, text: messageText({ subject, plain }), event: EVENT, application: "portal" }); }
+  catch (error) { if (error.code !== 11000) throw error; return require('../whatsapp/src/models.js').Queue.findById(id); }
 }
 
 module.exports = { EVENT, hasEmail, whatsappPreview, queueProposalWhatsApp };

@@ -50,6 +50,12 @@ const stateSchema = new mongoose.Schema({
   sendingUntil: Date,
   messageCap: mongoose.Schema.Types.Mixed, // WhatsApp's new-chat quota, as WhatsApp reports it
   settings: mongoose.Schema.Types.Mixed, // the admin's sending rules; checked by settings.js before saving
+  // Auto Reply's switches. Never inside `settings`: saving the sending rules replaces that whole field.
+  autoReply: {
+    recognise: { type: Boolean, default: false },
+    sendReplies: { type: Boolean, default: false },
+    addLeads: { type: Boolean, default: false },
+  },
   lastError: String,
   heartbeatAt: Date,
 }, { timestamps: true, collection: 'whatsapp_state', versionKey: false });
@@ -60,6 +66,32 @@ const authSchema = new mongoose.Schema({ _id: String, value: { type: String, req
 const lockSchema = new mongoose.Schema({ _id: String, owner: String, expiresAt: Date },
   { collection: 'whatsapp_locks', versionKey: false });
 
+// Auto Reply: the message to recognise. Stored as rows so more could be added later; the screen offers one.
+const ruleSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  message: { type: String, required: true, trim: true, maxlength: 1_000 },
+}, { timestamps: true, collection: 'whatsapp_auto_reply_rules' });
+
+// Auto Reply: one row per recognised message. A message that matches nothing is never saved.
+// new → closed by the backend job (helpers/autoReplyJobs.js); needs-attention = its real number wasn't found.
+export const INBOX_STATUSES = ['new', 'needs-attention', 'closed'];
+const inboxSchema = new mongoose.Schema({
+  messageId: { type: String, required: true, unique: true }, // WhatsApp's id: a repeat delivery can't count twice
+  ruleId: mongoose.Schema.Types.ObjectId,
+  chat: String,
+  phone: { type: String, default: null, match: /^[1-9]\d{9,14}$/ }, // digits with country code; null = not found
+  text: String,
+  profileName: String, // WhatsApp's display name: a hint only, never the person's real name
+  deliveredAs: { type: String, enum: ['notify', 'append'] }, // append = came while the worker was offline
+  sentAt: Date,
+  adMarker: { externalAdReply: Boolean, ctwaClid: Boolean, conversionSource: String },
+  status: { type: String, enum: INBOX_STATUSES, default: 'new' },
+  outcome: String,
+}, { timestamps: true, collection: 'whatsapp_inbox' });
+inboxSchema.index({ status: 1, createdAt: 1 });
+
+export const Rule = mongoose.models.WhatsappAutoReplyRule || mongoose.model('WhatsappAutoReplyRule', ruleSchema);
+export const Inbox = mongoose.models.WhatsappInbox || mongoose.model('WhatsappInbox', inboxSchema);
 export const Queue = mongoose.models.WhatsappQueue || mongoose.model('WhatsappQueue', queueSchema);
 export const State = mongoose.models.WhatsappState || mongoose.model('WhatsappState', stateSchema);
 export const Auth = mongoose.models.WhatsappAuth || mongoose.model('WhatsappAuth', authSchema);

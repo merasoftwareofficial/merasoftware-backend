@@ -70,6 +70,27 @@ it('after the QR scan and WhatsApp\'s restart, reconnects with the new login ins
   assert.equal(wa.sockets[1].config.auth.creds.me?.id, '919876543210:7@s.whatsapp.net', 'second connection must carry the login from the scan');
 });
 
+it('hands incoming messages to Auto Reply only from the live connection, and a failure there does not break the link', async () => {
+  const wa = fakeWhatsApp();
+  const seen = [];
+  let fail = false;
+  const onMessages = async (upsert, socket) => { if (fail) throw new Error('database down'); seen.push([upsert.type, socket]); };
+  const connection = createConnection({ Auth, State, logger: silent, onMessages, makeSocket: wa.makeSocket, fetchVersion: wa.fetchVersion });
+  open.push(connection);
+  connection.start();
+  assert.ok(await until(() => wa.sockets.length === 1));
+  await wa.sockets[0].emit('messages.upsert', { messages: [], type: 'notify' });
+  assert.deepEqual(seen, [['notify', wa.sockets[0]]]);
+  fail = true;
+  await wa.sockets[0].emit('messages.upsert', { messages: [], type: 'notify' });
+  fail = false;
+  await scanQr(wa.sockets[0]);
+  assert.ok(await until(() => wa.sockets.length === 2));
+  await wa.sockets[0].emit('messages.upsert', { messages: [], type: 'append' });
+  assert.equal(seen.length, 1, 'an old socket is ignored');
+  assert.deepEqual(wa.sockets[1].calls, [], 'nothing was said to WhatsApp');
+});
+
 it('the login is in the database by the time it reconnects, so a later restart of the server stays logged in', async () => {
   const wa = fakeWhatsApp();
   const connection = createConnection({ Auth: slowAuth(), State, logger: silent, makeSocket: wa.makeSocket, fetchVersion: wa.fetchVersion });

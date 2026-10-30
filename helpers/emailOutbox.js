@@ -5,7 +5,7 @@ const { indiaDayKey, indiaDayStart } = require('./dateTime');
 // The draft remains temporary; normal sends persist the permanent row immediately.
 async function reconcileSent(ownership) {
   // An accepted audit row can also repair a failed temporary-draft update.
-  const inFlight = await EmailDraft.find({ ...ownership, status: { $in: ['sending', 'failed'] } }).select('_id').lean();
+  const inFlight = await EmailDraft.find({ ...ownership, 'delivery.channels': { $exists: false }, status: { $in: ['sending', 'failed'] } }).select('_id').lean();
   if (inFlight.length) {
     const accepted = await EmailHistory.find({ ...ownership, draftId: { $in: inFlight.map(d => d._id) }, status: 'sent' }).select('draftId providerId sentAt attempts').lean();
     if (accepted.length) await EmailDraft.bulkWrite(accepted.map(row => ({ updateOne: {
@@ -13,7 +13,7 @@ async function reconcileSent(ownership) {
       update: { $set: { status: 'sent', providerId: row.providerId, sentAt: row.sentAt, attempts: row.attempts, failure: '' } },
     } })));
   }
-  const drafts = await EmailDraft.find({ ...ownership, status: 'sent' }).select('event actor application to subject providerId sentAt expiresAt attemptCount lastAttemptAt attempts source sender templateName').lean();
+  const drafts = await EmailDraft.find({ ...ownership, 'delivery.channels': { $exists: false }, status: 'sent' }).select('event actor application to subject providerId sentAt expiresAt attemptCount lastAttemptAt attempts source sender templateName').lean();
   if (!drafts.length) return;
   const complete = await EmailHistory.find({ draftId: { $in: drafts.map(d => d._id) }, status: 'sent' }).select('draftId').lean();
   const recorded = new Set(complete.map(row => String(row.draftId)));
