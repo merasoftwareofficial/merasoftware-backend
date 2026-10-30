@@ -62,6 +62,8 @@ async function userSignInController (req,res) {
                 // Fallback: ensure customer role
                 user.roles = ['customer'];
                 await user.save();
+                // Login goes on whatever happens here; the backfill script can add a missing lead later.
+                await require('../../helpers/wonLead').ensureWonLead(user).catch((error) => console.error("Could not add the client's Won lead:", error.message));
             }
 
             const tokenData = {

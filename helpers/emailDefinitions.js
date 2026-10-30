@@ -65,6 +65,23 @@ const definitions = {
       return email ? { to: [email], values: { name: text(name) } } : null;
     },
   },
+  // A proposal added to a lead (controller/lead/uploadProposal.js). A phone-only lead gets this same
+  // text on WhatsApp (helpers/leadProposalMessage.js).
+  'lead.proposal': {
+    subject: 'Your proposal from Mera Software',
+    text: lines('Hello {{name}},', '', 'We have prepared a proposal for you.', '', '**Amount:** {{amount}}', '', '**View your proposal:** {{link}}', '', 'Please reply here if you have any questions.', '', ...SIGN_OFF),
+    variables: {
+      name: detail('Lead name', 'Ravi Kumar'),
+      amount: detail('Proposal amount', '₹25,000', 'The line is left out when no amount was given'),
+      link: detail('Proposal link', 'https://drive.google.com/uc?id=sample'),
+    },
+    blocks: {},
+    build(lead, proposal) {
+      if (!lead.email) return null;
+      const amount = proposal.amount === null || proposal.amount === undefined ? '' : `₹${Number(proposal.amount).toLocaleString('en-IN')}`;
+      return { to: [lead.email], requiredLinks: [proposal.downloadLink], values: { name: text(lead.name), amount, link: proposal.downloadLink } };
+    },
+  },
   // A website plan request (controller/lead/planRequest.js): request = { lead, planName, contact, choice, price }.
   'plan.request.admin': {
     subject: 'New plan request - {{plan}}',

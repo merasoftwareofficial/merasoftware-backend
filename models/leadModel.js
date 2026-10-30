@@ -91,6 +91,21 @@ const proposalSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "user",
   },
+  // Optional; null = no amount given.
+  amount: {
+    type: Number,
+    default: null,
+    min: 0,
+  },
+  note: {
+    type: String,
+    default: "",
+  },
+  // Set once a phone-only lead's WhatsApp for this version is queued, so it can't go twice.
+  messageQueuedAt: {
+    type: Date,
+    default: null,
+  },
 }, { _id: false });
 
 const leadSchema = new mongoose.Schema({

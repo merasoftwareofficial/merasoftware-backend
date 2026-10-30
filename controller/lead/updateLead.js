@@ -48,8 +48,9 @@ const updateLeadController = async (req, res) => {
     // remark, and an optional file. Adding the follow-up also moves the lead's
     // own status to the chosen badge (the two are merged into one action).
     if (action === "followUp") {
-      const badge = (req.body.badge || "").trim();
-      if (!ALLOWED_STATUSES.includes(badge)) {
+      // No badge sent = keep the current status. A status set automatically can stay, not be chosen.
+      const badge = (req.body.badge || "").trim() || lead.status;
+      if (badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
           error: true,
@@ -128,8 +129,9 @@ const updateLeadController = async (req, res) => {
         });
       }
 
+      // An old badge that can no longer be chosen (Proposal Sent, Won) may stay when only the note changes.
       const badge = (req.body.badge || "").trim();
-      if (!ALLOWED_STATUSES.includes(badge)) {
+      if (badge !== followUp.badge && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
           error: true,

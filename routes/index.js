@@ -14,6 +14,7 @@ router.patch('/admin/projects/:orderId/portfolio-source', require('../middleware
 router.get('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 router.post('/portfolio-integration/sync', require('../controller/order/portfolioSync'));
 const upload = require('../middleware/uploadFiles');
+const leadFileUpload = require('../middleware/leadFileUpload');
 const stagedUpload = require('../controller/user/stagedUploadController');
 router.get('/upload-sessions', require('../middleware/authToken'), stagedUpload.capabilities);
 router.post('/upload-sessions', require('../middleware/authToken'), stagedUpload.begin);
@@ -242,10 +243,11 @@ router.get("/admin/settings", authToken, getAdminSettingsController);
 router.post("/admin/settings", authToken, updateAdminSettingsController);
 router.get("/my-referred-leads", authToken, myReferredLeadsController);
 router.get("/admin/leads/:leadId", authToken, getLeadDetailController);
-router.post("/admin/leads/:leadId", authToken, upload.any(), updateLeadController);
+router.post("/admin/leads/:leadId", authToken, leadFileUpload, updateLeadController);
 router.delete("/admin/leads/:leadId", authToken, deleteLeadController);
 router.post("/admin/leads/:leadId/convert", authToken, convertLeadController);
-router.post("/admin/leads/:leadId/proposal", authToken, upload.any(), uploadProposalController);
+router.post("/admin/leads/:leadId/proposal", authToken, leadFileUpload, uploadProposalController);
+router.post("/admin/leads/:leadId/proposal/:version/whatsapp", authToken, require('../controller/lead/sendProposalWhatsapp'));
 // Trash (soft-delete) system — admin only. Lead trash reuses the DELETE /admin/leads/:leadId
 // route above (now soft-deletes). Distinct /admin/trash* paths, no shadowing.
 router.post("/admin/clients/:customerId/trash", authToken, trashClientController);

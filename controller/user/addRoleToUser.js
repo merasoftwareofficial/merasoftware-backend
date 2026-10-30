@@ -1,5 +1,6 @@
 const userModel = require("../../models/userModel");
 const uploadProductPermission = require("../../helpers/permission");
+const { ensureWonLead } = require("../../helpers/wonLead");
 
 async function addRoleToUserController(req, res) {
   try {
@@ -36,6 +37,8 @@ async function addRoleToUserController(req, res) {
     // Single role system - replace existing role instead of adding
     user.roles = [roleLower];
     await user.save();
+    // The role is granted whatever happens here; the backfill script can add a missing lead later.
+    await ensureWonLead(user, req.userId).catch((error) => console.error("Could not add the client's Won lead:", error.message));
 
     res.status(200).json({
       success: true,

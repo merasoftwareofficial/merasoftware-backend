@@ -1,7 +1,9 @@
 const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
-const { statusAfterFirstProposal } = require("../../helpers/leadStatuses");
+const { statusAfterProposal } = require("../../helpers/leadStatuses");
+const { prepareTemplatedMail } = require("../../helpers/emailService");
+const { EVENT: PROPOSAL_MESSAGE, hasEmail, whatsappPreview } = require("../../helpers/leadProposalMessage");
 
 // Path to the Google Drive credentials file (same resolution as submitUpdateRequest.js)
 let KEY_FILE_PATH;
@@ -11,6 +13,14 @@ if (process.env.NODE_ENV === "production" && process.env.GOOGLE_DRIVE_CREDENTIAL
   KEY_FILE_PATH = path.join(__dirname, "../../config/google-drive-credentials.json");
 }
 const FOLDER_NAME = "LeadProposals";
+
+/** "25000" → 25000; empty → null; anything else → undefined. */
+const parseAmount = (raw) => {
+  const value = String(raw ?? "").trim();
+  if (!value) return null;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? amount : undefined;
+};
 
 const uploadProposalController = async (req, res) => {
   try {
@@ -50,6 +60,16 @@ const uploadProposalController = async (req, res) => {
       });
     }
 
+    const amount = parseAmount(req.body.amount);
+    if (amount === undefined) {
+      return res.status(400).json({
+        message: "Please enter a valid amount",
+        error: true,
+        success: false,
+      });
+    }
+    const note = String(req.body.note || "").trim();
+
     // Upload to Google Drive (reuse the existing shared service).
     const driveService = new GoogleDriveService(KEY_FILE_PATH, FOLDER_NAME);
     const folderId = await driveService.createFolder();
@@ -69,7 +89,7 @@ const uploadProposalController = async (req, res) => {
     // New version = current highest version + 1 (timeline of revisions).
     const nextVersion = (lead.proposals || []).reduce((max, item) => Math.max(max, item.version || 0), 0) + 1;
 
-    lead.proposals.push({
+    const proposal = {
       version: nextVersion,
       name: safeFilename,
       driveFileId: uploadedFile.id,
@@ -78,18 +98,41 @@ const uploadProposalController = async (req, res) => {
       size: file.size,
       uploadedAt: new Date(),
       uploadedBy: req.userId,
-    });
+      amount,
+      note,
+    };
+    lead.proposals.push(proposal);
 
-    // First proposal auto-advances the pipeline to "Proposal Sent".
-    if (nextVersion === 1) {
-      lead.status = statusAfterFirstProposal(lead.status);
-    }
+    // Adding a proposal is what sets "Proposal Sent", and the timeline records it.
+    lead.status = statusAfterProposal(lead.status);
+    const amountText = amount === null ? "" : `, ₹${amount.toLocaleString("en-IN")}`;
+    lead.followUps.push({
+      note: `Proposal v${nextVersion} added${amountText}${note ? `. ${note}` : ""}`,
+      badge: lead.status,
+      date: new Date(),
+      createdBy: req.userId,
+      createdAt: new Date(),
+    });
 
     await lead.save();
 
+    // The proposal is saved whatever happens to its message. Nothing is sent before the admin's review.
+    let whatsapp = null;
+    let messageUnavailable = false;
+    try {
+      if (hasEmail(lead)) {
+        await prepareTemplatedMail(PROPOSAL_MESSAGE, lead, proposal);
+      } else {
+        whatsapp = await whatsappPreview(lead, proposal);
+      }
+    } catch (messageError) {
+      console.error("Proposal saved; its message is unavailable:", messageError.message);
+      messageUnavailable = true;
+    }
+
     return res.json({
-      message: "Proposal uploaded successfully",
-      data: { version: nextVersion },
+      message: "Proposal added",
+      data: { version: nextVersion, status: lead.status, whatsappPreview: whatsapp, messageUnavailable },
       success: true,
       error: false,
     });

@@ -6,7 +6,7 @@ const path = require('node:path');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const leadModel = require('../models/leadModel');
-const { LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, statusAfterFirstProposal } = require('../helpers/leadStatuses');
+const { LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, statusAfterProposal } = require('../helpers/leadStatuses');
 const { mergeNewLeadStatus } = require('../scripts/mergeNewLeadStatus');
 
 let db;
@@ -28,9 +28,9 @@ after(async () => {
   fs.rmSync(backupFile, { force: true });
 });
 
-test('the status list: New is gone, Positive is there, Won cannot be chosen', () => {
+test('the status list: New is gone, and Proposal Sent and Won cannot be chosen', () => {
   assert.deepEqual(LEAD_STATUSES, ['Contacted', 'Proposal Sent', 'Positive', 'Negative', 'Won']);
-  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Proposal Sent', 'Positive', 'Negative']);
+  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Negative']);
 });
 
 test('a new lead starts as Contacted and the model refuses New', async () => {
@@ -45,11 +45,12 @@ test('a new lead starts as Contacted and the model refuses New', async () => {
   assert.equal((await leadModel.findById(lead._id).lean()).followUps[0].badge, 'Positive');
 });
 
-test('the first proposal moves a lead forward, never back from Positive or Won', () => {
-  assert.equal(statusAfterFirstProposal('Contacted'), 'Proposal Sent');
-  assert.equal(statusAfterFirstProposal('Negative'), 'Proposal Sent');
-  assert.equal(statusAfterFirstProposal('Positive'), 'Positive');
-  assert.equal(statusAfterFirstProposal('Won'), 'Won');
+test('a proposal moves a lead forward, never back from Positive or Won', () => {
+  assert.equal(statusAfterProposal('Contacted'), 'Proposal Sent');
+  assert.equal(statusAfterProposal('Negative'), 'Proposal Sent');
+  assert.equal(statusAfterProposal('Proposal Sent'), 'Proposal Sent');
+  assert.equal(statusAfterProposal('Positive'), 'Positive');
+  assert.equal(statusAfterProposal('Won'), 'Won');
 });
 
 test('without apply the merge only counts', async () => {

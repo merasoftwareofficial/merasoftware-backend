@@ -5,6 +5,7 @@
 const events = [
   ['lead.created', 'Leads', 'New lead welcome'],
   ['sendClientAccountCreatedEmail', 'Leads', 'Client account created'],
+  ['lead.proposal', 'Leads', 'Proposal sent'],
   ['plan.request.admin', 'Leads', 'Plan request (admin)', 'Plan request'],
   ['plan.request.received', 'Leads', 'Plan request received', 'Plan request'],
   ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)', 'Update request'],
