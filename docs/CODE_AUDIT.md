@@ -1,3 +1,9 @@
+## Template review saves — 31 October 2026
+
+Popup Save template creates a new custom template; explicit management Edit still updates. Shared backend POST /templates validates sourceTemplateId/action/application and reuses canonical editor conversion; templateOptions remains action scoped. Website `src/app/admin/email-control/email-control-panel.tsx` and portal `src/components/EmailReviewDialog.js` add/select the new ID and retain all options. Originals/defaults remain unchanged; chips remain reusable. Includes pre-save Add Lead and phone-only proposal previews through the common portal dialog. Lead-page manual messaging is deferred.
+
+Local checks: backend email 51/51; website email 23/23; portal email browser pass. Details: `E:/Allprojects/merasoftware/src/docs/email-control.md`. No deployment or live sends.
+
 # Current reservation/payment audit — 25 October 2026
 
 ## Flexible Plans cleanup review — 28 October 2026

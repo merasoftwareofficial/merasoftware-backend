@@ -159,3 +159,31 @@ test('original-template optional fields remain valid when the current draft has 
   assert.equal((await api(`/email-control/drafts/${row._id}/preview`, 'POST', { subject: current.subject, subjectDoc: current.templateSubjectDoc, doc: current.templateDoc })).status, 200);
   assert.equal((await api(`/email-control/drafts/${row._id}/decision`, 'POST', decision(current, 'email'))).data.status, 'sent');
 });
+
+
+test('review copies preserve originals and defaults, retain chips and stay action scoped across later drafts', async () => {
+  const original = await draft();
+  const source = await EmailTemplate.findById(original.selectedTemplateId).lean();
+  await EmailPolicy.create({ event: original.event, mode: 'review', defaultTemplate: source._id });
+  const save = (sourceTemplateId, name) => api('/email-control/templates', 'POST', {
+    event: original.event, sourceTemplateId, name, subjectDoc: original.templateSubjectDoc, doc: nameDoc(),
+  });
+  const first = await save(String(source._id), 'Follow up A');
+  assert.equal(first.status, 200);
+  const second = await save(first.data._id, 'Follow up B');
+  assert.equal(second.status, 200);
+  assert.notEqual(first.data._id, String(source._id)); assert.notEqual(second.data._id, first.data._id);
+  assert.equal(first.data.system, false); assert.equal(first.data.event, original.event);
+  assert.match(first.data.text, /{{name}}/); assert.doesNotMatch(first.data.text, /Ravi/);
+  assert.equal((await EmailTemplate.findById(source._id)).text, source.text);
+  assert.equal(String((await EmailPolicy.findOne({ event: original.event })).defaultTemplate), String(source._id));
+  const next = await draft();
+  assert.equal(next.selectedTemplateId, String(source._id));
+  assert.ok(next.templateOptions.some(row => row.id === first.data._id));
+  assert.ok(next.templateOptions.some(row => row.id === second.data._id));
+  const { templateOptions } = require('../helpers/emailTemplates');
+  assert.ok(!(await templateOptions('lead.created')).some(row => row.id === first.data._id));
+  assert.equal((await api('/email-control/templates', 'POST', { event: 'lead.created', sourceTemplateId: source._id, name: 'Wrong', subject: 'X', text: 'Y' })).status, 400);
+  assert.equal((await api('/email-control/templates', 'POST', { event: original.event, sourceTemplateId: source._id, name: 'Denied', subject: 'X', text: 'Y' }, customer)).status, 403);
+  assert.equal(providerCalls.length, 0); assert.equal(await Queue.countDocuments(), 0);
+});

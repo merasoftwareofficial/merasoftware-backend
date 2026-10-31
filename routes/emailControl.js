@@ -143,8 +143,17 @@ function validateTemplate(event, body) {
 }
 // Template bodies arrive as the editor's documents (or plain text from older clients).
 router.post('/templates', handle(async (req, res) => {
-  adminOnly(req); allowedEvent(req, req.body.event);
-  const { event } = req.body; const fields = templateFromEditor(event, req.body);
+  adminOnly(req);
+  // Review saves create a custom copy. The source owns its action; clients cannot move it.
+  let event = req.body.event;
+  if (req.body.sourceTemplateId !== undefined) {
+    const source = mongoose.isValidObjectId(req.body.sourceTemplateId) && await EmailTemplate.findById(req.body.sourceTemplateId).lean();
+    if (!source) throw new Error('Source template not found');
+    if (event !== undefined && event !== source.event) throw new Error('Choose a template for this action');
+    event = source.event;
+  }
+  allowedEvent(req, event);
+  const fields = templateFromEditor(event, req.body);
   validateTemplate(event, fields);
   const created = await EmailTemplate.create({ event, name: fields.name.trim(), subject: fields.subject, text: fields.text });
   res.json({ success: true, data: templateWithDocs(created.toObject()) });
