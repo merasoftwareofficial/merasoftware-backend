@@ -1,6 +1,8 @@
 const express = require('express');
 const communicationAdmin = require('../middleware/communicationAdmin');
-const { Inbox, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
+const { FinalMessage, Inbox, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
+const Lead = require('../models/leadModel');
+const { MAX_HOURS, MIN_HOURS, readHours } = require('../helpers/finalMessage');
 const { DEFAULT_AD_MESSAGE, MIN_AD_MESSAGE, RULE_KEY, cleanText } = require('../whatsapp/src/autoReplyRules.js');
 const { workerAlive } = require('../helpers/whatsappReadiness');
 const { encodeReply, replyDoc } = require('../helpers/autoReplyContent');
@@ -67,6 +69,32 @@ router.post('/reply', handle(async req => {
   await ensureRule();
   await Rule.updateOne({ key: RULE_KEY }, { $set: { reply } });
   return { saved: true };
+}));
+
+// The Final Message box. Only the wait and the results live here: the message is an Email Templates action and is sent from the portal's popup.
+router.get('/final-message', handle(async () => {
+  const [hours, counts, replied] = await Promise.all([
+    readHours(),
+    FinalMessage.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
+    FinalMessage.find({ status: 'replied' }).sort({ replySeenAt: -1 }).limit(RECENT_ROWS).select('leadId phone lastReplyAt lastReplyText').lean(),
+  ]);
+  const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) } }).select('name status').lean();
+  return {
+    hours, minHours: MIN_HOURS, maxHours: MAX_HOURS,
+    counts: Object.fromEntries(counts.map(row => [row._id, row.count])),
+    replies: replied.map(row => {
+      const lead = leads.find(item => String(item._id) === String(row.leadId));
+      return { ...row, name: lead?.name || '', leadStatus: lead?.status || '' };
+    }),
+  };
+}));
+
+// Applies to messages prepared from now on. A message already out keeps the wait it promised.
+router.post('/final-message/time', handle(async req => {
+  const hours = Number(req.body?.hours);
+  if (!Number.isInteger(hours) || hours < MIN_HOURS || hours > MAX_HOURS) fail(`Choose a whole number of hours, from ${MIN_HOURS} to ${MAX_HOURS}.`);
+  await State.updateOne({ _id: STATE_ID }, { $set: { 'finalMessage.hours': hours } }, { upsert: true });
+  return { hours };
 }));
 
 module.exports = router;

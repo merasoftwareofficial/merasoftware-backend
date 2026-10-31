@@ -52,6 +52,7 @@ if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
 // Auto Reply: on with WhatsApp itself, no switch of its own; the admin's switches are in the database.
 if (process.env.ENABLE_WHATSAPP === 'true') {
   cron.schedule('* * * * *', () => require('./helpers/autoReplyJobs').processInbox().catch(error => console.error('[auto reply]', error.message)));
+  cron.schedule('* * * * *', () => require('./helpers/finalMessageJobs').followFinalMessages().catch(error => console.error('[final message]', error.message)));
 }
 
 const allowedOrigins = getAllowedOrigins();

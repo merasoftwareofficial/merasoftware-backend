@@ -1,6 +1,6 @@
 import { isLidUser, isPnUser, jidDecode, normalizeMessageContent } from '@whiskeysockets/baileys';
 import { matchesAdMessage } from './autoReplyRules.js';
-import { AUTO_REPLY_EVENT, OUR_SIDE_REPLIED, STATE_ID, finishedExpiry } from './models.js';
+import { AUTO_REPLY_EVENT, FinalMessage as FinalMessageModel, OUR_SIDE_REPLIED, STATE_ID, finishedExpiry } from './models.js';
 import { effectiveSettings } from './settings.js';
 
 const MAX_SAVED_TEXT = 2_000;
@@ -61,6 +61,19 @@ export async function chatPhone(key, socket) {
 const isCandidate = message => !!message.key && !message.key.fromMe && !!message.message
   && (isPnUser(message.key.remoteJid) || isLidUser(message.key.remoteJid)) && !!incomingText(message);
 
+// Anything a person sends in a normal chat counts as a reply to the final message, a reaction too. A delete doesn't.
+const isPersonReply = message => {
+  if (!message.key || message.key.fromMe || !(isPnUser(message.key.remoteJid) || isLidUser(message.key.remoteJid))) return false;
+  const content = normalizeMessageContent(message.message);
+  return !!content && !content.protocolMessage;
+};
+const REPLY_KINDS = { imageMessage: 'Photo', videoMessage: 'Video', audioMessage: 'Voice message', documentMessage: 'File', stickerMessage: 'Sticker', contactMessage: 'Contact', locationMessage: 'Location' };
+function replyLabel(message) {
+  const content = normalizeMessageContent(message.message);
+  if (content?.reactionMessage) return `Reaction ${content.reactionMessage.text || ''}`.trim();
+  return incomingText(message) || REPLY_KINDS[Object.keys(content || {}).find(key => REPLY_KINDS[key])] || 'Message';
+}
+
 // A real message from our side (our phone or the queue), not a reaction or a delete.
 const isOurMessage = message => {
   if (!message.key?.fromMe || !(isPnUser(message.key.remoteJid) || isLidUser(message.key.remoteJid))) return false;
@@ -73,7 +86,18 @@ const isOurMessage = message => {
  * A match becomes one inbox row, unique on WhatsApp's message id. Nothing here is sent or marked read.
  * Our own messages are read for one thing: an auto reply that hasn't gone yet is not sent. Nothing about them is saved.
  */
-export function createInbound({ Inbox, Queue, Rule, State, logger, now = () => new Date() }) {
+export function createInbound({ Inbox, Queue, Rule, State, FinalMessage = FinalMessageModel, logger, now = () => new Date() }) {
+  // Final Message's way in, apart from Auto Reply's switches. Saved only on a number that was sent the final message, nothing for any other chat.
+  async function noteFinalMessageReply(message, socket) {
+    const phone = await senderPhone(message.key, socket).catch(() => null);
+    if (!phone) return;
+    const at = messageTime(message) || now();
+    // The newest reply wins: an old message arriving after a restart can't hide a newer one, and the job compares its time with the send.
+    // Only while a reply is being waited for: once it came, or the message didn't go, this person's chat is left alone.
+    await FinalMessage.updateMany({ phone, status: { $in: ['review', 'queued', 'waiting', 'dead'] }, $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: at } }] },
+      { $set: { lastReplyAt: at, lastReplyText: replyLabel(message).slice(0, MAX_SAVED_TEXT) } });
+  }
+
   async function ourSideReplied(message, socket) {
     const phone = await chatPhone(message.key, socket);
     const at = messageTime(message);
@@ -93,6 +117,9 @@ export function createInbound({ Inbox, Queue, Rule, State, logger, now = () => n
   }
 
   async function handle({ messages = [], type }, socket) {
+    for (const message of messages.filter(isPersonReply)) {
+      await noteFinalMessageReply(message, socket).catch(error => logger.error({ err: error }, 'Final Message could not note a reply'));
+    }
     const candidates = messages.filter(isCandidate);
     const ours = messages.filter(isOurMessage);
     if (!candidates.length && !ours.length) return;

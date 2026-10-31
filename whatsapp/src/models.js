@@ -56,6 +56,8 @@ const stateSchema = new mongoose.Schema({
     sendReplies: { type: Boolean, default: false },
     addLeads: { type: Boolean, default: false },
   },
+  // Final Message's wait, in hours. Same reason as autoReply for not being inside `settings`.
+  finalMessage: { hours: Number },
   lastError: String,
   heartbeatAt: Date,
 }, { timestamps: true, collection: 'whatsapp_state', versionKey: false });
@@ -100,7 +102,27 @@ const inboxSchema = new mongoose.Schema({
 inboxSchema.index({ status: 1, createdAt: 1 });
 inboxSchema.index({ phone: 1, createdAt: 1 });
 
+// Final Message: one row per lead, kept for good so the message never goes twice.
+// review → queued → waiting → replied | dead (a late reply: dead → replied). The rest end it:
+// not-sent = Don't Send, expired or failed, may be sent again; email-only = no WhatsApp reply to wait for; stopped = the admin moved the lead.
+export const FINAL_MESSAGE_STATUSES = ['review', 'queued', 'waiting', 'replied', 'dead', 'not-sent', 'email-only', 'stopped'];
+const finalMessageSchema = new mongoose.Schema({
+  leadId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+  phone: { type: String, default: null, index: true }, // digits with country code; replies from it are noted below
+  draftId: mongoose.Schema.Types.ObjectId, // the reviewed message; its queue row has this as emailDraftId
+  hours: Number, // the wait this message promised, whatever the setting becomes later
+  status: { type: String, enum: FINAL_MESSAGE_STATUSES, default: 'review' },
+  sentAt: Date,
+  deadlineAt: Date,
+  // Written by the worker (inbound.js), acted on by the backend job (helpers/finalMessageJobs.js).
+  lastReplyAt: Date,
+  lastReplyText: String,
+  replySeenAt: Date, // when the job acted on the reply
+}, { timestamps: true, collection: 'whatsapp_final_messages' });
+finalMessageSchema.index({ status: 1, deadlineAt: 1 });
+
 export const Rule = mongoose.models.WhatsappAutoReplyRule || mongoose.model('WhatsappAutoReplyRule', ruleSchema);
+export const FinalMessage = mongoose.models.WhatsappFinalMessage || mongoose.model('WhatsappFinalMessage', finalMessageSchema);
 export const Inbox = mongoose.models.WhatsappInbox || mongoose.model('WhatsappInbox', inboxSchema);
 export const Queue = mongoose.models.WhatsappQueue || mongoose.model('WhatsappQueue', queueSchema);
 export const State = mongoose.models.WhatsappState || mongoose.model('WhatsappState', stateSchema);

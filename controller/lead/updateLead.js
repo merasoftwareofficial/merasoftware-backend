@@ -2,7 +2,8 @@ const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
-const { CONTACTED, INQUIRY, WON, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const { CONTACTED, INQUIRY, NEGATIVE, WON, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
 const { findLeadsByPhone } = require("../../helpers/leadPhone");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
@@ -16,6 +17,12 @@ const FOLLOWUP_FOLDER_NAME = "LeadFollowUpFiles";
 
 const NEEDS_NAME = { message: "Add this lead's name first: use Edit Lead.", error: true, success: false };
 const missingNameFor = (lead, status) => !lead.name && !NAME_OPTIONAL_STATUSES.includes(status);
+// A lead just marked Negative: the popup asks whether its final message goes. The stage is saved whatever happens here.
+const offerFinalMessage = async (lead, previousStatus) => {
+  if (lead.status !== NEGATIVE || previousStatus === NEGATIVE) return undefined;
+  try { return await prepareFinalMessage(lead); }
+  catch (error) { console.error("Lead saved; its final message is unavailable:", error.message); return "unavailable"; }
+};
 
 const updateLeadController = async (req, res) => {
   try {
@@ -41,6 +48,7 @@ const updateLeadController = async (req, res) => {
 
     // Conversion locks account details, but follow-up notes remain available.
     const isMatured = Boolean(lead.convertedToUserId) || lead.status === WON;
+    const previousStatus = lead.status;
     if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {
       return res.status(409).json({
         message: "This lead is already converted to a client and cannot be edited",
@@ -115,10 +123,12 @@ const updateLeadController = async (req, res) => {
       lead.status = badge;
 
       const savedLead = await lead.save();
+      const finalMessage = await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up added",
         data: savedLead,
+        finalMessage,
         success: true,
         error: false,
       });
@@ -173,10 +183,12 @@ const updateLeadController = async (req, res) => {
       }
 
       const savedLead = await lead.save();
+      const finalMessage = await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up updated",
         data: savedLead,
+        finalMessage,
         success: true,
         error: false,
       });

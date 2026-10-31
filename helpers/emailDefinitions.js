@@ -82,6 +82,16 @@ const definitions = {
       return { to: [lead.email], requiredLinks: [proposal.downloadLink], values: { name: text(lead.name), amount, link: proposal.downloadLink } };
     },
   },
+  // The last message to a Negative lead (helpers/finalMessage.js). No name: a Negative lead may have none.
+  'lead.finalMessage': {
+    subject: 'Your free website offer',
+    text: lines('Hello ਜੀ,', '', 'ਤੁਹਾਡੇ ਵੱਲੋਂ response ਨਾ ਮਿਲਣ ਕਰਕੇ, ਤੁਹਾਡਾ "Online Digital Presence with Free Website" ਵਾਲਾ offer ਅਗਲੇ {{timeLimit}} ਵਿੱਚ close ਕੀਤਾ ਜਾ ਰਿਹਾ ਹੈ।', '', 'ਆਪਣਾ free website offer secure/resume ਕਰਨ ਲਈ ਕਿਰਪਾ ਕਰਕੇ ਹੁਣੇ reply ਕਰੋ।', '', 'Regards,', '', 'Mera Software'),
+    variables: { timeLimit: detail('Time limit', '24 hours', 'The time set in Communication → Final Message; the wait follows the same setting') },
+    blocks: {},
+    build(lead, email, hours) {
+      return { to: email ? [email] : [], phone: lead.phone, values: { timeLimit: `${hours} hours` } };
+    },
+  },
   // A website plan request (controller/lead/planRequest.js): request = { lead, planName, contact, choice, price }.
   'plan.request.admin': {
     subject: 'New plan request - {{plan}}',
