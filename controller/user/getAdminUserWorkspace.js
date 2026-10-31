@@ -1,3 +1,4 @@
+const leadModel = require("../../models/leadModel");
 const mongoose = require("mongoose");
 const userModel = require("../../models/userModel");
 const orderModel = require("../../models/orderProductModel");
@@ -30,20 +31,23 @@ const getAdminUserWorkspace = async (req, res) => {
 
     const customer = await userModel
       .findById(customerObjectId)
-      .select("name email phone status walletBalance createdAt updatedAt isGuest allowLoginFreeUploadLinks")
+      .select("name email phone status walletBalance createdAt updatedAt isGuest deletedAt allowLoginFreeUploadLinks")
       .lean();
     // Guests are demo-only accounts (see guestLogin.js) and must never surface
     // in any admin workspace — same boundary getAdminClients.js already
     // enforces for the client list, applied here for the per-client detail
     // view too, since this endpoint takes customerId directly and has no
     // list-level filter to rely on.
-    if (!customer || customer.isGuest) {
+    if (!customer || customer.isGuest || customer.deletedAt) {
       return res.status(404).json({
         message: "Customer not found",
         error: true,
         success: false,
       });
     }
+
+    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id").lean();
+    customer.leadId = linkedLead?._id || null;
 
     const [orders, rawOrderRefs, transactions, monthlyInvoices, projectInvoices, updateRequestCounts] = await Promise.all([
       // The payment-history subpage reads these off the order rows to show "Paid" and the

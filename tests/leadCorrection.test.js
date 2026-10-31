@@ -324,3 +324,30 @@ test('the backfill counts first, creates only missing leads, never links, and ca
   assert.equal((await leadModel.findOne({ email: 'open@example.test' }).lean()).status, 'Contacted');
   assert.equal((await backfillWonLeads({ apply: true })).created, 0);
 });
+
+
+test('matured converted leads accept notes and files but cannot regress or edit account details', async () => {
+  const created = await lead('Won', { convertedToUserId: new mongoose.Types.ObjectId(), followUps: [{ note: 'Before conversion', badge: 'Positive' }] });
+  const path = `/admin/leads/${created._id}`;
+  assert.equal((await send(path, { action: 'followUp', note: 'Client called', badge: 'Won' }, pdf)).status, 200);
+  let row = await read(created._id);
+  assert.equal(row.status, 'Won');
+  assert.equal(row.followUps[1].badge, 'Won');
+  assert.ok(row.followUps[1].attachment.driveFileId);
+  assert.equal((await send(path, { action: 'followUp', note: 'Regress', badge: 'Contacted' })).status, 400);
+  assert.equal((await send(path, { action: 'followUp', note: ' ', badge: 'Won' })).status, 400);
+  assert.equal((await send(path, { action: 'editDetails', name: 'Other' })).status, 409);
+  const followUpId = String(created.followUps[0]._id);
+  assert.equal((await send(path, { action: 'editFollowUp', followUpId, note: 'Corrected history', badge: 'Positive' })).status, 200);
+  assert.equal((await send(path, { action: 'editFollowUp', followUpId, note: 'Change history', badge: 'Negative' })).status, 400);
+  row = await read(created._id);
+  assert.equal(row.status, 'Won');
+  assert.equal(row.followUps[0].badge, 'Positive');
+  assert.equal(row.followUps[0].note, 'Corrected history');
+});
+
+test('unlinked matured leads cannot regress through a follow-up', async () => {
+  const created = await lead('Won');
+  assert.equal((await send(`/admin/leads/${created._id}`, { action: 'followUp', note: 'Keep matured', badge: 'Negative' })).status, 400);
+  assert.equal((await read(created._id)).status, 'Won');
+});

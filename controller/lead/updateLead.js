@@ -2,7 +2,7 @@ const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
-const { CONTACTED, INQUIRY, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const { CONTACTED, INQUIRY, WON, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
 const { findLeadsByPhone } = require("../../helpers/leadPhone");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
@@ -39,8 +39,9 @@ const updateLeadController = async (req, res) => {
       });
     }
 
-    // Converted leads are historical; block further edits (Phase 4 owns convert).
-    if (lead.convertedToUserId) {
+    // Conversion locks account details, but follow-up notes remain available.
+    const isMatured = Boolean(lead.convertedToUserId) || lead.status === WON;
+    if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {
       return res.status(409).json({
         message: "This lead is already converted to a client and cannot be edited",
         error: true,
@@ -54,7 +55,10 @@ const updateLeadController = async (req, res) => {
     if (action === "followUp") {
       // The form always sends a status. The current one is accepted even if it can't be chosen (Won).
       const badge = (req.body.badge || "").trim();
-      if (badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
+      if (isMatured && badge !== WON) {
+        return res.status(400).json({ message: "Matured stage cannot be changed", error: true, success: false });
+      }
+      if (!isMatured && badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
           error: true,
@@ -137,6 +141,9 @@ const updateLeadController = async (req, res) => {
       // An old badge that can no longer be chosen (Proposal Sent, Won) may stay when only the note changes.
       const badge = (req.body.badge || "").trim();
       const badgeChanged = badge !== followUp.badge;
+      if (isMatured && badgeChanged) {
+        return res.status(400).json({ message: "Historical stage cannot be changed for a matured lead", error: true, success: false });
+      }
       if (badgeChanged && !ALLOWED_STATUSES.includes(badge)) {
         return res.status(400).json({
           message: "Please select a valid stage badge",
@@ -161,7 +168,7 @@ const updateLeadController = async (req, res) => {
       const latestFollowUp = [...lead.followUps].sort(
         (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
       )[0];
-      if (badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {
+      if (!isMatured && badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {
         lead.status = badge;
       }
 

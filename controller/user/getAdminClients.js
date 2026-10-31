@@ -123,7 +123,7 @@ async function getAdminClients(req, res) {
 
     const clients = await userModel
       .find({ roles: "customer", deletedAt: null, isGuest: { $ne: true } })
-      .select("name email phone status createdAt")
+      .select("name email phone status createdAt updatedAt")
       .lean();
 
     const clientIds = clients.map((client) => client._id);
@@ -158,7 +158,11 @@ async function getAdminClients(req, res) {
     tickets.forEach((ticket) => addRecordActivity(activityByClient, ticket.userId, getTicketActivity(ticket)));
 
     const enrichedClients = clients.map((client) => {
-      const activity = activityByClient.get(client._id.toString());
+      const activity = latestCandidate([
+        { value: client.createdAt, source: "client_created" },
+        { value: client.updatedAt, source: "client_updated" },
+        ...(activityByClient.has(client._id.toString()) ? [activityByClient.get(client._id.toString())] : []),
+      ]);
       return {
         ...client,
         latestActivityAt: activity?.value || client.createdAt,

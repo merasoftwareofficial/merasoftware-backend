@@ -1,3 +1,4 @@
+const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
 
 const getLeadDetailController = async (req, res) => {
@@ -13,7 +14,7 @@ const getLeadDetailController = async (req, res) => {
     const { leadId } = req.params;
 
     const lead = await leadModel
-      .findById(leadId)
+      .findOne({ _id: leadId, deletedAt: null })
       .populate("followUps.createdBy", "name email")
       .populate("referredByUserId", "name phone email")
       .lean();
@@ -25,6 +26,8 @@ const getLeadDetailController = async (req, res) => {
         success: false,
       });
     }
+
+    lead.clientAvailable = Boolean(lead.convertedToUserId && await userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }));
 
     return res.json({
       message: "Lead fetched successfully",
