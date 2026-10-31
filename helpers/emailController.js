@@ -175,7 +175,22 @@ function requestMiddleware(req, res, next) {
           }
         }
       }
-      return json(reviewIds.length ? { ...body, emailDraftIds: reviewIds, emailStatus: 'awaiting-review' } : body);
+      // Only hydrate a single owned portal lead review; bulk responses remain small.
+      let emailReviewDraft;
+      if (reviewIds.length === 1) {
+        const draft = drafts.find(row => String(row._id) === reviewIds[0]);
+        if ((draft?.leadId || draft?.event === 'lead.finalMessage') && String(draft.actor) === String(req.userId)) {
+          const user = await userModel.findById(req.userId).select('roles isGuest isActive').lean();
+          if (user?.roles?.includes('admin') && !user.isGuest && user.isActive !== false) {
+            const safe = draft.toObject();
+            delete safe.headers;
+            safe.attachments = (safe.attachments || []).map(({ content, ...attachment }) => attachment);
+            try { emailReviewDraft = await require('./emailReviewData').buildReview(safe, true); }
+            catch { /* The explicit draft endpoint remains the recovery path. */ }
+          }
+        }
+      }
+      return json(reviewIds.length ? { ...body, emailDraftIds: reviewIds, emailStatus: 'awaiting-review', ...(emailReviewDraft ? { emailReviewDraft } : {}) } : body);
     };
     finish().catch(error => {
       console.error('[email] Could not finalize review drafts:', error.message);

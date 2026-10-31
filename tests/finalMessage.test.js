@@ -107,6 +107,8 @@ test('marking Negative saves the stage and opens a review; nothing enters the qu
   assert.equal(marked.success, true);
   assert.equal(marked.emailStatus, 'awaiting-review');
   assert.equal(marked.emailDraftIds.length, 1);
+  assert.equal(String(marked.emailReviewDraft._id), String(marked.emailDraftIds[0]));
+  assert.equal(marked.emailReviewDraft.event, 'lead.finalMessage');
   assert.equal(await stage(_id), 'Negative');
   assert.equal(await Queue.countDocuments(), 0);
   assert.equal((await row(_id)).status, 'review');

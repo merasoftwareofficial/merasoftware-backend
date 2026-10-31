@@ -12,7 +12,7 @@ const { queryOutbox, reconcileSent } = require('../helpers/emailOutbox');
 const { messageText } = require('../helpers/whatsappQueue');
 const { reviewSubjectFromEditor, templateOptions, editableReview } = require('../helpers/emailTemplates');
 const { availability } = require('../helpers/reviewDelivery');
-const { messageTypes, changeMessageType } = require('../helpers/leadMessage');
+const { changeMessageType } = require('../helpers/leadMessage');
 const router = express.Router();
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(async (req, res, next) => {
@@ -188,11 +188,7 @@ router.post('/templates/preview', handle(async (req, res) => {
 }));
 async function draftReview(req) {
   const draft = await loadDraft(req);
-  const review = { ...draft, ...reviewWithDoc(draft.event, draft.text, draft.values, draft.blocks) };
-  const channels = await availability(draft);
-  const channelEditable = (draft.status === 'pending' && !draft.attemptCount) || draft.delivery?.channels?.length;
-  return { ...review, ...(channelEditable ? { channelOptions: channels.choices, defaultChannel: channels.defaultChannel } : {}),
-    ...(req.emailIsAdmin ? { templateOptions: await templateOptions(draft.event), ...await editableReview(draft), ...(draft.leadId ? { messageTypes: await messageTypes(draft.leadId) } : {}) } : {}) };
+  return require('../helpers/emailReviewData').buildReview(draft, req.emailIsAdmin);
 }
 router.get('/drafts/:id', handle(async (req, res) => {
   res.json({ success: true, data: await draftReview(req) });

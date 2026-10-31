@@ -36,7 +36,13 @@ async function open(id) {
   const result = await call(`/admin/leads/${id}/message`);
   assert.equal(result.status, 200, result.message);
   assert.equal(result.emailDraftIds.length, 1);
-  return review(result.emailDraftIds[0]);
+  assert.ok(result.emailReviewDraft, 'single lead action includes the shared review payload');
+  const direct = await review(result.emailDraftIds[0]);
+  assert.equal(String(result.emailReviewDraft._id), String(direct._id));
+  assert.deepEqual(result.emailReviewDraft.templateOptions, direct.templateOptions);
+  assert.deepEqual(result.emailReviewDraft.messageTypes, direct.messageTypes);
+  assert.equal(result.emailReviewDraft.headers, undefined);
+  return result.emailReviewDraft;
 }
 const move = async (draft, event) => call(`/email-control/drafts/${draft._id}/message-type`, 'POST', { event });
 const send = (draft, channels) => call(`/email-control/drafts/${draft._id}/decision`, 'POST', { choice: 'send', channels, subject: draft.subject, subjectDoc: draft.templateSubjectDoc, doc: draft.templateDoc || draft.doc, templateId: draft.selectedTemplateId });
