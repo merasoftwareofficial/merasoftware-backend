@@ -2,6 +2,7 @@ const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const { listProjectCategories } = require("../../helpers/projectCategories");
 const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
+const { clearClientDead } = require("../../helpers/leadPhone");
 
 // Portal "Get a Service" → "Start a Project": a client picks a project category, gives a budget,
 // a time to call and a phone number (plus an optional note), and asks for a callback. The
@@ -79,6 +80,7 @@ const createProjectRequest = async (req, res) => {
     if (details.length > DETAILS_MAX) return reply(res, 400, `Please keep the description under ${DETAILS_MAX} characters.`);
     if (details) answers.details = details;
     const note = noteFor({ user, category, phone, answers });
+    await clearClientDead({ convertedToUserId: user._id });
 
     // One open request per client: a new request is added to it, and a repeat within
     // REPEAT_WINDOW_MS (a double click or a quick resend) changes nothing.

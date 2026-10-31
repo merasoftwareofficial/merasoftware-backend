@@ -1,6 +1,7 @@
 const leadModel = require("../models/leadModel");
 const userModel = require("../models/userModel");
-const { CONTACTED, INQUIRY } = require("./leadStatuses");
+const { FinalMessage } = require("../whatsapp/src/models.js");
+const { CONTACTED, DEAD, INQUIRY, NEGATIVE, WON, WRONG } = require("./leadStatuses");
 const { normalizePhone } = require("./whatsappQueue");
 
 // Saved numbers come in many forms (98765…, +91 98765…), so they are compared normalised, never as text.
@@ -43,4 +44,37 @@ async function claimInquiryLead(phone, { name, email, ...fields }, { session } =
   return lead.save({ session });
 }
 
-module.exports = { findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead };
+/** A lead that came back ends its final message: no Dead later, and no decision waiting on the old reply. A message still in the queue is cancelled by finalMessageJobs.js. */
+async function endFinalMessage(leadId) {
+  await FinalMessage.updateMany({ leadId, status: { $in: ["waiting", "dead"] } }, { $set: { status: "stopped" } });
+  await FinalMessage.updateMany({ leadId, status: "replied", decision: null }, { $set: { decision: "interested", decidedAt: new Date() } });
+}
+
+/**
+ * A person sends a new request from the website or portal. Their Dead lead, or a Negative one waiting on the
+ * final message, returns to Neutral and takes the request. A Wrong lead takes it as a note and stays Wrong: only
+ * the admin changes that. Returns that lead, or null when they have neither.
+ */
+async function leadForNewRequest(phone, { name, email }) {
+  const leads = await findLeadsByPhone(phone, { status: { $in: [DEAD, NEGATIVE, WRONG] }, deletedAt: null, convertedToUserId: null, requestedByUserId: null });
+  if (!leads.length) return null;
+  const waiting = new Set((await FinalMessage.find({ leadId: { $in: leads.map((lead) => lead._id) }, $or: [{ status: { $in: ["review", "queued", "waiting"] } }, { status: "replied", decision: null }] }).select("leadId").lean()).map((row) => String(row.leadId)));
+  const returning = leads.filter((lead) => lead.status === DEAD || waiting.has(String(lead._id)));
+  for (const lead of returning) {
+    await endFinalMessage(lead._id);
+    lead.set({ status: CONTACTED, name: lead.name || name, email: lead.email || email || "" });
+    await lead.save();
+  }
+  return returning[0] || leads.find((lead) => lead.status === WRONG) || null;
+}
+
+/** The client wrote to us: a Dead behaviour ends. Nothing else about them changes. */
+async function clearClientDead(filter) {
+  const now = new Date();
+  await leadModel.updateMany({ ...filter, clientBehaviour: DEAD }, {
+    $unset: { clientBehaviour: 1 },
+    $push: { followUps: { note: "Client wrote to us. Behaviour: Dead to Neutral.", badge: WON, date: now, createdAt: now } },
+  });
+}
+
+module.exports = { phoneKey, findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, leadForNewRequest, clearClientDead };

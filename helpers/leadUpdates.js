@@ -2,6 +2,7 @@
 // Notifications carry identifiers only. Current records always come from existing APIs.
 const mongoose = require('mongoose');
 const Lead = require('../models/leadModel');
+const OfferTarget = require('../models/offerTargetModel');
 const { FinalMessage } = require('../whatsapp/src/models.js');
 function createLeadUpdates(connection = mongoose.connection) {
   const listeners = new Set();
@@ -22,7 +23,7 @@ function createLeadUpdates(connection = mongoose.connection) {
     if (starting) return starting;
     starting = (async () => {
       const cursor = connection.db.watch([
-        { $match: { 'ns.coll': { $in: [Lead.collection.name, FinalMessage.collection.name] }, operationType: { $in: ['insert', 'update', 'replace', 'delete'] } } },
+        { $match: { 'ns.coll': { $in: [Lead.collection.name, FinalMessage.collection.name, OfferTarget.collection.name] }, operationType: { $in: ['insert', 'update', 'replace', 'delete'] } } },
         { $project: { _id: 1, ns: 1, documentKey: 1, operationType: 1, 'fullDocument.leadId': 1 } },
       ], { fullDocument: 'updateLookup', maxAwaitTimeMS: 1000 });
       stream = cursor;

@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, NAME_OPTIONAL_STATUSES } = require("../helpers/leadStatuses");
+const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, NAME_OPTIONAL_STATUSES, CLIENT_BEHAVIOURS } = require("../helpers/leadStatuses");
 
 // Attachment for a follow-up (optional). Reuses the same shape/Drive fields as
 // proposalSchema below so file handling stays a single pattern across the model.
@@ -38,6 +38,10 @@ const followUpSchema = new mongoose.Schema({
     type: String,
     enum: FOLLOW_UP_BADGES,
     default: DEFAULT_LEAD_STATUS,
+  },
+  // The offer this line belongs to (models/offerTargetModel.js). Its badge is that offer's stage, not the lead's.
+  offerSlug: {
+    type: String,
   },
   // Optional file attached to this follow-up (uploaded to Google Drive).
   attachment: {
@@ -159,6 +163,11 @@ const leadSchema = new mongoose.Schema({
     type: String,
     enum: LEAD_STATUSES,
     default: DEFAULT_LEAD_STATUS,
+  },
+  // A client's general behaviour, kept on the client's Won lead. Unset counts as Neutral.
+  clientBehaviour: {
+    type: String,
+    enum: CLIENT_BEHAVIOURS,
   },
   // Versioned proposal/quotation files (Phase 6A). Each upload is a new version
   // so the full revision history / timeline is preserved (client changes over time).

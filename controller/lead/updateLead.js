@@ -2,9 +2,12 @@ const path = require("path");
 const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
-const { CONTACTED, INQUIRY, NEGATIVE, WON, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES } = require("../../helpers/leadStatuses");
+const offerTargetModel = require("../../models/offerTargetModel");
+const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES } = require("../../helpers/leadStatuses");
+const { setBehaviour } = require("../../helpers/offerTargets");
+const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
-const { findLeadsByPhone } = require("../../helpers/leadPhone");
+const { findAccountsByPhone, findLeadsByPhone } = require("../../helpers/leadPhone");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
 let KEY_FILE_PATH;
@@ -23,6 +26,10 @@ const offerFinalMessage = async (lead, previousStatus) => {
   try { return await prepareFinalMessage(lead); }
   catch (error) { console.error("Lead saved; its final message is unavailable:", error.message); return "unavailable"; }
 };
+
+const NOT_FOR_CLIENT = { message: "A client can't be marked Wrong.", error: true, success: false };
+// A client's own request lead, or a number a client holds: this person has already been filtered in.
+const isClientPerson = async (lead) => Boolean(lead.requestedByUserId) || (await findAccountsByPhone(lead.phone)).some(isClient);
 
 const updateLeadController = async (req, res) => {
   try {
@@ -49,6 +56,11 @@ const updateLeadController = async (req, res) => {
     // Conversion locks account details, but follow-up notes remain available.
     const isMatured = Boolean(lead.convertedToUserId) || lead.status === WON;
     const previousStatus = lead.status;
+    if (action === "setBehaviour") {
+      const data = await setBehaviour(leadId, req.body.behaviour, req.userId);
+      return res.json({ message: "Behaviour updated", data, success: true, error: false });
+    }
+
     if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {
       return res.status(409).json({
         message: "This lead is already converted to a client and cannot be edited",
@@ -63,17 +75,29 @@ const updateLeadController = async (req, res) => {
     if (action === "followUp") {
       // The form always sends a status. The current one is accepted even if it can't be chosen (Won).
       const badge = (req.body.badge || "").trim();
-      if (isMatured && badge !== WON) {
-        return res.status(400).json({ message: "Matured stage cannot be changed", error: true, success: false });
+      // A line for an offer moves only that offer's stage: the lead's own stage, and any lead rules, stay out of it.
+      const offerSlug = (req.body.offerSlug || "").trim();
+      const target = offerSlug ? await offerTargetModel.findOne({ leadId: lead._id, offerSlug }) : null;
+      if (offerSlug && !target) {
+        return res.status(404).json({ message: "This person is not in that offer", error: true, success: false });
       }
-      if (!isMatured && badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
-        return res.status(400).json({
-          message: "Please select a valid stage badge",
-          error: true,
-          success: false,
-        });
+      if (target) {
+        const allowed = target.stage === WON ? badge === WON : SELECTABLE_OFFER_STAGES.includes(badge);
+        if (!allowed) return res.status(400).json({ message: "Please select a valid stage for this offer", error: true, success: false });
+      } else {
+        if (isMatured && badge !== WON) {
+          return res.status(400).json({ message: "Matured stage cannot be changed", error: true, success: false });
+        }
+        if (!isMatured && badge !== lead.status && !ALLOWED_STATUSES.includes(badge)) {
+          return res.status(400).json({
+            message: "Please select a valid stage badge",
+            error: true,
+            success: false,
+          });
+        }
+        if (missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
+        if (badge === WRONG && await isClientPerson(lead)) return res.status(400).json(NOT_FOR_CLIENT);
       }
-      if (missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
 
       const note = (req.body.note || "").trim();
       if (!note) {
@@ -117,13 +141,16 @@ const updateLeadController = async (req, res) => {
         date: new Date(),
         createdBy: req.userId,
         createdAt: new Date(),
+        ...(target ? { offerSlug } : {}),
       });
 
       // Merge: the lead's current pipeline stage follows the latest follow-up badge.
-      lead.status = badge;
+      if (target) target.stage = badge;
+      else lead.status = badge;
 
       const savedLead = await lead.save();
-      const finalMessage = await offerFinalMessage(savedLead, previousStatus);
+      if (target) await target.save();
+      const finalMessage = target ? undefined : await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up added",
@@ -155,17 +182,25 @@ const updateLeadController = async (req, res) => {
       // An old badge that can no longer be chosen (Proposal Sent, Won) may stay when only the note changes.
       const badge = (req.body.badge || "").trim();
       const badgeChanged = badge !== followUp.badge;
-      if (isMatured && badgeChanged) {
-        return res.status(400).json({ message: "Historical stage cannot be changed for a matured lead", error: true, success: false });
+      const target = followUp.offerSlug ? await offerTargetModel.findOne({ leadId: lead._id, offerSlug: followUp.offerSlug }) : null;
+      if (followUp.offerSlug) {
+        if (badgeChanged && (!target || target.stage === WON || !SELECTABLE_OFFER_STAGES.includes(badge))) {
+          return res.status(400).json({ message: "Please select a valid stage for this offer", error: true, success: false });
+        }
+      } else {
+        if (isMatured && badgeChanged) {
+          return res.status(400).json({ message: "Historical stage cannot be changed for a matured lead", error: true, success: false });
+        }
+        if (badgeChanged && !ALLOWED_STATUSES.includes(badge)) {
+          return res.status(400).json({
+            message: "Please select a valid stage badge",
+            error: true,
+            success: false,
+          });
+        }
+        if (badgeChanged && missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
+        if (badgeChanged && badge === WRONG && await isClientPerson(lead)) return res.status(400).json(NOT_FOR_CLIENT);
       }
-      if (badgeChanged && !ALLOWED_STATUSES.includes(badge)) {
-        return res.status(400).json({
-          message: "Please select a valid stage badge",
-          error: true,
-          success: false,
-        });
-      }
-      if (badgeChanged && missingNameFor(lead, badge)) return res.status(400).json(NEEDS_NAME);
 
       const note = (req.body.note || "").trim();
       if (!note) {
@@ -179,15 +214,17 @@ const updateLeadController = async (req, res) => {
       followUp.badge = badge;
       followUp.note = note;
 
-      const latestFollowUp = lead.followUps.filter((item) => !item.messageDraftId).sort(
+      // The latest line of the same kind decides: the offer's stage for an offer's line, the lead's for the rest.
+      const latestFollowUp = lead.followUps.filter((item) => !item.messageDraftId && (item.offerSlug || "") === (followUp.offerSlug || "")).sort(
         (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
       )[0];
-      if (!isMatured && badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {
-        lead.status = badge;
-      }
+      const isLatest = badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id);
+      if (target && isLatest) target.stage = badge;
+      else if (!followUp.offerSlug && !isMatured && isLatest) lead.status = badge;
 
       const savedLead = await lead.save();
-      const finalMessage = await offerFinalMessage(savedLead, previousStatus);
+      if (target && isLatest) await target.save();
+      const finalMessage = followUp.offerSlug ? undefined : await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up updated",

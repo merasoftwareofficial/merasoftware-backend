@@ -694,7 +694,7 @@ test('Broadcast: the Inquiry group works; a message using the name skips nameles
   await Lead.create([{ phone: '+919111111111', status: 'Inquiry' }, { phone: '+919222222222', status: 'Inquiry', name: 'Has Name' }, { phone: '+919333333333', status: 'Negative' }, { phone: 'bad', status: 'Inquiry' }]);
   const all = await audience('Inquiry');
   assert.equal(all.count, 2);
-  assert.deepEqual(all.excluded, { invalidPhone: 1, duplicatePhone: 0, noName: 1 });
+  assert.deepEqual(all.excluded, { invalidPhone: 1, duplicatePhone: 0, noName: 1, doNotDisturb: 0 });
   assert.equal((await audience('Inquiry', { requireName: true })).count, 1);
   assert.equal((await audience('Negative', { requireName: true })).count, 0);
   await assert.rejects(submit({ requestKey: 'negative-name-request-01', audience: 'Negative', doc: named(), origin: 'new' }, admin._id), /name/);

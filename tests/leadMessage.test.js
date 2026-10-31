@@ -75,7 +75,7 @@ after(async () => {
   await db?.stop();
 });
 
-for (const status of ['Inquiry', 'Contacted', 'Positive', 'Negative', 'Dead', 'Won']) {
+for (const status of ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'Negative', 'Unhappy', 'Won']) {
   test(`a ${status} lead gets a message on WhatsApp, and its stage stays`, async () => {
     const { _id } = await lead({ status });
     const draft = await open(_id);

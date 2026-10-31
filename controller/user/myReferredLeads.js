@@ -1,5 +1,6 @@
 const leadModel = require("../../models/leadModel");
 const transactionModel = require("../../models/transactionModel");
+const { referredLeadStatus } = require("../../helpers/leadStatuses");
 
 // Customer-facing: leads this user referred via the Add Lead "Reference" flow
 // (leadModel.referredByUserId), each paired with the reward amount credited
@@ -36,7 +37,7 @@ const myReferredLeadsController = async (req, res) => {
     const data = leads.map((lead) => ({
       _id: lead._id,
       name: lead.name,
-      status: lead.status,
+      status: referredLeadStatus(lead.status),
       createdAt: lead.createdAt,
       rewardAmount: rewardByTransactionId.get(`LEADREF-${lead._id}`) || 0,
     }));

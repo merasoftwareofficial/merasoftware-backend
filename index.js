@@ -94,6 +94,7 @@ app.use("/api", require("./helpers/emailController").requestMiddleware)
 app.use("/api/email-control", require("./routes/emailControl"))
 app.use("/api/whatsapp-control", require("./routes/whatsappControl"))
 app.use("/api/broadcast", require("./routes/broadcast"))
+app.use("/api/offer-targets", require("./routes/offerTargets"))
 app.use("/api/auto-reply", require("./routes/autoReply"))
 app.use("/api", router)
 

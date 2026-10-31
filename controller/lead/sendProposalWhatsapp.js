@@ -1,5 +1,6 @@
 const leadModel = require("../../models/leadModel");
 const { hasEmail, queueProposalWhatsApp } = require("../../helpers/leadProposalMessage");
+const { MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
 
 const reply = (res, status, message) => res.status(status).json({ message, error: status >= 400, success: status < 400 });
 
@@ -13,6 +14,8 @@ const sendProposalWhatsappController = async (req, res) => {
     if (!lead) return reply(res, 404, "Lead not found");
     if (lead.convertedToUserId) return reply(res, 409, "This lead is already converted to a client and cannot be edited");
     if (hasEmail(lead)) return reply(res, 409, "This lead has an email; its message goes through email review");
+    const blocked = await blockForLead(lead);
+    if (blocked) return reply(res, 409, MESSAGES[blocked]);
     const proposal = (lead.proposals || []).find((item) => item.version === version);
     if (!proposal) return reply(res, 404, "Proposal not found");
 

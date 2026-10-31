@@ -3,6 +3,7 @@ const leadModel = require("../../models/leadModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { EVENT: PROPOSAL_MESSAGE, hasEmail, whatsappPreview } = require("../../helpers/leadProposalMessage");
+const { MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
 
 // Path to the Google Drive credentials file (same resolution as submitUpdateRequest.js)
 let KEY_FILE_PATH;
@@ -127,8 +128,12 @@ const uploadProposalController = async (req, res) => {
     // The proposal is saved whatever happens to its message. Nothing is sent before the admin's review.
     let whatsapp = null;
     let messageUnavailable = false;
+    let messageBlocked = null;
     try {
-      if (hasEmail(lead)) {
+      const blocked = await blockForLead(lead);
+      if (blocked) {
+        messageBlocked = MESSAGES[blocked];
+      } else if (hasEmail(lead)) {
         await prepareTemplatedMail(PROPOSAL_MESSAGE, lead, proposal);
       } else {
         whatsapp = await whatsappPreview(lead, proposal);
@@ -140,7 +145,7 @@ const uploadProposalController = async (req, res) => {
 
     return res.json({
       message: "Proposal added",
-      data: { version: nextVersion, whatsappPreview: whatsapp, messageUnavailable },
+      data: { version: nextVersion, whatsappPreview: whatsapp, messageUnavailable, messageBlocked },
       success: true,
       error: false,
     });

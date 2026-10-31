@@ -1,6 +1,8 @@
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
 const { FinalMessage } = require("../../whatsapp/src/models.js");
+const { LABELS, MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
+const { targetsForLead } = require("../../helpers/offerTargets");
 
 const getLeadDetailController = async (req, res) => {
   try {
@@ -29,6 +31,9 @@ const getLeadDetailController = async (req, res) => {
     }
 
     lead.finalMessage = await FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision").lean();
+    const blocked = await blockForLead(lead);
+    lead.contactBlock = blocked ? { reason: blocked, label: LABELS[blocked], message: MESSAGES[blocked] } : null;
+    lead.offerTargets = await targetsForLead(lead._id);
     lead.clientAvailable = Boolean(lead.convertedToUserId && await userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }));
 
     return res.json({

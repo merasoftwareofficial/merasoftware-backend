@@ -1,5 +1,6 @@
 const leadModel = require("../../models/leadModel");
 const { prepare } = require("../../helpers/leadMessage");
+const { MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
 
 const reply = (res, status, message) => res.status(status).json({ message, error: status >= 400, success: status < 400 });
 
@@ -9,6 +10,8 @@ const leadMessageController = async (req, res) => {
     if (req.userRole !== "admin") return reply(res, 403, "Forbidden");
     const lead = await leadModel.findOne({ _id: req.params.leadId, deletedAt: null }).lean();
     if (!lead) return reply(res, 404, "Lead not found");
+    const blocked = await blockForLead(lead);
+    if (blocked) return reply(res, 409, MESSAGES[blocked]);
     return await prepare(lead)
       ? reply(res, 200, "Message prepared")
       : reply(res, 409, "No message could be prepared: check this lead's WhatsApp number and email, and that a message type is On in Email Templates.");

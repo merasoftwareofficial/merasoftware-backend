@@ -90,7 +90,7 @@ async function saveIgnored(list) {
 
 const lineWith = (note, status, userId) => ({ note, badge: status, date: new Date(), createdAt: new Date(), createdBy: userId });
 const CHOICES = {
-  interested: { status: CONTACTED, note: 'Reply reviewed: interested. Moved to Contacted.' },
+  interested: { status: CONTACTED, note: 'Reply reviewed: interested. Moved to Neutral.' },
   dead: { status: DEAD, note: 'Reply reviewed: moved to Dead.' },
   keep: { status: NEGATIVE, note: 'Reply reviewed: kept in Negative.' },
 };

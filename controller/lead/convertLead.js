@@ -10,6 +10,7 @@ const {
 } = require("../../helpers/clientAccount");
 const { executeGuestCascadeDelete } = require("../../helpers/guestCascadeDelete");
 const { sendClientAccountCreatedEmail } = require("../../helpers/emailService");
+const { NO_MARKETING_STATUSES, behaviourFromStatus } = require("../../helpers/leadStatuses");
 
 const convertLeadController = async (req, res) => {
   try {
@@ -48,6 +49,14 @@ const convertLeadController = async (req, res) => {
     if (lead.requestedByUserId) {
       return res.status(409).json({
         message: "This request came from an existing client account, so there is nothing to convert. Open the client from the notes instead.",
+        error: true,
+        success: false,
+      });
+    }
+
+    if (NO_MARKETING_STATUSES.includes(lead.status)) {
+      return res.status(400).json({
+        message: `This lead is ${lead.status}. Change its stage before converting.`,
         error: true,
         success: false,
       });
@@ -152,6 +161,7 @@ const convertLeadController = async (req, res) => {
           || !isUpgradeableMember(account) || account.isActive === false || current.email !== account.email
           || current.email !== cleanEmail || current.phone !== lead.phone) throw new Error('Lead or linked account changed. Refresh before converting.');
         const upgraded = await upgradeMemberToClient(account, { phone: cleanPhone, session });
+        current.clientBehaviour = behaviourFromStatus(current.status);
         current.convertedToUserId = upgraded._id; current.status = 'Won';
         await current.save({ session });
         return upgraded;
@@ -160,6 +170,7 @@ const convertLeadController = async (req, res) => {
       clientUser = memberToUpgrade
         ? await upgradeMemberToClient(memberToUpgrade, { phone: cleanPhone })
         : await createClientAccount({ name: lead.name, email: cleanEmail, phone: cleanPhone });
+      lead.clientBehaviour = behaviourFromStatus(lead.status);
       lead.convertedToUserId = clientUser._id;
       lead.status = "Won";
       await lead.save();

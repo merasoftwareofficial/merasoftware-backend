@@ -7,7 +7,7 @@ const { requireIntegration } = require("../../helpers/integrationAuth");
 const { parsePhone } = require("../../helpers/phoneNumber");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
-const { claimInquiryLead } = require("../../helpers/leadPhone");
+const { claimInquiryLead, leadForNewRequest } = require("../../helpers/leadPhone");
 
 // Website plan page (merasoftware/src/app/plans/[plan]) → "Get this plan" by someone who is not a
 // portal client. Clients buy in the portal; everyone else asks, and the team calls them back.
@@ -91,6 +91,14 @@ async function addToInquiry({ contact, note, createdBy, reservationUserId }) {
   return lead.save();
 }
 
+// A Dead or Wrong person asks again: that lead takes the request instead of a second lead (helpers/leadPhone.js).
+async function addToReturning({ contact, note, createdBy }) {
+  const lead = await leadForNewRequest(contact.phone, contact);
+  if (!lead) return null;
+  lead.followUps.push({ note, badge: lead.status, createdBy: createdBy || undefined });
+  return lead.save();
+}
+
 // The two mails' data (helpers/emailDefinitions.js plan.request.*): who asked, which plan, what choice.
 async function notify({ lead, plan, quote, contact }) {
   const request = { lead, planName: plan.serviceName, contact, ...choiceText(plan, quote) };
@@ -129,6 +137,11 @@ const memberPlanRequest = respond(async (req) => {
   let lead = await leadModel.findOne({ reservationUserId: user._id });
   if (lead?.deletedAt || lead?.convertedToUserId) fail("Your earlier request is with our team. Please contact us directly.", 409);
   let created = false;
+  const returning = await addToReturning({ contact, note, createdBy: user._id });
+  if (returning) {
+    await notify({ lead: returning, plan, quote, contact });
+    return { created: false, repeated: false };
+  }
   if (!lead) {
     const inquiry = await addToInquiry({ contact, note, createdBy: user._id, reservationUserId: user._id });
     if (inquiry) {
@@ -167,6 +180,11 @@ const integrationPlanRequest = respond(async (req) => {
   const inquiry = await addToInquiry({ contact, note });
   if (inquiry) {
     await notify({ lead: inquiry, plan, quote, contact });
+    return { created: false, repeated: false };
+  }
+  const returning = await addToReturning({ contact, note });
+  if (returning) {
+    await notify({ lead: returning, plan, quote, contact });
     return { created: false, repeated: false };
   }
   const open = await leadModel

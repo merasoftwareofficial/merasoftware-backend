@@ -299,6 +299,7 @@ async function decideChannels(id, actor, decision, access) {
   return decideEmail(id, actor, decision, access);
 }
 async function decide(id, actor, decision, access = {}) {
+  if (decision.choice === 'send') await require('./leadContactBlock').assertDraftMayGo(id);
   const result = await decideChannels(id, actor, decision, access);
   // Send message on a lead's page leaves a line on its timeline. It can never change the send's result.
   if (decision.choice === 'send' && ['sent', 'queued'].includes(result.status)) {

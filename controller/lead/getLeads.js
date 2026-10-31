@@ -1,4 +1,5 @@
 const leadModel = require("../../models/leadModel");
+const { LABELS, contactBlocks, reasonFor } = require("../../helpers/leadContactBlock");
 
 const getLeadsController = async (req, res) => {
   try {
@@ -12,13 +13,18 @@ const getLeadsController = async (req, res) => {
 
     const leads = await leadModel
       .find({ deletedAt: null })
-      .select("name phone email source status proposalSentAt convertedToUserId createdAt updatedAt")
+      .select("name phone email source status proposalSentAt convertedToUserId requestedByUserId clientBehaviour createdAt updatedAt")
       .sort({ updatedAt: -1 })
       .lean();
 
+    const blocks = await contactBlocks();
+
     return res.json({
       message: "Leads fetched successfully",
-      data: leads,
+      data: leads.map((lead) => {
+        const reason = reasonFor(lead, blocks);
+        return reason ? { ...lead, contactBlock: { reason, label: LABELS[reason] } } : lead;
+      }),
       success: true,
       error: false,
     });

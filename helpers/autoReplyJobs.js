@@ -3,7 +3,7 @@ const Lead = require('../models/leadModel');
 const { AUTO_REPLY_EVENT, FinalMessage, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
 const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
-const { findAccountsByPhone, findLeadsByPhone, isKnownPerson } = require('./leadPhone');
+const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByPhone, isKnownPerson } = require('./leadPhone');
 const { replyText } = require('./autoReplyContent');
 const { enqueueWhatsApp } = require('./whatsappQueue');
 const { ensureWonLead, isClient } = require('./wonLead');
@@ -47,12 +47,6 @@ async function addRemark(lead, row, { status = lead.status, cameBackFrom } = {})
   await Inbox.updateOne({ _id: row._id }, { $set: { matchedLeadId: lead._id } });
 }
 
-/** A lead that came back ends its final message: no Dead later, and no decision waiting on the old reply. A message still in the queue is cancelled by finalMessageJobs.js. */
-async function endFinalMessage(leadId) {
-  await FinalMessage.updateMany({ leadId, status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
-  await FinalMessage.updateMany({ leadId, status: 'replied', decision: null }, { $set: { decision: 'interested', decidedAt: new Date() } });
-}
-
 async function reopen(lead, row, cameBackFrom) {
   await endFinalMessage(lead._id);
   // A trashed Matured lead stays Matured: it belongs to a client.
@@ -78,6 +72,7 @@ async function recordKnownPerson(row, accounts) {
   const client = accounts.find(isClient);
   if (client) {
     await addRemark(await ensureWonLead(client), row);
+    await clearClientDead({ convertedToUserId: client._id });
     return 'updated';
   }
   const member = accounts.find(user => !user.deletedAt && !user.isGuest && user.roles?.includes('member'));

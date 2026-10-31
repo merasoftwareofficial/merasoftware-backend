@@ -1,5 +1,5 @@
 const leadModel = require("../models/leadModel");
-const { WON } = require("./leadStatuses");
+const { WON, behaviourFromStatus } = require("./leadStatuses");
 const { normalizePhone } = require("./whatsappQueue");
 
 // Every client has a Won lead, so a campaign to Won leads reaches all of them.
@@ -36,6 +36,7 @@ async function ensureWonLead(user, createdBy) {
   const open = await findOpenLeadFor(user);
   if (!open) return createWonLead(user, createdBy);
   open.convertedToUserId = user._id;
+  open.clientBehaviour = behaviourFromStatus(open.status);
   open.status = WON;
   open.name = open.name || user.name || user.email; // an Inquiry or Negative lead may have none, and Won needs one
   return open.save();

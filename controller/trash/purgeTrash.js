@@ -1,5 +1,6 @@
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
+const offerTargetModel = require("../../models/offerTargetModel");
 
 // Permanently delete a single trashed record ("Delete Forever"). Only records already
 // in Trash (deletedAt set) can be purged — this is irreversible. type = "client" | "lead".
@@ -25,6 +26,7 @@ const purgeTrashController = async (req, res) => {
     }
 
     await model.findByIdAndDelete(id);
+    if (type === "lead") await offerTargetModel.deleteMany({ leadId: id });
 
     return res.json({ message: "Permanently deleted", success: true, error: false });
   } catch (error) {
