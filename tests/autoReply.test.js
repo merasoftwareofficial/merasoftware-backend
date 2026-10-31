@@ -5,7 +5,7 @@ const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-const { Inbox, Lock, Queue, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
+const { FinalMessage, Inbox, Lock, Queue, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { DEFAULT_AD_MESSAGE, RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { RECOMMENDED } = require('../whatsapp/src/settings.js');
 const { createSender } = require('../whatsapp/src/sender.js');
@@ -188,7 +188,7 @@ test('turning a switch back On never acts on what came while it was Off', async 
   assert.equal(await Queue.countDocuments(), 0);
 });
 
-test('the same person again: no new lead, no second reply, only the last-message time', async () => {
+test('the same person again: no new lead, a remark, and no second reply while the first still waits', async () => {
   await setSwitches();
   const first = new Date('2026-10-30T10:00:00Z'), second = new Date('2026-10-30T11:00:00Z');
   await Inbox.create(row({ sentAt: first }));
@@ -200,7 +200,20 @@ test('the same person again: no new lead, no second reply, only the last-message
   const lead = await Lead.findOne().lean();
   assert.deepEqual(lead.inquiry.firstAt, first);
   assert.deepEqual(lead.inquiry.lastAt, second);
-  assert.equal((await Inbox.findOne({ sentAt: second }).lean()).outcome, 'known-person');
+  assert.equal(lead.followUps.length, 1);
+  assert.equal((await Inbox.findOne({ sentAt: second }).lean()).outcome, 'updated-only');
+});
+
+test('the same person again after the first reply went: another remark and another reply', async () => {
+  await setSwitches();
+  await Inbox.create(row());
+  await processInbox();
+  await Queue.updateMany({}, { $set: { status: 'sent' } });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal(await Lead.countDocuments(), 1);
+  assert.equal(await Queue.countDocuments(), 2);
+  assert.equal((await Lead.findOne().lean()).followUps.length, 1);
 });
 
 test('two messages from one person in the same run: still one lead and one reply', async () => {
@@ -211,7 +224,7 @@ test('two messages from one person in the same run: still one lead and one reply
   assert.equal(await Queue.countDocuments(), 1);
 });
 
-test('with Add to leads off, the same person still gets only one reply', async () => {
+test('with Add to leads off, a second message adds no reply while the first still waits', async () => {
   await setSwitches({ addLeads: false });
   await Inbox.create(row());
   await processInbox();
@@ -221,32 +234,217 @@ test('with Add to leads off, the same person still gets only one reply', async (
   assert.equal(await Lead.countDocuments(), 0);
 });
 
-test('already known people get no lead and no reply, and their lead is untouched', async () => {
+const freshStart = () => Promise.all([Inbox.deleteMany({}), Lead.deleteMany({}), Queue.deleteMany({}), FinalMessage.deleteMany({}), userModel.deleteOne({ email: 'known@example.test' })]);
+
+test('every stage: one remark and one reply, on the same lead, with the stage as the plan says', async () => {
   await setSwitches();
-  const cases = [
-    { lead: { name: 'C', phone: '9876543210', status: 'Contacted' } },
-    { lead: { name: 'N', phone: '+91 98765 43210', status: 'Negative' } },
-    { lead: { name: 'W', phone: '919876543210', status: 'Won' } },
-    { lead: { name: 'T', phone: '9876543210', deletedAt: new Date() } },
-    { user: { name: 'U', email: 'known@example.test', phone: '9876543210', roles: ['customer'] } },
-  ];
-  for (const { lead, user } of cases) {
-    await Promise.all([Inbox.deleteMany({}), Lead.deleteMany({}), Queue.deleteMany({}), userModel.deleteOne({ email: 'known@example.test' })]);
-    if (lead) await Lead.create(lead);
-    if (user) await userModel.create(user);
+  const proposal = new Date('2026-10-01T00:00:00Z');
+  for (const [lead, status, cameBack] of [
+    [{ name: 'I', phone: '+919876543210', status: 'Inquiry', inquiry: { message: 'old' } }, 'Inquiry'],
+    [{ name: 'C', phone: '9876543210', status: 'Contacted' }, 'Contacted'],
+    [{ name: 'P', phone: '919876543210', status: 'Positive' }, 'Positive'],
+    [{ name: 'S', phone: '9876543210', status: 'Contacted', proposalSentAt: proposal }, 'Contacted'],
+    [{ name: 'N', phone: '+91 98765 43210', status: 'Negative' }, 'Contacted', 'Negative'],
+    [{ phone: '9876543210', status: 'Negative' }, 'Inquiry', 'Negative'],
+    [{ name: 'D', phone: '9876543210', status: 'Dead' }, 'Contacted', 'Dead'],
+    [{ phone: '9876543210', status: 'Dead' }, 'Inquiry', 'Dead'],
+    [{ name: 'T', phone: '9876543210', status: 'Positive', deletedAt: new Date() }, 'Contacted', 'Trash'],
+    [{ phone: '9876543210', status: 'Negative', deletedAt: new Date() }, 'Inquiry', 'Trash'],
+  ]) {
+    await freshStart();
+    await Lead.create({ ...lead, deletedBy: lead.deletedAt ? admin._id : null });
+    const before = await Lead.findOne().lean();
     await Inbox.create(row());
     await processInbox();
-    const label = JSON.stringify(lead || user);
-    assert.equal((await Inbox.findOne().lean()).outcome, 'known-person', label);
-    assert.equal(await Queue.countDocuments(), 0, label);
-    assert.equal(await Lead.countDocuments(), lead ? 1 : 0, label);
-    if (lead) {
-      const after = await Lead.findOne().lean();
-      assert.equal(after.status, lead.status || 'Contacted', label);
-      assert.equal(after.inquiry, undefined, label);
-    }
+    const label = JSON.stringify(lead);
+    const after = await Lead.findOne().lean();
+    assert.equal(await Lead.countDocuments(), 1, label);
+    assert.equal(await Queue.countDocuments(), 1, label);
+    assert.equal(after.status, status, label);
+    assert.equal(after.deletedAt, null, label);
+    assert.equal(after.deletedBy, null, label);
+    assert.equal(after.followUps.length, 1, label);
+    assert.equal(after.followUps[0].badge, status, label);
+    assert.match(after.followUps[0].note, /^New WhatsApp ad message on .*Hello/, label);
+    assert.equal(after.followUps[0].note.includes(`Came back from ${cameBack}.`), !!cameBack, label);
+    assert.ok(after.updatedAt > before.updatedAt, `${label} moves up the Leads list`);
+    assert.deepEqual(after.proposalSentAt, before.proposalSentAt, label);
+    if (status === 'Inquiry') assert.ok(after.inquiry.lastAt, label);
+    else assert.equal(after.inquiry, undefined, label);
+    const inbox = await Inbox.findOne().lean();
+    assert.equal(inbox.outcome, 'updated-and-reply', label);
+    assert.equal(inbox.leadId, undefined, `${label} is not counted as a new lead`);
+    assert.equal(String(inbox.matchedLeadId), String(after._id), label);
+  }
+});
+
+test('a client: the remark goes on their Matured lead, made if missing; a Negative lead on their number is not reopened', async () => {
+  await setSwitches();
+  const client = { name: 'U', email: 'known@example.test', phone: '9876543210', roles: ['customer'] };
+  await freshStart();
+  const user = await userModel.create(client);
+  await Inbox.create(row());
+  await processInbox();
+  let lead = await Lead.findOne().lean();
+  assert.equal(lead.status, 'Won');
+  assert.equal(String(lead.convertedToUserId), String(user._id));
+  assert.equal(lead.followUps.length, 1);
+  assert.equal(await Queue.countDocuments(), 1);
+
+  await freshStart();
+  const again = await userModel.create(client);
+  const won = await Lead.create({ name: 'U', phone: '9876543210', status: 'Won', convertedToUserId: again._id });
+  const project = await Lead.create({ name: 'Own request', phone: '9876543210', status: 'Negative', requestedByUserId: again._id });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal((await Lead.findById(won._id).lean()).followUps.length, 1);
+  lead = await Lead.findById(project._id).lean();
+  assert.equal(lead.status, 'Negative');
+  assert.equal(lead.followUps.length, 0);
+  assert.equal(await Queue.countDocuments(), 1);
+  await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('a website member with no lead gets the account\'s lead; with a lead, that one is used', async () => {
+  await setSwitches();
+  await freshStart();
+  const user = await userModel.create({ name: 'Member', email: 'known@example.test', phone: '9876543210', roles: ['member'] });
+  await Inbox.create(row());
+  await processInbox();
+  const lead = await Lead.findOne().lean();
+  assert.equal(lead.name, 'Member');
+  assert.equal(lead.status, 'Contacted');
+  assert.equal(String(lead.reservationUserId), String(user._id));
+  assert.equal(lead.followUps.length, 1);
+  const inbox = await Inbox.findOne().lean();
+  assert.equal(inbox.outcome, 'lead-and-reply');
+  assert.equal(String(inbox.leadId), String(lead._id));
+  assert.equal(await Queue.countDocuments(), 1);
+  await Queue.updateMany({}, { $set: { status: 'sent' } });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal(await Lead.countDocuments(), 1);
+  assert.equal((await Lead.findOne().lean()).followUps.length, 2);
+  assert.equal(await Queue.countDocuments(), 2);
+  await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('a team number: nothing changes and nothing is sent, even with a lead on it', async () => {
+  await setSwitches();
+  for (const role of ['admin', 'manager', 'developer']) {
+    await freshStart();
+    await userModel.create({ name: 'Team', email: 'known@example.test', phone: '9876543210', roles: [role] });
+    await Lead.create({ name: 'L', phone: '9876543210', status: 'Dead' });
+    await Inbox.create(row());
+    await processInbox();
+    const lead = await Lead.findOne().lean();
+    assert.equal(lead.status, 'Dead', role);
+    assert.equal(lead.followUps.length, 0, role);
+    assert.equal(await Queue.countDocuments(), 0, role);
+    assert.equal((await Inbox.findOne().lean()).outcome, 'team-number', role);
   }
   await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('a trashed client: the account stays in Trash, a lead is made and the reply goes', async () => {
+  await setSwitches();
+  await freshStart();
+  const user = await userModel.create({ name: 'Gone', email: 'known@example.test', phone: '9876543210', roles: ['customer'], deletedAt: new Date(), isActive: false });
+  await Inbox.create(row());
+  await processInbox();
+  const after = await userModel.findById(user._id).lean();
+  assert.ok(after.deletedAt);
+  assert.equal(after.isActive, false);
+  assert.equal((await Lead.findOne().lean()).status, 'Inquiry');
+  assert.equal(await Queue.countDocuments(), 1);
+  await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('several leads on one number: only one gets the remark, and an active lead keeps a Dead one closed', async () => {
+  await setSwitches();
+  await freshStart();
+  const dead = await Lead.create({ name: 'Dead', phone: '9876543210', status: 'Dead' });
+  const trashed = await Lead.create({ name: 'Trash', phone: '9876543210', status: 'Contacted', deletedAt: new Date() });
+  const active = await Lead.create({ name: 'Active', phone: '9876543210', status: 'Positive' });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal((await Lead.findById(active._id).lean()).followUps.length, 1);
+  assert.equal((await Lead.findById(dead._id).lean()).status, 'Dead');
+  assert.equal((await Lead.findById(dead._id).lean()).followUps.length, 0);
+  assert.ok((await Lead.findById(trashed._id).lean()).deletedAt);
+
+  await freshStart();
+  const closed = await Lead.create({ name: 'Dead', phone: '9876543210', status: 'Dead' });
+  const stillTrashed = await Lead.create({ name: 'Trash', phone: '9876543210', status: 'Contacted', deletedAt: new Date() });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal((await Lead.findById(closed._id).lean()).status, 'Contacted');
+  assert.ok((await Lead.findById(stillTrashed._id).lean()).deletedAt, 'a live lead comes back before a trashed one');
+});
+
+test('the switches on a known person: Add to leads Off leaves the lead alone, Send replies Off sends nothing', async () => {
+  for (const [autoReply, outcome, status, remarks, replies] of [
+    [{ addLeads: false }, 'reply-only', 'Dead', 0, 1],
+    [{ sendReplies: false }, 'updated-only', 'Contacted', 1, 0],
+    [{ addLeads: false, sendReplies: false }, 'known-person', 'Dead', 0, 0],
+    [{ recognise: false }, 'switched-off', 'Dead', 0, 0],
+  ]) {
+    await freshStart();
+    await setSwitches(autoReply);
+    await Lead.create({ name: 'D', phone: '9876543210', status: 'Dead' });
+    await Inbox.create(row());
+    await processInbox();
+    const label = JSON.stringify(autoReply);
+    const lead = await Lead.findOne().lean();
+    assert.equal(lead.status, status, label);
+    assert.equal(lead.followUps.length, remarks, label);
+    assert.equal(await Queue.countDocuments(), replies, label);
+    assert.equal((await Inbox.findOne().lean()).outcome, outcome, label);
+  }
+});
+
+test('a job that stopped halfway on a known person: one remark, one reply', async () => {
+  await setSwitches();
+  await freshStart();
+  await Lead.create({ name: 'N', phone: '9876543210', status: 'Negative' });
+  const message = await Inbox.create(row());
+  await processInbox();
+  await Inbox.updateOne({ _id: message._id }, { $set: { status: 'new' }, $unset: { outcome: 1 } });
+  await processInbox();
+  const lead = await Lead.findOne().lean();
+  assert.equal(lead.status, 'Contacted');
+  assert.equal(lead.followUps.length, 1);
+  assert.equal(await Queue.countDocuments(), 1);
+});
+
+test('a message from our side stops the reply to a known person, not the remark', async () => {
+  await setSwitches();
+  await freshStart();
+  await Lead.create({ name: 'C', phone: '9876543210', status: 'Contacted' });
+  await Inbox.create(row({ ourSideReplied: true }));
+  await processInbox();
+  assert.equal((await Lead.findOne().lean()).followUps.length, 1);
+  assert.equal(await Queue.countDocuments(), 0);
+});
+
+test('a lead that came back ends its final message: no Dead, no decision, and no second final message', async () => {
+  await setSwitches();
+  for (const [from, finalStatus, ended, decision] of [
+    ['Negative', 'waiting', 'stopped', undefined],
+    ['Dead', 'dead', 'stopped', undefined],
+    ['Negative', 'replied', 'replied', 'interested'],
+  ]) {
+    await freshStart();
+    const lead = await Lead.create({ name: 'F', phone: '9876543210', status: from });
+    await FinalMessage.create({ leadId: lead._id, phone: PHONE, status: finalStatus, hours: 24, sentAt: new Date() });
+    await Inbox.create(row());
+    await processInbox();
+    const label = `${from} ${finalStatus}`;
+    const final = await FinalMessage.findOne().lean();
+    assert.equal(final.status, ended, label);
+    assert.equal(final.decision, decision, label);
+    assert.equal((await Lead.findById(lead._id).lean()).status, 'Contacted', label);
+  }
 });
 
 test('a row with no number makes nothing and stays for the admin', async () => {

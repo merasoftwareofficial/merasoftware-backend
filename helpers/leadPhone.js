@@ -24,6 +24,14 @@ async function isKnownPerson(phone) {
   return users.some((user) => phoneKey(user.phone) === wanted);
 }
 
+/** The accounts holding this number, including trashed ones. */
+async function findAccountsByPhone(phone) {
+  const wanted = phoneKey(phone);
+  if (!wanted) return [];
+  const users = await userModel.find({ phone: { $nin: ["", null] } }).select("name email phone roles isGuest deletedAt").lean();
+  return users.filter((user) => phoneKey(user.phone) === wanted);
+}
+
 /**
  * A person who wrote on WhatsApp now gives their details elsewhere: their Inquiry lead becomes the real one
  * instead of a second lead. Returns that lead, or null when they have none.
@@ -35,4 +43,4 @@ async function claimInquiryLead(phone, { name, email, ...fields }, { session } =
   return lead.save({ session });
 }
 
-module.exports = { findLeadsByPhone, isKnownPerson, claimInquiryLead };
+module.exports = { findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead };

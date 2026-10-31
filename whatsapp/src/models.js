@@ -98,7 +98,8 @@ const inboxSchema = new mongoose.Schema({
   // Decided once and kept, so a job that stops halfway can't mistake the lead it just made for an old contact.
   personKnown: Boolean,
   ourSideReplied: Boolean, // a message went to this person from our side before the auto reply's turn
-  leadId: mongoose.Schema.Types.ObjectId,
+  leadId: mongoose.Schema.Types.ObjectId, // the lead this message created
+  matchedLeadId: mongoose.Schema.Types.ObjectId, // the lead that already existed and got this message's remark
   replyText: String, // exactly what was queued, so a retry after a crash uses the same words
   replyStatus: String, // the queue row's status, copied because queue rows expire after 30 days
 }, { timestamps: true, collection: 'whatsapp_inbox' });

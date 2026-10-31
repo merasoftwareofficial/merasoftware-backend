@@ -52,6 +52,10 @@ const followUpSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "user",
   },
+  // The WhatsApp ad message this line records (helpers/autoReplyJobs.js), so a retry can't add it twice.
+  inboxId: {
+    type: mongoose.Schema.Types.ObjectId,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

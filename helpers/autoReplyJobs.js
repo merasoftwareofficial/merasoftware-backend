@@ -1,11 +1,12 @@
 const crypto = require('node:crypto');
 const Lead = require('../models/leadModel');
-const { AUTO_REPLY_EVENT, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
+const { AUTO_REPLY_EVENT, FinalMessage, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
 const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
-const { INQUIRY } = require('./leadStatuses');
-const { findLeadsByPhone, isKnownPerson } = require('./leadPhone');
+const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
+const { findAccountsByPhone, findLeadsByPhone, isKnownPerson } = require('./leadPhone');
 const { replyText } = require('./autoReplyContent');
 const { enqueueWhatsApp } = require('./whatsappQueue');
+const { ensureWonLead, isClient } = require('./wonLead');
 
 // Every minute (index.js): turns recognised messages into a lead and a queued reply, as the admin's switches say.
 // Never sends: the reply goes into the queue and waits its turn like every other message (whatsapp/src/sender.js).
@@ -15,6 +16,8 @@ const BATCH = 50;
 const SOURCE = 'WhatsApp ad';
 const OFF_REASON = 'Not sent: Auto Reply replies were turned off.';
 const UNSETTLED = ['pending', 'sending', 'failed']; // a failed reply can still be sent again by hand from Queue History
+const TEAM_ROLES = ['admin', 'manager', 'developer'];
+const IN_TRANSIT = ['pending', 'sending'];
 
 const readSwitches = async () => {
   const state = await State.findById(STATE_ID).select('autoReply').lean();
@@ -28,10 +31,92 @@ async function cancelWaitingReplies() {
   return modifiedCount;
 }
 
-/** The same person again: the Inquiry notes it. Any other lead is left exactly as it is. */
-async function noteRepeat(row) {
-  const [lead] = await findLeadsByPhone(row.phone, { status: INQUIRY, deletedAt: null });
-  if (lead) await Lead.updateOne({ _id: lead._id }, { $set: { 'inquiry.lastAt': row.sentAt } });
+const inquiryDetails = row => ({ inboxId: row._id, message: row.text, firstAt: row.sentAt, lastAt: row.sentAt, profileName: row.profileName || '' });
+const dayLabel = date => new Date(date).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
+
+/** One remark per message, in one write with the lead's change, so a retry after a crash can't add it twice. */
+async function addRemark(lead, row, { status = lead.status, cameBackFrom } = {}) {
+  const note = `New WhatsApp ad message on ${dayLabel(row.sentAt)}: ${row.text}${cameBackFrom ? `\nCame back from ${cameBackFrom}.` : ''}`;
+  const changes = { status };
+  if (lead.deletedAt) Object.assign(changes, { deletedAt: null, deletedBy: null });
+  if (lead.inquiry) changes['inquiry.lastAt'] = row.sentAt;
+  else if (status === INQUIRY) changes.inquiry = inquiryDetails(row);
+  const date = new Date();
+  await Lead.updateOne({ _id: lead._id, 'followUps.inboxId': { $ne: row._id } },
+    { $set: changes, $push: { followUps: { inboxId: row._id, note, badge: status, date, createdAt: date } } });
+  await Inbox.updateOne({ _id: row._id }, { $set: { matchedLeadId: lead._id } });
+}
+
+/** A lead that came back ends its final message: no Dead later, and no decision waiting on the old reply. A message still in the queue is cancelled by finalMessageJobs.js. */
+async function endFinalMessage(leadId) {
+  await FinalMessage.updateMany({ leadId, status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
+  await FinalMessage.updateMany({ leadId, status: 'replied', decision: null }, { $set: { decision: 'interested', decidedAt: new Date() } });
+}
+
+async function reopen(lead, row, cameBackFrom) {
+  await endFinalMessage(lead._id);
+  // A trashed Matured lead stays Matured: it belongs to a client.
+  const status = lead.convertedToUserId ? lead.status : lead.name ? CONTACTED : INQUIRY;
+  await addRemark(lead, row, { status, cameBackFrom });
+}
+
+/** A website member with no lead yet: the account's lead, as an offer reservation or plan request makes it. */
+async function makeMemberLead(user, row) {
+  try {
+    return await Lead.create({
+      name: user.name || user.email, email: user.email, phone: user.phone, source: SOURCE, reservationUserId: user._id,
+      inquiry: inquiryDetails(row),
+    });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    return Lead.findOne({ reservationUserId: user._id });
+  }
+}
+
+/** Records the message on this person's one lead. Returns 'created' when a new lead was made, else 'updated'. */
+async function recordKnownPerson(row, accounts) {
+  const client = accounts.find(isClient);
+  if (client) {
+    await addRemark(await ensureWonLead(client), row);
+    return 'updated';
+  }
+  const member = accounts.find(user => !user.deletedAt && !user.isGuest && user.roles?.includes('member'));
+  const linked = member ? await Lead.findOne({ reservationUserId: member._id }) : null;
+  const byPhone = await findLeadsByPhone(row.phone);
+  const leads = linked && !byPhone.some(lead => String(lead._id) === String(linked._id)) ? [linked, ...byPhone] : byPhone;
+  const live = leads.filter(lead => !lead.deletedAt);
+  const active = live.find(lead => ![NEGATIVE, DEAD].includes(lead.status));
+  if (active) {
+    await addRemark(active, row);
+    return 'updated';
+  }
+  if (live.length) {
+    await reopen(live[0], row, live[0].status);
+    return 'updated';
+  }
+  if (leads.length) {
+    await reopen(leads[0], row, 'Trash');
+    return 'updated';
+  }
+  if (member) {
+    const lead = await makeMemberLead(member, row);
+    await addRemark(lead, row);
+    await Inbox.updateOne({ _id: row._id }, { $set: { leadId: lead._id }, $unset: { matchedLeadId: 1 } });
+    return 'created';
+  }
+  await makeLead(row); // only a trashed client or a guest holds this number: their account stays as it is
+  return 'created';
+}
+
+/** Someone the business already knows wrote from an ad: their lead notes it and they get the reply, whatever the stage. */
+async function processKnownPerson(row, switches, rule) {
+  const accounts = await findAccountsByPhone(row.phone);
+  if (accounts.some(user => !user.deletedAt && !user.isGuest && user.roles?.some(role => TEAM_ROLES.includes(role)))) return 'team-number';
+  const recorded = switches.addLeads ? await recordKnownPerson(row, accounts) : null;
+  const replied = switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
+  if (recorded === 'created') return replied ? 'lead-and-reply' : 'lead-only';
+  if (recorded) return replied ? 'updated-and-reply' : 'updated-only';
+  return replied ? 'reply-only' : 'known-person';
 }
 
 async function makeLead(row) {
@@ -39,15 +124,16 @@ async function makeLead(row) {
   const existing = await Lead.findOne({ 'inquiry.inboxId': row._id }).select('_id').lean();
   const lead = existing || await Lead.create({
     phone: `+${row.phone}`, status: INQUIRY, source: SOURCE,
-    inquiry: { inboxId: row._id, message: row.text, firstAt: row.sentAt, lastAt: row.sentAt, profileName: row.profileName || '' },
+    inquiry: inquiryDetails(row),
   });
   await Inbox.updateOne({ _id: row._id }, { $set: { leadId: lead._id } });
   return lead._id;
 }
 
 async function queueReply(row, rule) {
-  const replyAlreadyGone = await Inbox.exists({ _id: { $ne: row._id }, phone: row.phone, replyText: { $exists: true } });
-  if (replyAlreadyGone) return false;
+  // One reply at a time: a second message while the first reply still waits adds no second one.
+  const replyWaiting = await Queue.exists({ _id: { $ne: row._id }, to: row.phone, event: AUTO_REPLY_EVENT, status: { $in: IN_TRANSIT } });
+  if (replyWaiting) return false;
   const text = row.replyText || replyText(rule);
   // Saved first, so a crash retries with the same words and our own message can find it.
   await Inbox.updateOne({ _id: row._id }, { $set: { replyText: text, replyStatus: 'pending' } });
@@ -64,7 +150,7 @@ async function processRow(row, switches, rule) {
     known = await isKnownPerson(row.phone);
     await Inbox.updateOne({ _id: row._id }, { $set: { personKnown: known } });
   }
-  if (known) { await noteRepeat(row); return 'known-person'; }
+  if (known) return processKnownPerson(row, switches, rule);
   const lead = switches.addLeads ? await makeLead(row) : null;
   // A message from our side stops the reply, not the lead: the person still wrote in.
   const replied = switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
