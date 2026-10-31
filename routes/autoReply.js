@@ -2,7 +2,8 @@ const express = require('express');
 const communicationAdmin = require('../middleware/communicationAdmin');
 const { FinalMessage, Inbox, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
 const Lead = require('../models/leadModel');
-const { MAX_HOURS, MIN_HOURS, readHours } = require('../helpers/finalMessage');
+const { NEGATIVE } = require('../helpers/leadStatuses');
+const { MAX_HOURS, MIN_HOURS, decideReply, readHours, readIgnored, saveIgnored } = require('../helpers/finalMessage');
 const { DEFAULT_AD_MESSAGE, MIN_AD_MESSAGE, RULE_KEY, cleanText } = require('../whatsapp/src/autoReplyRules.js');
 const { workerAlive } = require('../helpers/whatsappReadiness');
 const { encodeReply, replyDoc } = require('../helpers/autoReplyContent');
@@ -73,21 +74,27 @@ router.post('/reply', handle(async req => {
 
 // The Final Message box. Only the wait and the results live here: the message is an Email Templates action and is sent from the portal's popup.
 router.get('/final-message', handle(async () => {
-  const [hours, counts, replied] = await Promise.all([
+  const [hours, ignoredReplies, counts, replied] = await Promise.all([
     readHours(),
+    readIgnored(),
     FinalMessage.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-    FinalMessage.find({ status: 'replied' }).sort({ replySeenAt: -1 }).limit(RECENT_ROWS).select('leadId phone lastReplyAt lastReplyText').lean(),
+    FinalMessage.find({ status: 'replied', decision: null }).sort({ replySeenAt: -1 }).select('leadId phone lastReplyAt lastReplyText').lean(),
   ]);
-  const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) } }).select('name status').lean();
+  const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) }, deletedAt: null }).select('name status').lean();
   return {
-    hours, minHours: MIN_HOURS, maxHours: MAX_HOURS,
+    hours, minHours: MIN_HOURS, maxHours: MAX_HOURS, ignoredReplies,
     counts: Object.fromEntries(counts.map(row => [row._id, row.count])),
-    replies: replied.map(row => {
+    // A lead the admin has already moved by hand needs no decision here.
+    needsDecision: replied.flatMap(row => {
       const lead = leads.find(item => String(item._id) === String(row.leadId));
-      return { ...row, name: lead?.name || '', leadStatus: lead?.status || '' };
+      return lead?.status === NEGATIVE ? [{ ...row, name: lead.name || '' }] : [];
     }),
   };
 }));
+
+router.post('/final-message/ignored', handle(async req => ({ ignoredReplies: await saveIgnored(req.body?.ignoredReplies) })));
+
+router.post('/final-message/decision', handle(req => decideReply(req.body?.id, req.body?.choice, req.userId)));
 
 // Applies to messages prepared from now on. A message already out keeps the wait it promised.
 router.post('/final-message/time', handle(async req => {

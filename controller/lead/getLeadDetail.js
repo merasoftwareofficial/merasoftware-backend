@@ -28,7 +28,7 @@ const getLeadDetailController = async (req, res) => {
       });
     }
 
-    lead.finalMessage = await FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt").lean();
+    lead.finalMessage = await FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision").lean();
     lead.clientAvailable = Boolean(lead.convertedToUserId && await userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }));
 
     return res.json({

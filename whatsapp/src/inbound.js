@@ -1,5 +1,6 @@
 import { isLidUser, isPnUser, jidDecode, normalizeMessageContent } from '@whiskeysockets/baileys';
 import { matchesAdMessage } from './autoReplyRules.js';
+import { DEFAULT_IGNORED_REPLIES, isIgnoredReply } from './finalMessageReplies.js';
 import { AUTO_REPLY_EVENT, FinalMessage as FinalMessageModel, OUR_SIDE_REPLIED, STATE_ID, finishedExpiry } from './models.js';
 import { effectiveSettings } from './settings.js';
 
@@ -61,11 +62,13 @@ export async function chatPhone(key, socket) {
 const isCandidate = message => !!message.key && !message.key.fromMe && !!message.message
   && (isPnUser(message.key.remoteJid) || isLidUser(message.key.remoteJid)) && !!incomingText(message);
 
-// Anything a person sends in a normal chat counts as a reply to the final message, a reaction too. A delete doesn't.
+// WhatsApp's own housekeeping arrives as messages too; the person wrote nothing.
+const NOT_WRITTEN = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'keepInChatMessage', 'pollUpdateMessage']);
+// What a person sends in a normal chat. Whether it counts as a reply to the final message is decided in noteFinalMessageReply.
 const isPersonReply = message => {
   if (!message.key || message.key.fromMe || !(isPnUser(message.key.remoteJid) || isLidUser(message.key.remoteJid))) return false;
   const content = normalizeMessageContent(message.message);
-  return !!content && !content.protocolMessage;
+  return !!content && !content.protocolMessage && Object.keys(content).some(key => !NOT_WRITTEN.has(key));
 };
 const REPLY_KINDS = { imageMessage: 'Photo', videoMessage: 'Video', audioMessage: 'Voice message', documentMessage: 'File', stickerMessage: 'Sticker', contactMessage: 'Contact', locationMessage: 'Location' };
 function replyLabel(message) {
@@ -91,11 +94,17 @@ export function createInbound({ Inbox, Queue, Rule, State, FinalMessage = FinalM
   async function noteFinalMessageReply(message, socket) {
     const phone = await senderPhone(message.key, socket).catch(() => null);
     if (!phone) return;
-    const at = messageTime(message) || now();
-    // The newest reply wins: an old message arriving after a restart can't hide a newer one, and the job compares its time with the send.
     // Only while a reply is being waited for: once it came, or the message didn't go, this person's chat is left alone.
-    await FinalMessage.updateMany({ phone, status: { $in: ['review', 'queued', 'waiting', 'dead'] }, $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: at } }] },
-      { $set: { lastReplyAt: at, lastReplyText: replyLabel(message).slice(0, MAX_SAVED_TEXT) } });
+    const waited = { phone, status: { $in: ['review', 'queued', 'waiting', 'dead'] } };
+    if (!await FinalMessage.exists(waited)) return;
+    const at = messageTime(message) || now();
+    const text = incomingText(message);
+    const state = await State.findById(STATE_ID).select('finalMessage').lean();
+    const ignored = !!normalizeMessageContent(message.message)?.reactionMessage || (!!text && isIgnoredReply(text, state?.finalMessage?.ignoredReplies ?? DEFAULT_IGNORED_REPLIES));
+    // Kept apart: an "ok" after a real reply must not hide it. The newest of each wins, so an old message arriving after a restart can't hide a newer one, and the job compares its time with the send.
+    const [time, label] = ignored ? ['lastIgnoredAt', 'lastIgnoredText'] : ['lastReplyAt', 'lastReplyText'];
+    await FinalMessage.updateMany({ ...waited, $or: [{ [time]: null }, { [time]: { $lt: at } }] },
+      { $set: { [time]: at, [label]: replyLabel(message).slice(0, MAX_SAVED_TEXT) } });
   }
 
   async function ourSideReplied(message, socket) {

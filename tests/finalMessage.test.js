@@ -186,10 +186,128 @@ test('no reply by the deadline: Dead, and out of every Broadcast group', async (
   assert.ok(notes.some(note => note.includes('Moved to Dead')));
 });
 
-test('any reply keeps the lead Negative, shown to the admin: text, voice, photo and reaction', async () => {
+test('listed words, emojis and reactions are not replies: the wait goes on to Dead, and the timeline shows them', async () => {
+  const messages = [
+    ...['ok', 'OK.', 'Ok!!', ' thik  a ', 'thik hai', 'Thik Hai Ji 🙏', 'kardo ji', 'krdo.', 'karde', 'KARDO', 'ok 👍', '👍', '🙏🙏', '👍🏻', '❤️', '...'].map(conversation => ({ conversation })),
+    { extendedTextMessage: { text: 'thik hai' } }, { reactionMessage: { text: '👍', key: { id: 'x' } } },
+  ];
+  for (const [index, message] of messages.entries()) {
+    const number = `9198765${String(index).padStart(5, '0')}`;
+    const { id } = await sentAndWaiting({ phone: `+${number}` });
+    const queued = await Queue.countDocuments();
+    await incoming(message, new Date(Date.now() + 2000), number);
+    await followFinalMessages();
+    assert.equal((await row(id)).status, 'waiting', JSON.stringify(message));
+    assert.equal((await row(id)).lastReplyAt, undefined, JSON.stringify(message));
+    await pastDeadline(id);
+    await FinalMessage.updateOne({ leadId: id }, { $set: { sentAt: new Date(Date.now() - 1000) } });
+    await followFinalMessages();
+    assert.equal(await stage(id), 'Dead', JSON.stringify(message));
+    assert.equal(await Queue.countDocuments(), queued, 'nothing is queued by an ignored message');
+    assert.ok((await Lead.findById(id).lean()).followUps.some(item => item.note.includes('not counted as a reply')), JSON.stringify(message));
+  }
+});
+
+test('WhatsApp housekeeping messages are nothing at all', async () => {
+  const { id } = await sentAndWaiting();
+  for (const message of [{ messageContextInfo: { deviceListMetadata: {} } }, { senderKeyDistributionMessage: { groupId: 'x' }, messageContextInfo: {} }, { keepInChatMessage: {} }, { pollUpdateMessage: {} }, { protocolMessage: { type: 0 } }]) {
+    await incoming(message, new Date(Date.now() + 2000));
+  }
+  const saved = await row(id);
+  assert.equal(saved.lastReplyAt, undefined);
+  assert.equal(saved.lastIgnoredAt, undefined);
+});
+
+test('an "ok" after a real reply can\'t hide it; a listed word never brings a Dead lead back, a real reply does', async () => {
+  const first = await sentAndWaiting();
+  await incoming({ conversation: 'details bhejo' }, new Date(Date.now() + 2000));
+  await incoming({ conversation: 'ok' }, new Date(Date.now() + 4000));
+  await followFinalMessages();
+  assert.equal((await row(first.id)).status, 'replied');
+  assert.equal((await row(first.id)).lastReplyText, 'details bhejo');
+
+  const second = await sentAndWaiting({ phone: '9876543299' });
+  await pastDeadline(second.id);
+  await followFinalMessages();
+  assert.equal(await stage(second.id), 'Dead');
+  await incoming({ conversation: 'ok' }, new Date(Date.now() + 2000), '919876543299');
+  await followFinalMessages();
+  assert.equal(await stage(second.id), 'Dead');
+  await incoming({ conversation: 'ok details bhejo' }, new Date(Date.now() + 4000), '919876543299');
+  await followFinalMessages();
+  assert.equal(await stage(second.id), 'Negative');
+  assert.equal((await row(second.id)).status, 'replied');
+});
+
+test('the list can be changed, and the change applies to the next message', async () => {
+  const saved = await call('/auto-reply/final-message/ignored', 'POST', { ignoredReplies: ['okay', ' OKAY. ', '', 'theek hai'] });
+  assert.deepEqual(saved.data.ignoredReplies, ['okay', 'theek hai'], 'blank lines and repeats go');
+  assert.deepEqual((await call('/auto-reply/final-message', 'GET')).data.ignoredReplies, ['okay', 'theek hai']);
+  assert.equal((await call('/auto-reply/final-message/ignored', 'POST', { ignoredReplies: 'ok' })).status, 400);
+  const { id } = await sentAndWaiting();
+  await incoming({ conversation: 'Okay' }, new Date(Date.now() + 2000));
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'waiting');
+  await incoming({ conversation: 'ok' }, new Date(Date.now() + 4000));
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'replied', 'ok was taken off the list');
+});
+
+test('the three buttons change only the stage and timeline, and nothing enters the queue', async () => {
+  const replied = async (number, fields = {}) => {
+    const { id } = await sentAndWaiting({ phone: `+${number}`, ...fields });
+    await incoming({ conversation: 'offer kya hai' }, new Date(Date.now() + 2000), number);
+    await followFinalMessages();
+    return id;
+  };
+  const interested = await replied('919000000011');
+  const dead = await replied('919000000012');
+  const keep = await replied('919000000013');
+  const nameless = await replied('919000000014', { name: undefined, status: 'Inquiry' });
+  const twin = await Lead.create({ name: 'Same person', phone: '9000000012', status: 'Negative' });
+  const queued = await Queue.countDocuments();
+  const list = (await call('/auto-reply/final-message', 'GET')).data.needsDecision;
+  assert.equal(list.length, 4);
+  const idOf = async id => String((await row(id))._id);
+  const decide = async (id, choice) => call('/auto-reply/final-message/decision', 'POST', { id: await idOf(id), choice });
+
+  assert.equal((await decide(nameless, 'interested')).status, 400, 'Contacted needs a name');
+  assert.equal(await stage(nameless), 'Negative');
+  assert.equal((await row(nameless)).decision, undefined);
+  assert.equal((await decide(interested, 'other')).status, 400);
+  assert.equal((await decide(interested, 'interested')).status, 200);
+  assert.equal(await stage(interested), 'Contacted');
+  assert.equal((await decide(interested, 'dead')).status, 409, 'decided once');
+  assert.equal(await stage(interested), 'Contacted');
+  await decide(dead, 'dead');
+  assert.equal(await stage(dead), 'Dead');
+  assert.equal(await stage(twin._id), 'Dead', 'the same number is one person');
+  await decide(keep, 'keep');
+  assert.equal(await stage(keep), 'Negative');
+  await decide(nameless, 'dead');
+  assert.equal(await stage(nameless), 'Dead');
+
+  assert.equal(await Queue.countDocuments(), queued);
+  assert.equal((await call('/auto-reply/final-message', 'GET')).data.needsDecision.length, 0);
+  const note = (await Lead.findById(keep).lean()).followUps.at(-1);
+  assert.equal(note.note, 'Reply reviewed: kept in Negative.');
+  assert.equal(String(note.createdBy), String(admin._id));
+});
+
+test('a lead moved by hand leaves the list and can no longer be decided here', async () => {
+  const { id } = await sentAndWaiting();
+  await incoming({ conversation: 'offer kya hai' }, new Date(Date.now() + 2000));
+  await followFinalMessages();
+  await Lead.updateOne({ _id: id }, { status: 'Positive' });
+  assert.equal((await call('/auto-reply/final-message', 'GET')).data.needsDecision.length, 0);
+  assert.equal((await call('/auto-reply/final-message/decision', 'POST', { id: String((await row(id))._id), choice: 'dead' })).status, 409);
+  assert.equal(await stage(id), 'Positive');
+});
+
+test('real replies stay Negative and wait for the admin: text, voice and photo, a caption too', async () => {
   const kinds = [
     [{ conversation: 'nahi chahiye' }, 'nahi chahiye'], [{ audioMessage: { seconds: 4 } }, 'Voice message'],
-    [{ imageMessage: { mimetype: 'image/jpeg' } }, 'Photo'], [{ reactionMessage: { text: '👍', key: { id: 'x' } } }, 'Reaction 👍'],
+    [{ imageMessage: { mimetype: 'image/jpeg' } }, 'Photo'], [{ imageMessage: { caption: 'ok' } }, 'Photo'],
   ];
   for (const [index, [message, label]] of kinds.entries()) {
     const number = `91987654320${index}`;
@@ -204,7 +322,15 @@ test('any reply keeps the lead Negative, shown to the admin: text, voice, photo 
   }
   const { data } = await call('/auto-reply/final-message', 'GET');
   assert.equal(data.counts.replied, 4);
-  assert.equal(data.replies.length, 4);
+  assert.equal(data.needsDecision.length, 4);
+});
+
+test('this work adds no way to send: only the review decision reaches the queue, through enqueueWhatsApp', async () => {
+  const fs = require('node:fs'), path = require('node:path');
+  for (const file of ['helpers/finalMessage.js', 'helpers/finalMessageJobs.js', 'whatsapp/src/finalMessageReplies.js', 'whatsapp/src/inbound.js', 'routes/autoReply.js', 'controller/lead/finalMessage.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    for (const forbidden of ['enqueueWhatsApp', 'Queue.create', 'Queue.insert', 'sendMessage', 'transport.send']) assert.ok(!source.includes(forbidden), `${file} must not use ${forbidden}`);
+  }
 });
 
 test('replies count with Auto Reply off, an older message is not a reply, and other chats save nothing', async () => {

@@ -61,6 +61,13 @@ async function settleReply(row, time) {
   await addNote(row.leadId, `Replied to the final message: ${row.lastReplyText || 'Message'}`);
 }
 
+/** An ignored message changes nothing but shows on the timeline, so the admin can see what the person wrote. */
+async function noteIgnored(row) {
+  const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, lastIgnoredAt: row.lastIgnoredAt }, { $set: { ignoredNotedAt: row.lastIgnoredAt } });
+  if (modifiedCount) await addNote(row.leadId, `Message after the final message, not counted as a reply: ${row.lastIgnoredText || 'Message'}`);
+}
+const ignoredToNote = row => row.sentAt && row.lastIgnoredAt >= row.sentAt && (!row.ignoredNotedAt || row.lastIgnoredAt > row.ignoredNotedAt);
+
 /** No reply in time: Dead, only if the lead is still Negative. The admin may have moved it meanwhile. */
 async function closeRow(row) {
   const leads = await findLeadsByPhone(row.phone, { status: NEGATIVE, deletedAt: null, convertedToUserId: null });
@@ -88,6 +95,9 @@ async function followFinalMessages() {
     // Replies before deadlines: a reply and an expired deadline in the same minute is a reply.
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] }, lastReplyAt: { $ne: null } }).lean()) {
       if (repliedAfterSend(row)) await attempt(row, settleReply);
+    }
+    for (const row of await FinalMessage.find({ lastIgnoredAt: { $ne: null }, status: { $in: ['waiting', 'dead', 'replied'] } }).lean()) {
+      if (ignoredToNote(row)) await attempt(row, noteIgnored);
     }
     // A worker that isn't listening can't have seen a reply, so nothing goes Dead until it is back.
     const state = await State.findById(STATE_ID).select('heartbeatAt connection').lean();

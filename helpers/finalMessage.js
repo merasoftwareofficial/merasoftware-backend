@@ -2,7 +2,9 @@ const Lead = require('../models/leadModel');
 const userModel = require('../models/userModel');
 const { FinalMessage, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { EmailDraft } = require('../models/emailControlModel');
-const { NEGATIVE } = require('./leadStatuses');
+const { DEFAULT_IGNORED_REPLIES, MAX_IGNORED_LENGTH, MAX_IGNORED_REPLIES, replyWords } = require('../whatsapp/src/finalMessageReplies.js');
+const { CONTACTED, DEAD, NEGATIVE } = require('./leadStatuses');
+const { findLeadsByPhone } = require('./leadPhone');
 const { isAccountEmail } = require('./emailValidator');
 const { normalizePhone } = require('./whatsappQueue');
 const { prepareTemplatedMail } = require('./emailService');
@@ -68,4 +70,47 @@ async function prepareFor(lead) {
   return 'prepared';
 }
 
-module.exports = { EVENT, DEFAULT_HOURS, MIN_HOURS, MAX_HOURS, CAN_SEND_AGAIN, readHours, pendingLeads, prepareFor };
+const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
+const readIgnored = async () => (await State.findById(STATE_ID).select('finalMessage').lean())?.finalMessage?.ignoredReplies ?? DEFAULT_IGNORED_REPLIES;
+
+async function saveIgnored(list) {
+  if (!Array.isArray(list) || list.some(entry => typeof entry !== 'string')) fail('Send the list of messages.');
+  const seen = new Set();
+  const clean = list.map(entry => entry.trim()).filter(entry => {
+    const words = replyWords(entry);
+    if (!words || seen.has(words)) return false;
+    seen.add(words);
+    return true;
+  });
+  if (clean.length > MAX_IGNORED_REPLIES) fail(`Keep the list to ${MAX_IGNORED_REPLIES} messages.`);
+  if (clean.some(entry => entry.length > MAX_IGNORED_LENGTH)) fail(`Keep each message under ${MAX_IGNORED_LENGTH} letters.`);
+  await State.updateOne({ _id: STATE_ID }, { $set: { 'finalMessage.ignoredReplies': clean } }, { upsert: true });
+  return clean;
+}
+
+const lineWith = (note, status, userId) => ({ note, badge: status, date: new Date(), createdAt: new Date(), createdBy: userId });
+const CHOICES = {
+  interested: { status: CONTACTED, note: 'Reply reviewed: interested. Moved to Contacted.' },
+  dead: { status: DEAD, note: 'Reply reviewed: moved to Dead.' },
+  keep: { status: NEGATIVE, note: 'Reply reviewed: kept in Negative.' },
+};
+
+/** The admin's answer to a real reply. Changes only the lead's stage and timeline: nothing is sent, and nothing enters the queue. */
+async function decideReply(id, choice, userId) {
+  const chosen = Object.prototype.hasOwnProperty.call(CHOICES, choice) ? CHOICES[choice] : null;
+  if (!chosen) fail('Choose Interested, Mark Dead or Keep Negative.');
+  const row = await FinalMessage.findOne({ _id: id, status: 'replied', decision: null }).lean();
+  if (!row) fail('This reply has already been decided.', 409);
+  const lead = await Lead.findById(row.leadId).select('name status deletedAt').lean();
+  if (!lead || lead.deletedAt || lead.status !== NEGATIVE) fail('This lead has moved out of Negative. Open it in Leads.', 409);
+  if (chosen.status === CONTACTED && !lead.name) fail("Add this lead's name first: use Edit Lead.");
+  const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, decision: null }, { $set: { decision: choice, decidedAt: new Date(), decidedBy: userId } });
+  if (!modifiedCount) fail('This reply has already been decided.', 409);
+  // Dead covers every Negative lead with this number, as the job does: another would stay in Broadcast's Negative group.
+  const others = choice === 'dead' && row.phone ? await findLeadsByPhone(row.phone, { status: NEGATIVE, deletedAt: null, convertedToUserId: null }) : [];
+  const ids = [...new Set([String(row.leadId), ...others.map(other => String(other._id))])];
+  await Lead.updateMany({ _id: { $in: ids }, status: NEGATIVE }, { $set: { status: chosen.status }, $push: { followUps: lineWith(chosen.note, chosen.status, userId) } });
+  return { status: chosen.status };
+}
+
+module.exports = { EVENT, DEFAULT_HOURS, MIN_HOURS, MAX_HOURS, CAN_SEND_AGAIN, readHours, readIgnored, saveIgnored, decideReply, pendingLeads, prepareFor };

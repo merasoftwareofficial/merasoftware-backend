@@ -57,7 +57,10 @@ const stateSchema = new mongoose.Schema({
     addLeads: { type: Boolean, default: false },
   },
   // Final Message's wait, in hours. Same reason as autoReply for not being inside `settings`.
-  finalMessage: { hours: Number },
+  finalMessage: {
+    hours: Number,
+    ignoredReplies: { type: [String], default: undefined }, // unset = the first list (finalMessageReplies.js); empty = nothing is ignored
+  },
   lastError: String,
   heartbeatAt: Date,
 }, { timestamps: true, collection: 'whatsapp_state', versionKey: false });
@@ -118,6 +121,14 @@ const finalMessageSchema = new mongoose.Schema({
   lastReplyAt: Date,
   lastReplyText: String,
   replySeenAt: Date, // when the job acted on the reply
+  // A listed word, an emoji or a reaction: not a reply, the wait goes on. Shown on the lead's timeline only.
+  lastIgnoredAt: Date,
+  lastIgnoredText: String,
+  ignoredNotedAt: Date,
+  // The admin's answer to a real reply. Unset = it is in the Needs decision list.
+  decision: { type: String, enum: ['interested', 'dead', 'keep'] },
+  decidedAt: Date,
+  decidedBy: mongoose.Schema.Types.ObjectId,
 }, { timestamps: true, collection: 'whatsapp_final_messages' });
 finalMessageSchema.index({ status: 1, deadlineAt: 1 });
 
