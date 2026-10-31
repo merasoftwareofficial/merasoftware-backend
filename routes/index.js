@@ -1,6 +1,7 @@
 const express = require('express')
 
 const router = express.Router()
+router.get('/admin/lead-updates', require('../middleware/authToken'), require('./leadUpdates'));
 router.get('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
 router.patch('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
 const websitePreview = require('../controller/order/websitePreview');
