@@ -16,6 +16,7 @@
     "test:whatsapp": "node --test whatsapp/tests/sender.test.js whatsapp/tests/connection.test.js whatsapp/tests/inbound.test.js tests/whatsappQueue.test.js tests/whatsappControl.test.js tests/broadcast.test.js tests/autoReply.test.js",
     "test:broadcast": "node --test tests/broadcast.test.js",
     "test:final-message": "node --test tests/finalMessage.test.js",
+    "test:lead-message": "node --test tests/leadMessage.test.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:external-upload": "node --test tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js",
     "start": "node index.js",

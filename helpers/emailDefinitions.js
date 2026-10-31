@@ -58,7 +58,7 @@ const definitions = {
   // --- Leads ------------------------------------------------------------------------------
   'lead.created': {
     subject: 'Welcome to Mera Software',
-    text: lines('Hello {{name}},', '', 'Thank you for connecting with Mera Software. Our team will contact you to discuss your requirements.', '', ...SIGN_OFF),
+    text: lines('Hello {{name}},', '', 'Thank you for connecting with us. Our team will contact you to discuss your requirements.', '', ...SIGN_OFF),
     variables: { name: detail('Lead name', 'Ravi Kumar', 'Filled with the lead’s name from the lead form') },
     blocks: {},
     build(name, email) {
@@ -91,6 +91,13 @@ const definitions = {
     build(lead, email, hours) {
       return { to: email ? [email] : [], phone: lead.phone, values: { timeLimit: `${hours} hours` } };
     },
+  },
+  // Send message on a lead's page (helpers/leadMessage.js): any lead, any stage. Only the name, so its templates fit every lead.
+  'lead.message': {
+    subject: 'A message for you',
+    text: lines('Hello {{name}},', '', 'Please reply here if you have any questions.', '', ...SIGN_OFF),
+    variables: { name: detail('Lead name', 'Ravi Kumar', 'The line is left out when the lead has no name') },
+    blocks: {},
   },
   // A website plan request (controller/lead/planRequest.js): request = { lead, planName, contact, choice, price }.
   'plan.request.admin': {

@@ -120,6 +120,7 @@ async function prepareMail(event, mail, extraValues) {
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
+    leadId: mail.leadId,
     expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000),
   }); } catch (error) {
     if (error.code !== 11000 || !mail.dedupeKey) throw error;
@@ -215,7 +216,7 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   if (policyDraft.event.startsWith('website.subscription.') && !access.validatedWebsite) throw new Error('Review this subscription email from the website panel');
   const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
   if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
-  const text = withRequiredLinks(decision.text, policyDraft.requiredLinks);
+  const text = withRequiredLinks(decision.text, policyDraft.requiredLinks, policyDraft.values);
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
     templateName = (await resolveTemplate(policyDraft.event, decision.templateId)).name;
@@ -272,7 +273,7 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   }
 }
 // A single channel coordinator wraps the existing email provider path. Legacy/automatic callers keep their behavior.
-async function decide(id, actor, decision, access = {}) {
+async function decideChannels(id, actor, decision, access) {
   if (decision.choice === 'send') {
     const draft = await EmailDraft.findOne({ _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } }).lean();
     if (decision.channels !== undefined || draft?.delivery?.channels?.length) {
@@ -281,6 +282,14 @@ async function decide(id, actor, decision, access = {}) {
     }
   }
   return decideEmail(id, actor, decision, access);
+}
+async function decide(id, actor, decision, access = {}) {
+  const result = await decideChannels(id, actor, decision, access);
+  // Send message on a lead's page leaves a line on its timeline. It can never change the send's result.
+  if (decision.choice === 'send' && ['sent', 'queued'].includes(result.status)) {
+    await require('./leadMessage').recordOnTimeline(id).catch(error => console.error('[email] Sent; could not add the lead timeline line:', error.message));
+  }
+  return result;
 }
 // Only this named event is allowed outside a user request. Explicit offer
 // reminder settings opt it in; all existing background builders stay suppressed.
@@ -332,4 +341,4 @@ async function sendSystemMail(event, mail, dedupeKey, source) {
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
   return decision.status === 'sent' ? 'sent' : 'paused';
 }
-module.exports = { registerReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };
+module.exports = { recordHistory, registerReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };

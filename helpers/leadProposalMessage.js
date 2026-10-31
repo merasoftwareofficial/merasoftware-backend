@@ -37,7 +37,7 @@ async function queueProposalWhatsApp(lead, proposal, body) {
   if (process.env.ENABLE_WHATSAPP !== "true") throw Object.assign(new Error("WhatsApp is turned off"), { status: 409 });
   if (body.channels && body.channels !== 'whatsapp') throw Object.assign(new Error('This lead can only receive WhatsApp.'), { status: 400 });
   const values = proposalValues(lead, proposal);
-  const text = withRequiredLinks(reviewTextFromEditor(EVENT, body, values, {}), [proposal.downloadLink]);
+  const text = withRequiredLinks(reviewTextFromEditor(EVENT, body, values, {}), [proposal.downloadLink], values);
   const subject = reviewSubjectFromEditor(EVENT, body, values);
   validateContent(subject, text);
   const plain = compose(render(text, values, {}), {}).text;
@@ -46,4 +46,4 @@ async function queueProposalWhatsApp(lead, proposal, body) {
   catch (error) { if (error.code !== 11000) throw error; return require('../whatsapp/src/models.js').Queue.findById(id); }
 }
 
-module.exports = { EVENT, hasEmail, whatsappPreview, queueProposalWhatsApp };
+module.exports = { EVENT, hasEmail, proposalValues, whatsappPreview, queueProposalWhatsApp };

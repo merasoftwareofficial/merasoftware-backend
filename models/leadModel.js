@@ -56,6 +56,10 @@ const followUpSchema = new mongoose.Schema({
   inboxId: {
     type: mongoose.Schema.Types.ObjectId,
   },
+  // The Send message draft this line records (helpers/leadMessage.js): added once, never edited, and never decides the stage.
+  messageDraftId: {
+    type: mongoose.Schema.Types.ObjectId,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

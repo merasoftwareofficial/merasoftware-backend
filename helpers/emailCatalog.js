@@ -7,6 +7,7 @@ const events = [
   ['sendClientAccountCreatedEmail', 'Leads', 'Client account created'],
   ['lead.proposal', 'Leads', 'Proposal sent'],
   ['lead.finalMessage', 'Leads', 'Final message'],
+  ['lead.message', 'Leads', 'General message'],
   ['plan.request.admin', 'Leads', 'Plan request (admin)', 'Plan request'],
   ['plan.request.received', 'Leads', 'Plan request received', 'Plan request'],
   ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)', 'Update request'],

@@ -148,6 +148,10 @@ const updateLeadController = async (req, res) => {
         });
       }
 
+      if (followUp.messageDraftId) {
+        return res.status(400).json({ message: "This line records a sent message and cannot be edited", error: true, success: false });
+      }
+
       // An old badge that can no longer be chosen (Proposal Sent, Won) may stay when only the note changes.
       const badge = (req.body.badge || "").trim();
       const badgeChanged = badge !== followUp.badge;
@@ -175,7 +179,7 @@ const updateLeadController = async (req, res) => {
       followUp.badge = badge;
       followUp.note = note;
 
-      const latestFollowUp = [...lead.followUps].sort(
+      const latestFollowUp = lead.followUps.filter((item) => !item.messageDraftId).sort(
         (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
       )[0];
       if (!isMatured && badgeChanged && latestFollowUp && String(latestFollowUp._id) === String(followUp._id)) {

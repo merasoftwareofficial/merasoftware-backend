@@ -56,8 +56,11 @@ function render(template, values = {}, blocks = {}, { plain = false } = {}) {
   return restore(lines.join('\n'), !plain);
 }
 
-function withRequiredLinks(text, links = []) {
-  const missing = links.filter(link => !text.includes(link));
+// A link already in the text, typed or as a detail like {{link}} that `values` will fill, is not added again.
+function withRequiredLinks(text, links = [], values = {}) {
+  const filled = asObject(values);
+  const details = placeholders(text).map(key => filled[key]);
+  const missing = links.filter(link => !text.includes(link) && !details.includes(link));
   return missing.length ? `${text}\n\n${missing.join('\n')}` : text;
 }
 

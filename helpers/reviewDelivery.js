@@ -48,7 +48,7 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
       if (!available.choices.find(row => row.id === decision.channels)?.enabled) fail(available.choices.find(row => row.id === decision.channels)?.reason || 'Channel unavailable.');
       validateContent(decision.subject, decision.text);
       const { withRequiredLinks } = require('./emailMarkup');
-      const frozen = reviewedMail(current, withRequiredLinks(decision.text, current.requiredLinks));
+      const frozen = reviewedMail(current, withRequiredLinks(decision.text, current.requiredLinks, current.values));
       const selected = decision.templateId && decision.templateId !== 'current' ? await require('./emailTemplates').resolveTemplate(current.event, decision.templateId) : null;
       await EmailDraft.updateOne({ _id: current._id, 'delivery.lockOwner': owner }, { $set: {
         subject: decision.subject, ...frozen,
