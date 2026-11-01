@@ -86,6 +86,7 @@ app.options('*', cors(corsOptions));
 
 
 app.use(require('./helpers/uploadTiming').uploadTimingMiddleware)
+app.use(require('./helpers/leadTiming'))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ limit: '10mb', extended: true }))
 app.use(cookieParser())

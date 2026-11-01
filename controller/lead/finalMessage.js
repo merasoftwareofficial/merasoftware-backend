@@ -15,7 +15,7 @@ const WHY_NOT = {
 const countController = async (req, res) => {
   try {
     if (req.userRole !== "admin") return reply(res, 403, "Forbidden");
-    return reply(res, 200, "Final message count", { count: (await pendingLeads()).length });
+    return reply(res, 200, "Final message count", { count: (await pendingLeads("status phone email convertedToUserId requestedByUserId deletedAt")).length });
   } catch (error) {
     console.error("Error counting final messages:", error);
     return reply(res, 400, error.message || "Failed to count");

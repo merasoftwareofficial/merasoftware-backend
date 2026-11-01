@@ -30,11 +30,16 @@ const getLeadDetailController = async (req, res) => {
       });
     }
 
-    lead.finalMessage = await FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision").lean();
-    const blocked = await blockForLead(lead);
+    const [finalMessage, blocked, offerTargets, clientAvailable] = await Promise.all([
+      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision").lean(),
+      blockForLead(lead),
+      targetsForLead(lead._id),
+      lead.convertedToUserId ? userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }) : null,
+    ]);
+    lead.finalMessage = finalMessage;
     lead.contactBlock = blocked ? { reason: blocked, label: LABELS[blocked], message: MESSAGES[blocked] } : null;
-    lead.offerTargets = await targetsForLead(lead._id);
-    lead.clientAvailable = Boolean(lead.convertedToUserId && await userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }));
+    lead.offerTargets = offerTargets;
+    lead.clientAvailable = Boolean(clientAvailable);
 
     return res.json({
       message: "Lead fetched successfully",

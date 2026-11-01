@@ -42,10 +42,10 @@ function blockedReason(lead, rows, clients) {
 }
 
 /** The Negative leads a tap would prepare a message for, and those whose earlier message still waits for a decision. */
-async function pendingLeads() {
+async function pendingLeads(fields = null) {
   const [leads, rows, clients] = await Promise.all([
-    Lead.find({ status: NEGATIVE, deletedAt: null, convertedToUserId: null, requestedByUserId: null }).sort({ _id: 1 }).lean(),
-    FinalMessage.find().lean(), clientPhones(),
+    Lead.find({ status: NEGATIVE, deletedAt: null, convertedToUserId: null, requestedByUserId: null }).select(fields).sort({ _id: 1 }).lean(),
+    FinalMessage.find().select(fields ? 'leadId phone status' : null).lean(), clientPhones(),
   ]);
   return leads.filter(lead => [null, 'in-review'].includes(blockedReason(lead, rows, clients)));
 }
