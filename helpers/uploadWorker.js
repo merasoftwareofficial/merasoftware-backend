@@ -10,6 +10,7 @@ const AdminSettings = require('../models/adminSettingsModel');
 const Drive = require('./googleDriveService');
 const { uploadBatch } = require('./uploadConcurrency');
 const { expireOne, BUDGET_ID, configuration } = require('./stagedUploads');
+const { notifyDeliveryStuck } = require('./uploadNotifications');
 const LEASE_MS = 120000;
 
 function driveService() {
@@ -78,7 +79,10 @@ async function runOnce({ drive = driveService(), now = new Date() } = {}) {
       delivery: terminal ? 'needs_review' : 'queued', deliveryFailure: String(code),
       nextAttemptAt: new Date(Date.now() + Math.min(300000, 5000 * 2 ** (job.attempts - 1))),
     }, $unset: { workerToken: '', leaseUntil: '' } });
-    if (terminal && changed.modifiedCount) await Request.updateOne({ _id: job.requestId }, { $set: { deliveryStatus: 'needs_review' } });
+    if (terminal && changed.modifiedCount) {
+      await Request.updateOne({ _id: job.requestId }, { $set: { deliveryStatus: 'needs_review' } });
+      await notifyDeliveryStuck(job.requestId).catch(() => console.warn('[upload-worker] Stuck-upload email could not be prepared'));
+    }
     console.warn('[upload-worker]', JSON.stringify({ id: String(job._id), outcome: terminal ? 'needs_review' : 'retry', code }));
   } finally { clearInterval(heartbeat); }
   return true;

@@ -193,6 +193,30 @@ const definitions = {
       };
     },
   },
+  sendUploadDeliveryStuck: {
+    subject: 'A client upload needs your retry',
+    text: lines(
+      'A client’s files could not reach Google Drive after 8 attempts. The files are safe and waiting.', '',
+      '**Client:** {{customerName}} ({{customerEmail}})', '**Plan:** {{plan}}', '**Files:** {{files}}', '',
+      'Open this client in the admin panel, go to Uploaded Data on this project or plan, and press Retry delivery.',
+    ),
+    variables: {
+      customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, plan: PLAN,
+      files: detail('Files', '2 file(s)', 'How many files are waiting'),
+    },
+    blocks: {},
+    build(updateRequest, adminEmails) {
+      const to = list(adminEmails);
+      if (!to.length) return null;
+      return {
+        to,
+        values: {
+          customerName: text(updateRequest?.userId?.name), customerEmail: text(updateRequest?.userId?.email), plan: planName(updateRequest),
+          files: `${updateRequest?.files?.length || 0} file(s)`,
+        },
+      };
+    },
+  },
   sendUserConfirmation: {
     subject: 'Your Website Update Request Has Been Received',
     text: lines(

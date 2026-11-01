@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const staged = require('../../helpers/stagedUploads');
 const upload = require('../../middleware/uploadFiles');
 const wrap = handler => async (req, res) => {
@@ -17,8 +18,9 @@ module.exports = {
   retryDelivery: wrap(async (req, res) => {
     if (req.userRole !== 'admin') return res.status(403).json({ success: false, message: 'Forbidden' });
     staged.configuration();
+    if (!mongoose.isValidObjectId(req.params.requestId)) return res.status(404).json({ success: false, message: 'Upload does not require a retry' });
     const record = await require('../../models/uploadSubmissionModel').findOneAndUpdate({
-      _id: req.params.submissionId, mode: 'staged', delivery: 'needs_review',
+      requestId: req.params.requestId, mode: 'staged', delivery: 'needs_review',
     }, { $set: { delivery: 'queued', attempts: 0, nextAttemptAt: new Date(), deliveryFailure: '' } }, { new: true });
     if (!record) return res.status(404).json({ success: false, message: 'Upload does not require a retry' });
     await require('../../models/updateRequestModel').updateOne({ _id: record.requestId }, { $set: { deliveryStatus: 'queued' } });

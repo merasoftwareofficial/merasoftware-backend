@@ -24,7 +24,7 @@ router.post('/upload-sessions', require('../middleware/authToken'), stagedUpload
 router.get('/upload-sessions/:uploadId', require('../middleware/authToken'), stagedUpload.status);
 router.post('/upload-sessions/:uploadId/files/:fileId', require('../middleware/authToken'), stagedUpload.authorizeFile, stagedUpload.parseFile, stagedUpload.receive);
 router.post('/upload-sessions/:uploadId/complete', require('../middleware/authToken'), stagedUpload.complete);
-router.post('/admin/upload-submissions/:submissionId/retry', require('../middleware/authToken'), stagedUpload.retryDelivery);
+router.post('/admin/uploads/:requestId/retry-delivery', require('../middleware/authToken'), stagedUpload.retryDelivery);
 // const fs = require('fs');
 
 const userSignUpController = require("../controller/user/userSignUp")

@@ -12,6 +12,7 @@ const events = [
   ['plan.request.received', 'Leads', 'Plan request received', 'Plan request'],
   ['sendUpdateRequestNotification', 'Updates', 'New update request (admin)', 'Update request'],
   ['sendUserConfirmation', 'Updates', 'Update request received', 'Update request'],
+  ['sendUploadDeliveryStuck', 'Updates', 'Upload stuck, retry needed (admin)'],
   ['sendDeveloperAssignedNotification', 'Updates', 'Developer assigned (customer)', 'Developer assigned'],
   ['sendUpdateCompletedNotification', 'Updates', 'Update completed'],
   ['sendDeveloperAssignmentEmail', 'Updates', 'Assignment (developer)', 'Developer assigned'],
@@ -63,7 +64,7 @@ const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserCo
 // Sent by the server itself (scheduler or a committed reservation operation), never a draft.
 // Plan steps are system mail too: they go out the moment the step happens (the client is told at
 // every step), whichever request or job caused it (helpers/servicePlanNotifications.js).
-const SYSTEM_TRIGGERED = new Set(['offer.payment.reminder', 'offer.reserved', 'offer.reservation.extended',
+const SYSTEM_TRIGGERED = new Set(['sendUploadDeliveryStuck', 'offer.payment.reminder','offer.reserved', 'offer.reservation.extended',
   'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
 const catalog = events.map(([key, section, label, group = label]) => ({
   key, section, label, group, application: section === 'Website' ? 'website' : 'portal',

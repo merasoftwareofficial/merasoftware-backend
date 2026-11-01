@@ -39,6 +39,10 @@ const sendTemplatedEmail = async (event, ...args) => {
 const sendUpdateRequestNotification = (updateRequest, adminEmails) =>
   sendTemplatedEmail('sendUpdateRequestNotification', updateRequest, adminEmails);
 
+/** Admins: an accepted upload could not reach Drive and waits for a retry. */
+const sendUploadDeliveryStuck = (updateRequest, adminEmails) =>
+  sendTemplatedEmail('sendUploadDeliveryStuck', updateRequest, adminEmails);
+
 /** Customer: their update request was received. */
 const sendUserConfirmation = (updateRequest) =>
   sendTemplatedEmail('sendUserConfirmation', updateRequest);
@@ -424,6 +428,7 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
 module.exports = {
   prepareTemplatedMail,
   sendUpdateRequestNotification,
+  sendUploadDeliveryStuck,
   sendUserConfirmation,
   sendDeveloperAssignedNotification,
   sendUpdateCompletedNotification,
