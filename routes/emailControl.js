@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const authToken = require('../middleware/authToken');
 const userModel = require('../models/userModel');
-const { EmailTemplate, EmailPolicy, EmailDraft, EmailHistory } = require('../models/emailControlModel');
+const { EmailTemplate, EmailPolicy, EmailDraft, EmailHistory, EmailReviewPreference } = require('../models/emailControlModel');
 const { events, byKey, isAutomaticEvent: isCustomerTriggered } = require('../helpers/emailCatalog');
 const { decide, applyDefault, reviewedMail, validateContent, applicationQuery, draftAccess } = require('../helpers/emailController');
 const { withRequiredLinks } = require('../helpers/emailMarkup');
@@ -142,6 +142,57 @@ function validateTemplate(event, body) {
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 100) throw new Error('Template name is required (up to 100 characters)');
   validateTemplateVariables(event, body.subject, body.text);
 }
+router.get('/preferences/:event', handle(async (req, res) => {
+  templateChoiceAllowed(req); allowedEvent(req, req.params.event);
+  const saved = await EmailReviewPreference.findOne({ actor: req.userId, application: req.emailApplication, event: req.params.event }).lean();
+  const valid = saved?.templateId && await EmailTemplate.exists({ _id: saved.templateId, event: req.params.event });
+  const fallback = saved?.templateId && !valid ? await resolveTemplate(req.params.event) : null;
+  res.json({ success: true, data: { channel: saved?.channel, templateId: valid ? String(saved.templateId) : fallback?._id ? String(fallback._id) : null, templateUnavailable: !!saved?.templateId && !valid } });
+}));
+router.put('/preferences/:event', handle(async (req, res) => {
+  templateChoiceAllowed(req); allowedEvent(req, req.params.event);
+  const fields = {};
+  if (req.body.channel !== undefined) {
+    if (!['email', 'whatsapp', 'both'].includes(req.body.channel)) throw new Error('Unknown delivery channel');
+    fields.channel = req.body.channel;
+  }
+  if (req.body.templateId !== undefined) {
+    if (req.body.templateId !== null && (!mongoose.isValidObjectId(req.body.templateId) || !await EmailTemplate.exists({ _id: req.body.templateId, event: req.params.event }))) throw new Error('Choose a template for this action');
+    fields.templateId = req.body.templateId;
+  }
+  if (!Object.keys(fields).length) throw new Error('Choose a channel or template');
+  const key = { actor: req.userId, application: req.emailApplication, event: req.params.event };
+  let saved;
+  try { saved = await EmailReviewPreference.findOneAndUpdate(key, { $set: fields }, { upsert: true, new: true, runValidators: true }).lean(); }
+  catch (error) { if (error.code !== 11000) throw error; saved = await EmailReviewPreference.findOneAndUpdate(key, { $set: fields }, { new: true, runValidators: true }).lean(); }
+  res.json({ success: true, data: { channel: saved.channel, templateId: saved.templateId } });
+}));
+router.patch('/templates/:id', handle(async (req, res) => {
+  templateChoiceAllowed(req);
+  const current = await EmailTemplate.findById(req.params.id).lean();
+  if (!current) throw new Error('Template not found');
+  allowedEvent(req, current.event);
+  if (current.system) throw new Error('Built-in templates keep their original name');
+  if (typeof req.body.name !== 'string' || !req.body.name.trim() || req.body.name.length > 100) throw new Error('Template name is required (up to 100 characters)');
+  const updated = await EmailTemplate.findOneAndUpdate({ _id: current._id, ...(req.body.expectedUpdatedAt ? { updatedAt: new Date(req.body.expectedUpdatedAt) } : {}) }, { $set: { name: req.body.name.trim() } }, { new: true, runValidators: true }).lean();
+  if (!updated) throw Object.assign(new Error('This template changed elsewhere. Reload it before saving.'), { status: 409 });
+  res.json({ success: true, data: templateWithDocs(updated) });
+}));
+router.delete('/templates/:id', handle(async (req, res) => {
+  templateChoiceAllowed(req);
+  const current = await EmailTemplate.findById(req.params.id).lean();
+  if (!current) throw new Error('Template not found');
+  allowedEvent(req, current.event);
+  if (current.system) throw new Error('Built-in templates cannot be deleted');
+  const isDefault = await EmailPolicy.exists({ event: current.event, defaultTemplate: current._id });
+  const replacement = req.body.replacementTemplateId;
+  if (isDefault && (!replacement || String(replacement) === String(current._id) || !mongoose.isValidObjectId(replacement) || !await EmailTemplate.exists({ _id: replacement, event: current.event }))) throw new Error('Choose a replacement default for this action before deleting.');
+  const deleted = await EmailTemplate.findOneAndDelete({ _id: current._id, ...(req.body.expectedUpdatedAt ? { updatedAt: new Date(req.body.expectedUpdatedAt) } : {}) });
+  if (!deleted) throw Object.assign(new Error('This template changed elsewhere. Reload it before deleting.'), { status: 409 });
+  if (isDefault) await EmailPolicy.updateOne({ event: current.event, defaultTemplate: current._id }, { $set: { defaultTemplate: replacement } });
+  // Keep draft snapshots and audit history intact. Other users fall back on their next review.
+  res.json({ success: true, data: { deleted: String(current._id) } });
+}));
 // Template bodies arrive as the editor's documents (or plain text from older clients).
 router.post('/templates', handle(async (req, res) => {
   adminOnly(req);

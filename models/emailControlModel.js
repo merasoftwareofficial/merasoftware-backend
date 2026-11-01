@@ -77,7 +77,17 @@ const historySchema = new Schema({
 }, { timestamps: true });
 historySchema.index({ application: 1, status: 1, sentAt: -1 });
 historySchema.index({ application: 1, status: 1, lastAttemptAt: -1 });
+// Personal review selections only. Never store rendered customer messages here.
+const reviewPreferenceSchema = new Schema({
+  actor: { type: Schema.Types.ObjectId, required: true },
+  application: { type: String, enum: ['website', 'portal'], required: true },
+  event: { type: String, required: true },
+  channel: { type: String, enum: ['email', 'whatsapp', 'both'] },
+  templateId: { type: Schema.Types.ObjectId, default: null },
+}, { timestamps: true });
+reviewPreferenceSchema.index({ actor: 1, application: 1, event: 1 }, { unique: true });
 module.exports = {
+  EmailReviewPreference: mongoose.model('EmailReviewPreference', reviewPreferenceSchema),
   EmailTemplate: mongoose.model('EmailTemplate', templateSchema),
   EmailPolicy: mongoose.model('EmailPolicy', policySchema),
   EmailDraft: mongoose.model('EmailDraft', draftSchema),

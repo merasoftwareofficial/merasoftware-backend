@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-const { EmailDraft, EmailTemplate, EmailHistory, EmailPolicy } = require('../models/emailControlModel');
+const { EmailDraft, EmailTemplate, EmailHistory, EmailPolicy, EmailReviewPreference } = require('../models/emailControlModel');
 const { Queue } = require('../whatsapp/src/models.js');
 const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
@@ -17,7 +17,7 @@ before(async () => {
   process.env.TOKEN_SECRET_KEY = 'review-channel-isolated-secret';
   process.env.RESEND_API_KEY = 'test'; process.env.FROM_EMAIL = 'sender@example.test';
   db = await MongoMemoryServer.create(); await mongoose.connect(db.getUri(), { dbName: 'review-channel-tests' });
-  await Queue.init();
+  await Queue.init(); await EmailReviewPreference.init();
   [admin, customer] = await User.create([{ name: 'Admin', email: 'admin@example.test', roles: ['admin'] }, { name: 'Ravi', email: 'ravi@example.test', phone: '9876543210', roles: ['customer'] }]);
   global.fetch = async (url, options) => {
     assert.equal(url, 'https://api.resend.com/emails');
@@ -27,7 +27,7 @@ before(async () => {
   const app = express(); app.use(express.json()); app.use(require('cookie-parser')()); app.use(requestMiddleware);
   app.use('/email-control', require('../routes/emailControl'));
   app.post('/action', require('../middleware/authToken'), async (req, res) => {
-    await queueMail('lead.proposal', { to: ['ravi@example.test'], values: { name: 'Ravi', amount: '₹500', link: 'https://example.test/proposal' }, requiredLinks: ['https://example.test/proposal'] });
+    await queueMail('lead.proposal', { to: ['ravi@example.test'], values: { name: 'Ravi', amount: 'â‚¹500', link: 'https://example.test/proposal' }, requiredLinks: ['https://example.test/proposal'] });
     res.json({ success: true });
   });
   app.post('/lead', require('../middleware/authToken'), require('../controller/lead/createLead'));
@@ -35,7 +35,7 @@ before(async () => {
 });
 beforeEach(async () => {
   process.env.ENABLE_WHATSAPP = 'true'; providerCalls = []; providerFails = false;
-  await Promise.all([EmailDraft, EmailTemplate, EmailHistory, EmailPolicy, Queue, Lead].map(model => model.deleteMany({})));
+  await Promise.all([EmailDraft, EmailTemplate, EmailHistory, EmailPolicy, EmailReviewPreference, Queue, Lead].map(model => model.deleteMany({})));
 });
 after(async () => { global.fetch = nativeFetch; if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 async function api(path, method = 'GET', body, user = admin) {
@@ -186,4 +186,61 @@ test('review copies preserve originals and defaults, retain chips and stay actio
   assert.equal((await api('/email-control/templates', 'POST', { event: 'lead.created', sourceTemplateId: source._id, name: 'Wrong', subject: 'X', text: 'Y' })).status, 400);
   assert.equal((await api('/email-control/templates', 'POST', { event: original.event, sourceTemplateId: source._id, name: 'Denied', subject: 'X', text: 'Y' }, customer)).status, 403);
   assert.equal(providerCalls.length, 0); assert.equal(await Queue.countDocuments(), 0);
+});
+
+
+test('personal review selections persist per actor and action without storing customer content', async () => {
+  const row = await draft();
+  const templateId = row.selectedTemplateId;
+  const url = '/email-control/preferences/lead.proposal';
+  assert.equal((await api(url, 'PUT', { channel: 'whatsapp', templateId, text: 'Private customer', actor: customer._id })).status, 200);
+  assert.equal((await api(url)).data.channel, 'whatsapp');
+  assert.equal((await api(url)).data.templateId, templateId);
+  assert.equal((await api('/email-control/preferences/lead.created')).data.channel, undefined);
+  const other = await User.create({ name: 'Other admin', email: 'other-review@example.test', roles: ['admin'] });
+  assert.equal((await api(url, 'GET', undefined, other)).data.channel, undefined);
+  assert.equal((await api(url, 'GET', undefined, customer)).status, 403);
+  assert.equal((await api(url, 'PUT', { channel: 'sms' })).status, 400);
+  assert.equal((await api('/email-control/preferences/website.subscription.confirm', 'PUT', { channel: 'email' })).status, 400);
+  const unrelated = await EmailTemplate.create({ event: 'lead.created', name: 'Other action', subject: 'Welcome', text: 'Welcome' });
+  assert.equal((await api(url, 'PUT', { templateId: String(unrelated._id) })).status, 400);
+  const saved = await EmailReviewPreference.findOne({ actor: admin._id }).lean();
+  assert.equal(saved.text, undefined); assert.equal(saved.actor.toString(), admin._id.toString());
+  assert.equal(providerCalls.length, 0); assert.equal(await Queue.countDocuments(), 0);
+});
+
+test('rename preserves saved content, rejects stale revisions, and deletion keeps snapshots and history', async () => {
+  const row = await draft();
+  const original = await EmailTemplate.create({ event: row.event, name: 'Custom', subject: 'For {{name}}', text: 'Original {{name}}' });
+  const url = `/email-control/templates/${original._id}`;
+  const renamed = await api(url, 'PATCH', { name: 'Renamed', text: 'Must not save', expectedUpdatedAt: original.updatedAt });
+  assert.equal(renamed.status, 200); assert.equal(renamed.data.text, original.text);
+  assert.equal(await EmailTemplate.countDocuments({ _id: original._id }), 1);
+  assert.equal((await api(url, 'PATCH', { name: 'Stale', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })).status, 409);
+  await api('/email-control/preferences/lead.proposal', 'PUT', { templateId: String(original._id) });
+  assert.equal((await api(url, 'DELETE', { expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })).status, 409);
+  assert.equal((await api(url, 'DELETE', { expectedUpdatedAt: renamed.data.updatedAt })).status, 200);
+  assert.ok(await EmailDraft.findById(row._id)); assert.ok(await EmailHistory.findOne({ draftId: row._id }));
+  assert.equal((await api('/email-control/preferences/lead.proposal')).data.templateUnavailable, true);
+  assert.equal((await api('/email-control/preferences/lead.proposal')).data.templateId, row.selectedTemplateId);
+  assert.equal(providerCalls.length, 0);
+});
+
+test('default deletion requires a same-action replacement; built-ins and application boundaries are protected', async () => {
+  const row = await draft();
+  const custom = await EmailTemplate.create({ event: row.event, name: 'Default custom', subject: 'For {{name}}', text: 'Hello {{name}}' });
+  await EmailPolicy.create({ event: row.event, mode: 'review', defaultTemplate: custom._id });
+  const url = `/email-control/templates/${custom._id}`;
+  assert.equal((await api(url, 'DELETE', {})).status, 400);
+  assert.ok(await EmailTemplate.findById(custom._id));
+  const wrong = await EmailTemplate.create({ event: 'lead.created', name: 'Wrong', subject: 'Hello', text: 'Hello' });
+  assert.equal((await api(url, 'DELETE', { replacementTemplateId: String(wrong._id) })).status, 400);
+  assert.equal((await api(url, 'DELETE', { replacementTemplateId: row.selectedTemplateId })).status, 200);
+  const policy = await EmailPolicy.findOne({ event: row.event });
+  assert.equal(String(policy.defaultTemplate), row.selectedTemplateId); assert.equal(policy.mode, 'review');
+  assert.equal((await api(`/email-control/templates/${row.selectedTemplateId}`, 'DELETE', {})).status, 400);
+  assert.equal((await api(`/email-control/templates/${row.selectedTemplateId}`, 'PATCH', { name: 'New name' })).status, 400);
+  const website = await EmailTemplate.create({ event: 'website.subscription.confirm', name: 'Website', subject: 'Hello', text: 'Hello' });
+  assert.equal((await api(`/email-control/templates/${website._id}`, 'DELETE', {})).status, 400);
+  assert.equal((await api(`/email-control/templates/${website._id}`, 'PATCH', { name: 'No' })).status, 400);
 });
