@@ -170,7 +170,9 @@ router.post("/guest/demo-wallet-credit", authToken, guestDummyWalletCreditContro
 router.get("/partner-customers", authToken, getPartnerCustomers);
 router.post("/signin", userSignInController);
 router.get("/general-users", getGeneralUsers);
+router.get('/portal-updates', authToken, require('./leadUpdates').portal);
 router.get("/admin/clients", authToken, getAdminClients);
+router.get("/admin/dashboard-summary", authToken, getAdminClients.dashboard);
 router.get("/admin/plan-products", authToken, getAdminPlanProductsController);
 router.get("/admin/feature-products", authToken, getAdminFeatureProductsController);
 router.post("/admin/services/create", authToken, createServicePlanController);
@@ -196,6 +198,7 @@ router.post(
   externalUploadController.submit,
 );
 router.get("/my-payment-workspace", authToken, getMyPaymentWorkspace);
+router.get("/my-invoices", authToken, require("../controller/user/getMyInvoices"));
 router.get("/admin/delete-order/:orderId/scan", authToken, scanDeleteOrderController);
 router.delete("/admin/delete-order/:orderId", authToken, deleteOrderController);
 router.post("/admin/clients/:customerId/create-project", authToken, adminCreateProjectOrderController);

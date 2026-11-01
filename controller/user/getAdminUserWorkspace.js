@@ -28,6 +28,13 @@ const getAdminUserWorkspace = async (req, res) => {
     }
 
     const customerObjectId = new mongoose.Types.ObjectId(customerId);
+    const scopedOrder = req.query.orderId;
+    if (scopedOrder !== undefined && scopedOrder !== 'general' && !mongoose.isObjectIdOrHexString(scopedOrder)) {
+      return res.status(400).json({ success: false, message: 'Valid orderId required' });
+    }
+    const orderFilter = { userId: customerObjectId, ...(scopedOrder !== undefined ? { _id: scopedOrder === 'general' ? { $in: [] } : scopedOrder } : {}) };
+    const recordFilter = { userId: customerObjectId, ...(scopedOrder !== undefined ? { orderId: scopedOrder === 'general' ? null : scopedOrder } : {}) };
+
 
     const customer = await userModel
       .findById(customerObjectId)
@@ -56,7 +63,7 @@ const getAdminUserWorkspace = async (req, res) => {
       // getUserOrder.js already uses for its own extra fields.
       applyOrderSummary(
         orderModel
-          .find({ userId: customerObjectId })
+          .find(orderFilter)
           .sort({ createdAt: -1 })
           .select("paidAmount isPartialPayment currentInstallment installments")
       ),
@@ -64,9 +71,9 @@ const getAdminUserWorkspace = async (req, res) => {
       // deposit) apart from "project was deleted" (orderId was set but populate resolves to
       // null because the referenced order document no longer exists).
       Promise.all([
-        transactionModel.find({ userId: customerObjectId }).select("orderId").lean(),
-        monthlyInvoiceModel.find({ userId: customerObjectId }).select("orderId").lean(),
-        invoiceModel.find({ userId: customerObjectId }).select("orderId").lean(),
+        transactionModel.find(recordFilter).select("orderId").lean(),
+        monthlyInvoiceModel.find(recordFilter).select("orderId").lean(),
+        invoiceModel.find(recordFilter).select("orderId").lean(),
       ]).then(([txnRefs, monthlyRefs, projectRefs]) => {
         const map = new Map();
         [...txnRefs, ...monthlyRefs, ...projectRefs].forEach((doc) => {
@@ -75,21 +82,21 @@ const getAdminUserWorkspace = async (req, res) => {
         return map;
       }),
       transactionModel
-        .find({ userId: customerObjectId })
+        .find(recordFilter)
         .select("transactionId upiTransactionId amount status type sourceType paymentMethod invoiceId orderId installmentNumber date createdAt rejectionReason parentTransactionId deletedProjectName deletedProjectType")
         .populate({ path: "orderId", select: "productId projectSnapshot servicePlanSnapshot orderItems", populate: { path: "productId", select: "serviceName" } })
         .sort({ createdAt: -1 }),
       monthlyInvoiceModel
-        .find({ userId: customerObjectId })
+        .find(recordFilter)
         .select("orderId invoiceNumber amount status invoiceDate dueDate paidDate paymentMethod transactionReference createdAt")
         .populate({ path: "orderId", select: "productId projectSnapshot servicePlanSnapshot orderItems", populate: { path: "productId", select: "serviceName" } })
         .sort({ createdAt: -1 }),
       invoiceModel
-        .find({ userId: customerObjectId })
+        .find(recordFilter)
         .select("orderId invoiceNumber invoiceType amount amountPaid status invoiceDate dueDate paidDate installmentNumber lineItems paymentMethod transactionReference createdAt updatedAt deletedProjectName deletedProjectType deletedProjectStartDate deletedProjectDeletedAt deletedProjectPaymentMethod")
         .populate({ path: "orderId", select: "productId projectSnapshot servicePlanSnapshot orderItems", populate: { path: "productId", select: "serviceName" } })
         .sort({ createdAt: -1 }),
-      updateRequestModel.aggregate([
+      scopedOrder !== undefined ? Promise.resolve([]) : updateRequestModel.aggregate([
         { $match: { userId: customerObjectId } },
         { $group: { _id: null, total: { $sum: 1 }, pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } } } },
       ]),

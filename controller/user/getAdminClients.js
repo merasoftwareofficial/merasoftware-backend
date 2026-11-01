@@ -1,9 +1,5 @@
 const userModel = require("../../models/userModel");
-const orderModel = require("../../models/orderProductModel");
-const updateRequestModel = require("../../models/updateRequestModel");
-const transactionModel = require("../../models/transactionModel");
-const monthlyInvoiceModel = require("../../models/monthlyInvoiceModel");
-const ticketModel = require("../../models/ticketModel");
+const readClientActivity = require('../../helpers/clientActivity');
 const purgeExpiredGuests = require("../../helpers/purgeExpiredGuests");
 
 const toTimestamp = (value) => {
@@ -23,91 +19,7 @@ const latestCandidate = (candidates) => {
   );
 };
 
-const addRecordActivity = (activityByClient, userId, candidates) => {
-  if (!userId) return;
-
-  const clientId = userId.toString();
-  const current = activityByClient.get(clientId) || {
-    timestamp: 0,
-    value: null,
-    source: "client_created",
-  };
-  const latest = latestCandidate(candidates);
-
-  if (latest.timestamp > current.timestamp) {
-    activityByClient.set(clientId, latest);
-  }
-};
-
-const getOrderActivity = (order) => [
-  { value: order.createdAt, source: "purchase" },
-  { value: order.updatedAt, source: "project_updated" },
-  { value: order.lastUpdated, source: "project_updated" },
-  ...(order.checkpoints || []).map((checkpoint) => ({
-    value: checkpoint.completedAt,
-    source: "checkpoint_completed",
-  })),
-  ...(order.messages || []).map((message) => ({
-    value: message.timestamp,
-    source: "project_message",
-  })),
-  ...(order.projectNodeEvents || []).map((event) => ({
-    value: event.occurredAt,
-    source: "project_node_updated",
-  })),
-  ...(order.monthlyRenewalHistory || []).map((renewal) => ({
-    value: renewal.renewalDate,
-    source: "plan_renewed",
-  })),
-];
-
-const getUpdateRequestActivity = (request) => [
-  { value: request.createdAt, source: "update_request" },
-  { value: request.updatedAt, source: "update_request_updated" },
-  { value: request.completedAt, source: "update_completed" },
-  ...(request.instructions || []).map((item) => ({
-    value: item.timestamp,
-    source: "update_request",
-  })),
-  ...(request.developerNotes || []).map((item) => ({
-    value: item.timestamp,
-    source: "developer_note",
-  })),
-  ...(request.developerMessages || []).map((item) => ({
-    value: item.timestamp,
-    source: "developer_message",
-  })),
-];
-
-const getTransactionActivity = (transaction) => {
-  const eventDate = transaction.paymentStatus === "approved" || transaction.status === "completed"
-    ? transaction.verificationDate || transaction.updatedAt || transaction.createdAt
-    : transaction.paymentStatus === "rejected" || transaction.status === "rejected"
-      ? transaction.rejectedAt || transaction.verificationDate || transaction.updatedAt || transaction.createdAt
-      : transaction.createdAt || transaction.date || transaction.updatedAt;
-
-  return [{ value: eventDate, source: "payment_updated" }];
-};
-
-const getInvoiceActivity = (invoice) => [{
-  value: invoice.status === "paid" ? invoice.paidDate || invoice.updatedAt : invoice.updatedAt || invoice.createdAt,
-  source: invoice.status === "paid" ? "invoice_paid" : "invoice_updated",
-}];
-
-const getTicketActivity = (ticket) => [
-  { value: ticket.createdAt, source: "ticket_created" },
-  { value: ticket.updatedAt, source: "ticket_updated" },
-  ...(ticket.messages || []).map((message) => ({
-    value: message.timestamp,
-    source: "ticket_message",
-  })),
-  ...(ticket.statusHistory || []).map((item) => ({
-    value: item.timestamp,
-    source: "ticket_status_updated",
-  })),
-];
-
-async function getAdminClients(req, res) {
+async function getAdminClients(req, res, dashboard = false) {
   try {
     if (req.userRole !== "admin") {
       return res.status(403).json({
@@ -119,7 +31,7 @@ async function getAdminClients(req, res) {
 
     // Lazy purge, same pattern as controller/trash/getTrash.js: opening this
     // list is what opportunistically cleans up expired guest accounts.
-    await purgeExpiredGuests();
+    if (!dashboard) await purgeExpiredGuests();
 
     const clients = await userModel
       .find({ roles: "customer", deletedAt: null, isGuest: { $ne: true } })
@@ -127,35 +39,7 @@ async function getAdminClients(req, res) {
       .lean();
 
     const clientIds = clients.map((client) => client._id);
-    const [orders, updateRequests, transactions, invoices, tickets] = await Promise.all([
-      orderModel
-        .find({ userId: { $in: clientIds } })
-        .select("userId createdAt updatedAt lastUpdated checkpoints.completedAt messages.timestamp projectNodeEvents.occurredAt monthlyRenewalHistory.renewalDate")
-        .lean(),
-      updateRequestModel
-        .find({ userId: { $in: clientIds } })
-        .select("userId createdAt updatedAt completedAt instructions.timestamp developerNotes.timestamp developerMessages.timestamp")
-        .lean(),
-      transactionModel
-        .find({ userId: { $in: clientIds } })
-        .select("userId createdAt updatedAt date paymentStatus status verificationDate rejectedAt")
-        .lean(),
-      monthlyInvoiceModel
-        .find({ userId: { $in: clientIds } })
-        .select("userId createdAt updatedAt paidDate status")
-        .lean(),
-      ticketModel
-        .find({ userId: { $in: clientIds } })
-        .select("userId createdAt updatedAt messages.timestamp statusHistory.timestamp")
-        .lean(),
-    ]);
-
-    const activityByClient = new Map();
-    orders.forEach((order) => addRecordActivity(activityByClient, order.userId, getOrderActivity(order)));
-    updateRequests.forEach((request) => addRecordActivity(activityByClient, request.userId, getUpdateRequestActivity(request)));
-    transactions.forEach((transaction) => addRecordActivity(activityByClient, transaction.userId, getTransactionActivity(transaction)));
-    invoices.forEach((invoice) => addRecordActivity(activityByClient, invoice.userId, getInvoiceActivity(invoice)));
-    tickets.forEach((ticket) => addRecordActivity(activityByClient, ticket.userId, getTicketActivity(ticket)));
+    const activityByClient = await readClientActivity(clientIds);
 
     const enrichedClients = clients.map((client) => {
       const activity = latestCandidate([
@@ -170,9 +54,23 @@ async function getAdminClients(req, res) {
       };
     });
 
+    let data = enrichedClients;
+    if (dashboard) {
+      const start = new Date(req.query.monthStart);
+      const end = new Date(req.query.monthEnd);
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start || end - start > 32 * 86400000) {
+        return res.status(400).json({ success: false, message: 'Valid month boundaries required' });
+      }
+      const active = enrichedClients.filter(client => (client.status || 'active').toLowerCase() === 'active').length;
+      data = {
+        total: enrichedClients.length, active, inactive: enrichedClients.length - active,
+        joinedThisMonth: enrichedClients.filter(client => client.createdAt && new Date(client.createdAt) >= start && new Date(client.createdAt) < end).length,
+        recentClients: [...enrichedClients].sort((a, b) => new Date(b.latestActivityAt || b.createdAt || 0) - new Date(a.latestActivityAt || a.createdAt || 0)).slice(0, 6),
+      };
+    }
     res.json({
       message: "Clients fetched successfully",
-      data: enrichedClients,
+      data,
       success: true,
       error: false,
     });
@@ -185,4 +83,5 @@ async function getAdminClients(req, res) {
   }
 }
 
-module.exports = getAdminClients;
+module.exports = (req, res) => getAdminClients(req, res);
+module.exports.dashboard = (req, res) => getAdminClients(req, res, true);
