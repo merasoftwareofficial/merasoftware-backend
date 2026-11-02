@@ -72,7 +72,7 @@ async function recordKnownPerson(row, accounts) {
   const client = accounts.find(isClient);
   if (client) {
     await addRemark(await ensureWonLead(client), row);
-    await clearClientDead({ convertedToUserId: client._id });
+    await clearClientDead({ convertedToUserId: client._id }, { preserveFinalReply: true });
     return 'updated';
   }
   const member = accounts.find(user => !user.deletedAt && !user.isGuest && user.roles?.includes('member'));

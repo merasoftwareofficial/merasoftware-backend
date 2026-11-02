@@ -58,6 +58,9 @@ function createLeadUpdates(connection = mongoose.connection) {
       }
       if (['uploads', 'upload-links'].includes(domain) && change.operationType === 'delete') signal(listener, domain, null);
       if (role === 'admin' && descriptor.domain === 'leads' && descriptor.collection !== Lead.collection.name) signal(listener, 'communication', null);
+      // The admin workspace shows the canonical lead's behaviour. Never send
+      // customer-specific client signals to non-admin subscribers.
+      if (role === 'admin' && descriptor.collection === Lead.collection.name) signal(listener, 'clients', change.fullDocument?.convertedToUserId ? String(change.fullDocument.convertedToUserId) : null);
       // Dependent summaries/lists must reconcile even if event record ID differs.
       const dependencies = {
         referrals: ['documents'], users: ['clients', 'documents', 'wallet'], orders: ['clients'], payments: ['wallet', 'clients', 'orders', 'invoices', 'referrals'],

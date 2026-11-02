@@ -53,8 +53,9 @@ const getAdminUserWorkspace = async (req, res) => {
       });
     }
 
-    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id").lean();
+    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id clientBehaviour").lean();
     customer.leadId = linkedLead?._id || null;
+    customer.clientBehaviour = linkedLead ? linkedLead.clientBehaviour || 'Contacted' : null;
 
     const [orders, rawOrderRefs, transactions, monthlyInvoices, projectInvoices, updateRequestCounts] = await Promise.all([
       // The payment-history subpage reads these off the order rows to show "Paid" and the

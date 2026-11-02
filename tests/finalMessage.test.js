@@ -9,7 +9,7 @@ const mongoose = require('mongoose');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const Lead = require('../models/leadModel');
 const User = require('../models/userModel');
 const { EmailDraft, EmailPolicy, EmailTemplate } = require('../models/emailControlModel');
@@ -166,6 +166,151 @@ test('concurrent client preparation creates only one tracked draft', async () =>
     assert.equal(await Queue.countDocuments(), 0);
   } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
 });
+
+test('client timeout aborts completely on a database failure and succeeds on retry', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  const original = Lead.updateOne;
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    await pastDeadline(clientLead._id);
+    Lead.updateOne = function (filter, update, options) {
+      if (update?.$set?.clientBehaviour === 'Dead') throw new Error('simulated database failure');
+      return original.call(this, filter, update, options);
+    };
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'waiting');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+    Lead.updateOne = original;
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'dead');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Dead');
+  } finally { Lead.updateOne = original; delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('a reply arriving just before client timeout claim prevents Dead', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  const original = FinalMessage.updateOne;
+  let injected = false;
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    await pastDeadline(clientLead._id);
+    FinalMessage.updateOne = function (filter, update, options) {
+      if (!injected && update?.$set?.status === 'dead') {
+        injected = true;
+        return original.call(this, { _id: filter._id }, { $set: { lastReplyAt: new Date(), lastReplyText: 'Please call me' } }).then(() => original.call(this, filter, update, options));
+      }
+      return original.call(this, filter, update, options);
+    };
+    await followFinalMessages();
+    FinalMessage.updateOne = original;
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'replied');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+  } finally { FinalMessage.updateOne = original; delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('a late final-message reply is retained when the ad inbox also processes it', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    await pastDeadline(clientLead._id); await followFinalMessages();
+    await incoming({ conversation: 'Please call me' });
+    await require('../helpers/leadPhone').clearClientDead({ convertedToUserId: user._id }, { preserveFinalReply: true });
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Dead');
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'replied');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client reply decision rolls back if the behaviour update fails', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  const original = Lead.updateOne;
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    await incoming({ conversation: 'Please call me' }, new Date(Date.now() + 5000)); await followFinalMessages();
+    const reply = await row(clientLead._id);
+    Lead.updateOne = function (filter, update, options) {
+      if (update?.$set?.clientBehaviour === 'Dead') throw new Error('simulated database failure');
+      return original.call(this, filter, update, options);
+    };
+    assert.equal((await call('/auto-reply/final-message/decision', 'POST', { id: String(reply._id), choice: 'dead' })).success, false);
+    assert.equal((await row(clientLead._id)).decision, undefined);
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+    Lead.updateOne = original;
+    assert.equal((await call('/auto-reply/final-message/decision', 'POST', { id: String(reply._id), choice: 'dead' })).status, 200);
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Dead');
+  } finally { Lead.updateOne = original; delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('disabling client automation stops a waiting episode without affecting the client', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    delete process.env.CLIENT_FINAL_MESSAGE_ENABLED;
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'stopped');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+    process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+    await pastDeadline(clientLead._id); await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'stopped');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('a client with a conflicting active message is excluded from batch count and preparation', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    await lead({ status: 'Won', convertedToUserId: user._id, clientBehaviour: 'Negative' });
+    const other = await lead({ phone: '9876543210', status: 'Negative' });
+    await FinalMessage.create({ leadId: other._id, phone: PHONE, hours: 24, status: 'waiting' });
+    assert.equal((await call('/admin/final-message/count', 'GET')).data.clientCount, 0);
+    assert.equal((await call('/admin/final-message/prepare?scope=client', 'POST')).data.prepared, 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client migration requires a unique index and a saved plan and is repeatable', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'client-migration-'));
+  const filename = path.join(directory, 'plan.json');
+  const indexName = 'test_unique_client_migration';
+  try {
+    const user = await User.create({ name: 'Legacy', email: 'legacy@example.test', phone: '9000000091', roles: ['customer'] });
+    const { preparePlan, applyPlan } = require('../scripts/migrateClientFinalMessages');
+    const plan = await preparePlan(filename);
+    assert.equal(plan.items.length, 1);
+    assert.equal(plan.items[0].clientId, String(user._id));
+    await assert.rejects(applyPlan(filename), /maintenance window/);
+    await assert.rejects(applyPlan(filename, { maintenance: true }), /unique partial index/);
+    await Lead.collection.createIndex({ convertedToUserId: 1 }, { name: indexName, unique: true, partialFilterExpression: { convertedToUserId: { $type: 'objectId' } } });
+    assert.deepEqual(await applyPlan(filename, { maintenance: true }), { created: 1, alreadyCreated: 0, skipped: 0 });
+    assert.deepEqual(await applyPlan(filename, { maintenance: true }), { created: 0, alreadyCreated: 1, skipped: 0 });
+    assert.equal((await Lead.findById(plan.items[0].leadId).lean()).status, 'Won');
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally {
+    const indexes = await Lead.collection.indexes();
+    if (indexes.some(index => index.name === indexName)) await Lead.collection.dropIndex(indexName);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 async function sentAndWaiting(fields) {
   const { _id } = await lead(fields);
   const marked = await markNegative(_id);
@@ -177,7 +322,7 @@ async function sentAndWaiting(fields) {
 }
 
 before(async () => {
-  db = await MongoMemoryServer.create();
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.MONGODB_URI = db.getUri();
   await mongoose.connect(db.getUri(), { dbName: 'final-message-isolated-test' });
   await Promise.all([Queue.init(), Lead.init(), FinalMessage.init()]);

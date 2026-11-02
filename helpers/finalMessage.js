@@ -1,5 +1,6 @@
 const Lead = require('../models/leadModel');
 const crypto = require('node:crypto');
+const mongoose = require('mongoose');
 const userModel = require('../models/userModel');
 const { FinalMessage, Lock, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { EmailDraft } = require('../models/emailControlModel');
@@ -71,11 +72,14 @@ async function pendingLeads(fields = null) {
 async function pendingClients() {
   if (!clientAutomationEnabled()) return [];
   const leads = await Lead.find({ status: 'Won', clientBehaviour: NEGATIVE, convertedToUserId: { $ne: null }, deletedAt: null }).sort({ _id: 1 }).lean();
-  const rows = await FinalMessage.find({ leadId: { $in: leads.map(lead => lead._id) } }).lean();
+  const phones = leads.map(lead => normalizePhone(lead.phone)).filter(Boolean);
+  const rows = await FinalMessage.find({ $or: [{ leadId: { $in: leads.map(lead => lead._id) } }, { phone: { $in: phones } }] }).lean();
   const result = [];
   for (const lead of leads) {
     if (!await clientEligible(lead)) continue;
     const own = rows.find(row => String(row.leadId) === String(lead._id));
+    const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && ['review', 'queued', 'waiting', 'replied'].includes(row.status));
+    if (other) continue;
     if (!own || (isClientRow(own) && ['review', 'not-sent'].includes(own.status)) || (!isClientRow(own) && ['dead', 'stopped', 'not-sent', 'email-only'].includes(own.status))) result.push(lead);
   }
   return result;
@@ -161,9 +165,12 @@ async function decideReply(id, choice, userId) {
   const lead = await Lead.findById(row.leadId).lean();
   if (isClientRow(row)) {
     if (!await clientEligible(lead, row)) fail('This client or their behaviour has changed. Open the client in Leads.', 409);
-    const changed = await Lead.updateOne({ _id: lead._id, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: chosen.status }, $inc: { clientBehaviourRevision: 1 }, $push: { followUps: lineWith(chosen.note, lead.status, userId) } });
-    if (!changed.modifiedCount) fail('This client changed. Refresh and try again.', 409);
-    await FinalMessage.updateOne({ _id: row._id, episodeId: row.episodeId, decision: null }, { $set: { decision: choice, decidedAt: new Date(), decidedBy: userId } });
+    await mongoose.connection.transaction(async session => {
+      const claimed = await FinalMessage.updateOne({ _id: row._id, status: 'replied', episodeId: row.episodeId, decision: null }, { $set: { decision: choice, decidedAt: new Date(), decidedBy: userId } }, { session });
+      if (!claimed.modifiedCount) fail('This reply has already been decided.', 409);
+      const changed = await Lead.updateOne({ _id: lead._id, deletedAt: null, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: chosen.status }, $inc: { clientBehaviourRevision: 1 }, $push: { followUps: lineWith(chosen.note, lead.status, userId) } }, { session });
+      if (!changed.modifiedCount) fail('This client changed. Refresh and try again.', 409);
+    });
     return { status: chosen.status };
   }
   if (!lead || lead.deletedAt || lead.status !== NEGATIVE) fail('This lead has moved out of Negative. Open it in Leads.', 409);

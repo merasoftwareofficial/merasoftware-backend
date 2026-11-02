@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const mongoose = require('mongoose');
 const Lead = require('../models/leadModel');
 const { EmailDraft } = require('../models/emailControlModel');
 const { FinalMessage, Lock, Queue, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
@@ -22,7 +23,8 @@ async function addNote(leadId, note) {
   if (lead) await Lead.updateOne({ _id: leadId }, { $push: { followUps: timelineEntry(note, lead.status) } });
 }
 
-async function endRow(row, status) { await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status } }); }
+const rowGuard = row => ({ _id: row._id, status: row.status, ...(isClientRow(row) ? { episodeId: row.episodeId } : {}) });
+async function endRow(row, status) { await FinalMessage.updateOne(rowGuard(row), { $set: { status } }); }
 
 /** What the admin decided and how far the message got. */
 async function followMessage(row, time) {
@@ -35,17 +37,17 @@ async function followMessage(row, time) {
   if (queued) {
     if (queued.status === 'sent') {
       const sentAt = queued.sentAt || time;
-      await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'waiting', phone: queued.to, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000) } });
-      await addNote(row.leadId, `Final message sent. Waiting ${row.hours} hours for a reply.`);
+      const changed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'waiting', phone: queued.to, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000) } });
+      if (changed.modifiedCount) await addNote(row.leadId, `Final message sent. Waiting ${row.hours} hours for a reply.`);
     } else if (['pending', 'sending'].includes(queued.status)) {
-      if (row.status !== 'queued') await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'queued', phone: queued.to } });
+      if (row.status !== 'queued') await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'queued', phone: queued.to } });
       const lead = await Lead.findById(row.leadId).select('status deletedAt').lean();
       if (!isClientRow(row) && queued.status === 'pending' && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
         const { modifiedCount } = await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
         if (modifiedCount) await FinalMessage.updateOne({ _id: row._id }, { $set: { status: 'not-sent' } });
       }
     } else {
-      await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'not-sent', phone: queued.to } }); // failed, expired, cancelled or skipped: no timer, and it may go again
+      await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'not-sent', phone: queued.to } }); // failed, expired, cancelled or skipped: no timer, and it may go again
     }
     return;
   }
@@ -65,10 +67,16 @@ async function settleReply(row, time) {
     const lead = await Lead.findById(row.leadId).lean();
     if (row.status === 'dead') {
       if (!clientAutomationEnabled() || !lead || lead.deletedAt || lead.clientBehaviour !== DEAD || String(lead.convertedToUserId) !== String(row.clientId) || (lead.clientBehaviourRevision || 0) !== (row.behaviourRevision || 0)) return endRow(row, 'stopped');
-      await Lead.updateOne({ _id: lead._id, clientBehaviour: DEAD, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: NEGATIVE } });
+      await mongoose.connection.transaction(async session => {
+        const claimed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'replied', replySeenAt: time } }, { session });
+        if (!claimed.modifiedCount) return;
+        const changed = await Lead.updateOne({ _id: lead._id, deletedAt: null, convertedToUserId: row.clientId, clientBehaviour: DEAD, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: NEGATIVE }, $push: { followUps: timelineEntry(`Replied to the final message: ${row.lastReplyText || 'Message'}`, 'Won') } }, { session });
+        if (!changed.modifiedCount) throw new Error('Client changed while a late reply was being recorded.');
+      });
+      return;
     } else if (!await clientEligible(lead, row)) return endRow(row, 'stopped');
   }
-  const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'replied', replySeenAt: time } });
+  const { modifiedCount } = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'replied', replySeenAt: time } });
   if (!modifiedCount) return;
   if (row.status === 'dead' && !isClientRow(row)) await Lead.updateOne({ _id: row.leadId, status: DEAD }, { $set: { status: NEGATIVE } });
   await addNote(row.leadId, `Replied to the final message: ${row.lastReplyText || 'Message'}`);
@@ -86,9 +94,15 @@ async function closeRow(row) {
   if (isClientRow(row)) {
     const lead = await Lead.findById(row.leadId).lean();
     if (!await clientEligible(lead, row)) return endRow(row, 'stopped');
-    const changed = await Lead.updateOne({ _id: row.leadId, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Client behaviour moved to Dead.`, 'Won') } });
-    if (!changed.modifiedCount) return endRow(row, 'stopped');
-    return endRow(row, 'dead');
+    await mongoose.connection.transaction(async session => {
+      // Incoming replies update this same row. A competing inbound write makes
+      // Mongo retry the transaction, which then sees the reply and cannot close.
+      const claimed = await FinalMessage.updateOne({ _id: row._id, episodeId: row.episodeId, status: 'waiting', $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { status: 'dead' } }, { session });
+      if (!claimed.modifiedCount) return;
+      const changed = await Lead.updateOne({ _id: row.leadId, deletedAt: null, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Client behaviour moved to Dead.`, 'Won') } }, { session });
+      if (!changed.modifiedCount) throw new Error('Client changed while the final message was closing.');
+    });
+    return;
   }
   const leads = await findLeadsByPhone(row.phone, { status: NEGATIVE, deletedAt: null, convertedToUserId: null });
   const own = leads.some(lead => String(lead._id) === String(row.leadId));
@@ -112,6 +126,9 @@ async function followFinalMessages() {
   };
   try {
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
+    if (!clientAutomationEnabled()) {
+      for (const row of await FinalMessage.find({ subjectKind: 'client', status: 'waiting' }).lean()) await attempt(row, item => endRow(item, 'stopped'));
+    }
     // Replies before deadlines: a reply and an expired deadline in the same minute is a reply.
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] }, lastReplyAt: { $ne: null } }).lean()) {
       if (repliedAfterSend(row)) await attempt(row, settleReply);

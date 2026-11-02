@@ -69,15 +69,19 @@ async function leadForNewRequest(phone, { name, email }) {
 }
 
 /** The client wrote to us: a Dead behaviour ends. Nothing else about them changes. */
-async function clearClientDead(filter) {
+async function clearClientDead(filter, { preserveFinalReply = false } = {}) {
   const now = new Date();
   const clients = await leadModel.find({ ...filter, clientBehaviour: DEAD }).select('_id').lean();
-  await leadModel.updateMany({ ...filter, clientBehaviour: DEAD }, {
+  const pending = preserveFinalReply ? await FinalMessage.find({ leadId: { $in: clients.map(client => client._id) }, subjectKind: 'client', $or: [{ status: 'replied', decision: null }, { status: 'dead', lastReplyAt: { $ne: null }, $expr: { $gte: ['$lastReplyAt', '$sentAt'] } }] }).select('leadId').lean() : [];
+  const protectedIds = new Set(pending.map(row => String(row.leadId)));
+  const eligibleIds = clients.filter(client => !protectedIds.has(String(client._id))).map(client => client._id);
+  if (!eligibleIds.length) return;
+  await leadModel.updateMany({ ...filter, _id: { $in: eligibleIds }, clientBehaviour: DEAD }, {
     $unset: { clientBehaviour: 1 },
     $inc: { clientBehaviourRevision: 1 },
     $push: { followUps: { note: "Client wrote to us. Behaviour: Dead to Neutral.", badge: WON, date: now, createdAt: now } },
   });
-  await FinalMessage.updateMany({ leadId: { $in: clients.map(client => client._id) }, subjectKind: 'client', status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
+  await FinalMessage.updateMany({ leadId: { $in: eligibleIds }, subjectKind: 'client', status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
 }
 
 module.exports = { phoneKey, findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, leadForNewRequest, clearClientDead };
