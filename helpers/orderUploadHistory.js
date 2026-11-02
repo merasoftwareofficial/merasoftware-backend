@@ -59,14 +59,36 @@ const getDownloadableFiles = (files, now = new Date()) =>
   (files || []).filter((file) => file?.driveFileId && !isFileExpired(file, now));
 
 /**
+ * New for our team: not downloaded yet, and able to be downloaded. An upload still in delivery or
+ * with only expired files would otherwise hold the count with nothing to press.
+ */
+const isNewUpload = (request, now = new Date()) =>
+  request.awaitingFirstDownload === true
+  && (request.deliveryStatus || "ready") === "ready"
+  && getDownloadableFiles(request.files, now).length > 0;
+
+/**
+ * How many uploads of these orders are new for our team (the admin Uploaded Data badge).
+ * @param {Array} ownerIds the order ids that carry the uploads, as resolveUploadOwnerIds gives them.
+ * @param {*} userId the order owner, the same scope an admin's upload history reads.
+ */
+const countNewUploads = async (ownerIds, userId) => {
+  const requests = await updateRequestModel
+    .find({ updatePlanId: { $in: ownerIds }, userId, awaitingFirstDownload: true })
+    .select("awaitingFirstDownload deliveryStatus files")
+    .lean();
+  return requests.filter((request) => isNewUpload(request)).length;
+};
+
+/**
  * Which order ids carry this order's uploads.
  * A project also owns the records of the services linked to it; a service owns only its own.
  */
-const resolveUploadOwnerIds = async (orderId) => {
+const resolveUploadOwnerIds = async (orderId, knownOrder = null) => {
   const orderObjectId = toObjectId(orderId);
   if (!orderObjectId) return [];
 
-  const order = await orderModel
+  const order = knownOrder || await orderModel
     .findById(orderObjectId)
     .select("_id isServicePlan")
     .lean();
@@ -91,10 +113,12 @@ const resolveUploadOwnerIds = async (orderId) => {
  * @param {string} orderId
  * @param {object} [options]
  * @param {string} [options.userId] restrict to this customer's records; omit for admin reads.
+ * @param {object} [options.order] the order, { _id, isServicePlan }, when the caller already read it.
+ * @param {boolean} [options.forTeam] add `isNew` to each entry; only our team's reads ask for it.
  * @returns {Promise<Array>} one entry per upload attempt
  */
-const getOrderUploadHistory = async (orderId, { userId } = {}) => {
-  const ownerIds = await resolveUploadOwnerIds(orderId);
+const getOrderUploadHistory = async (orderId, { userId, order = null, forTeam = false } = {}) => {
+  const ownerIds = await resolveUploadOwnerIds(orderId, order);
   if (ownerIds.length === 0) return [];
 
   const query = { updatePlanId: { $in: ownerIds } };
@@ -108,12 +132,15 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
 
   const requests = await updateRequestModel
     .find(query)
-    .select("_id userId updatePlanId status deliveryStatus createdAt instructions files statusHistory completedAt allowanceReturnedAt")
+    .select("_id userId updatePlanId status deliveryStatus createdAt instructions files statusHistory completedAt allowanceReturnedAt awaitingFirstDownload")
     .sort({ createdAt: -1 })
     .lean();
   // Status is kept for plan uploads only (helpers/uploadStatus.js); a project's history also
   // holds its linked plans' uploads, so each row says which kind it is.
-  const planOrderIds = new Set((await orderModel.find({ _id: { $in: ownerIds }, isServicePlan: true }).select("_id").lean()).map((row) => String(row._id)));
+  // With the order known this needs no read: every id after the first is a linked service.
+  const planOrderIds = new Set(order
+    ? ownerIds.filter((id, index) => index > 0 || order.isServicePlan).map(String)
+    : (await orderModel.find({ _id: { $in: ownerIds }, isServicePlan: true }).select("_id").lean()).map((row) => String(row._id)));
 
   const now = new Date();
 
@@ -158,6 +185,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
       // Same test the zip route runs, so a listing never offers a download that would
       // produce an empty archive.
       hasDownloadableFiles: getDownloadableFiles(request.files, now).length > 0,
+      ...(forTeam ? { isNew: isNewUpload(request, now) } : {}),
     };
   });
 };
@@ -165,6 +193,7 @@ const getOrderUploadHistory = async (orderId, { userId } = {}) => {
 module.exports = {
   getOrderUploadHistory,
   resolveUploadOwnerIds,
+  countNewUploads,
   buildDownloadLink,
   getDownloadableFiles,
   isFileExpired,

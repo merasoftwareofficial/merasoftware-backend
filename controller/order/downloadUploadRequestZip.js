@@ -105,10 +105,26 @@ const downloadUploadRequestZip = async (req, res) => {
 
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename=uploaded-data-${requestId}.zip`);
-    archive.pipe(res);
+    // The response stays open until the first download is saved: the admin screen re-reads its
+    // count as soon as the zip arrives, and must not read it before this write.
+    archive.pipe(res, { end: false });
+    const drained = new Promise((resolve, reject) => {
+      archive.once("end", resolve);
+      archive.once("error", reject);
+    });
 
     entries.forEach((entry) => archive.append(entry.stream, { name: entry.name }));
     await archive.finalize();
+    await drained;
+
+    // Only our team's finished download clears it. A failed zip or the client's own copy does not.
+    if (req.userRole === "admin") {
+      await updateRequestModel.updateOne(
+        { _id: requestId, awaitingFirstDownload: true },
+        { $set: { awaitingFirstDownload: false, firstDownloadedAt: new Date() } },
+      ).catch((error) => console.error("Could not record the first download:", error.message));
+    }
+    res.end();
   } catch (error) {
     console.error("Error building upload zip:", error);
     if (res.headersSent) {

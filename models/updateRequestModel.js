@@ -90,6 +90,10 @@ const updateRequestSchema = new mongoose.Schema({
   }],
   // Set when a rejected upload gave its plan update back (once only).
   allowanceReturnedAt: { type: Date, default: null },
+  // Waiting for our team's first download. Set when an upload is created, with no schema default:
+  // uploads from before this field never carry it, so they never count as new.
+  awaitingFirstDownload: { type: Boolean },
+  firstDownloadedAt: { type: Date },
 }, {
   timestamps: true
 });

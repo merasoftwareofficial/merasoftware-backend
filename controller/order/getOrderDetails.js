@@ -5,6 +5,8 @@ const { getDueUnpaidInvoiceFilter } = require("../../helpers/projectDuePayment")
 const { getOrderState } = require("../../helpers/orderStatusEngine");
 const { uploadAllowanceNow } = require("../../helpers/serviceAllowance");
 const { buildLifecycleTimeline, getCurrentStateSince } = require("../../helpers/orderLifecycleLog");
+const { getPaymentAccess } = require("../../helpers/offerPaymentPolicy");
+const { countNewUploads } = require("../../helpers/orderUploadHistory");
 
 const toPlainObject = (doc) => {
     if (!doc) return null;
@@ -60,11 +62,8 @@ const getOrderDetails = async (req, res) => {
         const query = isAdmin ? { _id: orderId } : { _id: orderId, userId };
 
         // Find the specific order for this user or admin
-        const order = await orderProductModel.findOne(query)
-            .populate('userId', 'name email address')
-            .populate('productId', 'serviceName category totalPages validityPeriod updateCount isWebsiteUpdate price sellingPrice isMonthlyLimitedPlan isMonthlyRenewablePlan monthlyUpdateLimit yearlyPlanDuration monthlyRenewalPrice monthlyRenewalCost isServicePlan servicePlan formattedDescriptions')
-            .populate('assignedDeveloper', 'name designation avatar status');
-            
+        const order = await orderProductModel.findOne(query);
+
         if (!order) {
             return res.status(404).json({
                 success: false,
@@ -72,9 +71,6 @@ const getOrderDetails = async (req, res) => {
             });
         }
         
-        // Send the complete order details
-        const orderData = toPlainObject(order);
-
         // The unpaid/overdue invoice actually due right now — used by ProjectDetails.js to show
         // a "Payment Pending" lock. Only invoiceModel (project invoices) is checked here, not
         // monthlyInvoiceModel (recurring plans), since this endpoint only serves project orders.
@@ -99,22 +95,23 @@ const getOrderDetails = async (req, res) => {
         // matched exactly as before.
         //
         // Rule lives in helpers/projectDuePayment.js (shared with getUserOrder.js's list/badge feed).
-        const earliestUnpaidInvoice = await invoiceModel
+        const earliestUnpaidInvoiceRead = invoiceModel
             .findOne(getDueUnpaidInvoiceFilter(order))
             .sort({ installmentNumber: 1, invoiceDate: 1 })
             .select('amount status invoiceNumber installmentNumber')
-            .lean();
+            .lean()
+            .exec();
 
-        const serviceInvoices = order.isServicePlan
-            ? await invoiceModel.find({ orderId: order._id }).sort({ invoiceDate: -1 }).select('invoiceNumber invoiceType amount amountPaid status invoiceDate dueDate serviceCycleNumber').lean()
+        const serviceInvoicesRead = order.isServicePlan
+            ? invoiceModel.find({ orderId: order._id }).sort({ invoiceDate: -1 }).select('invoiceNumber invoiceType amount amountPaid status invoiceDate dueDate serviceCycleNumber').lean().exec()
             : [];
 
         // A project is the owner of its add-on service relationship. Return its
         // linked service orders with the project detail payload so the customer
         // has one authoritative workspace instead of reconstructing the link
         // from the global Plans list on the client.
-        const linkedServices = !order.isServicePlan
-            ? await orderProductModel
+        const linkedServicesRead = !order.isServicePlan
+            ? orderProductModel
                 .find({
                     linkedProjectOrderId: order._id,
                     isServicePlan: true,
@@ -133,14 +130,8 @@ const getOrderDetails = async (req, res) => {
                 ].join(' '))
                 .populate('productId', 'serviceName category servicePlan formattedDescriptions')
                 .lean()
+                .exec()
             : [];
-
-        // Linked services get the same derived state as any other order, so the badge on a
-        // service inside a project reads identically to the badge on that service's own row.
-        linkedServices.forEach((service) => {
-            service.orderState = getOrderState(service);
-            service.uploadAllowance = uploadAllowanceNow(service);
-        });
 
         // A payment the customer has already SUBMITTED but the admin has not yet verified.
         // Without this, a submitted-but-unapproved payment is invisible to the customer: the
@@ -153,7 +144,7 @@ const getOrderDetails = async (req, res) => {
         // This replaces the never-implemented `checkPendingOrderTransactions` route ProjectDetails.js
         // used to call — it was never registered in routes/index.js, so that fetch always 404'd and
         // its result was silently discarded (see DOCS/53, which confirmed it dead).
-        const pendingPaymentTransaction = await transactionModel
+        const pendingPaymentTransactionRead = transactionModel
             .findOne({
                 orderId: order._id,
                 status: 'pending',
@@ -161,7 +152,41 @@ const getOrderDetails = async (req, res) => {
             })
             .sort({ createdAt: -1 })
             .select('amount installmentNumber paymentMethod upiTransactionId createdAt')
-            .lean();
+            .lean()
+            .exec();
+
+        // The admin project page's Uploaded Data badge: this project's uploads and its linked
+        // services', the same set its upload history lists. Populate replaces order.userId.
+        const ownerId = order.userId;
+        const newUploadsCountRead = isAdmin && !order.isServicePlan
+            ? linkedServicesRead.then((services) => countNewUploads([order._id, ...services.map((service) => service._id)], ownerId))
+            : null;
+
+        // These reads do not depend on each other, so they run together: one round to the
+        // database instead of one per read. The filters above read order fields before populate.
+        const [, earliestUnpaidInvoice, serviceInvoices, linkedServices, pendingPaymentTransaction, paymentAccess, newUploadsCount] = await Promise.all([
+            order.populate([
+                { path: 'userId', select: 'name email address' },
+                { path: 'productId', select: 'serviceName category totalPages validityPeriod updateCount isWebsiteUpdate price sellingPrice isMonthlyLimitedPlan isMonthlyRenewablePlan monthlyUpdateLimit yearlyPlanDuration monthlyRenewalPrice monthlyRenewalCost isServicePlan servicePlan formattedDescriptions' },
+                { path: 'assignedDeveloper', select: 'name designation avatar status' },
+            ]),
+            earliestUnpaidInvoiceRead,
+            serviceInvoicesRead,
+            linkedServicesRead,
+            pendingPaymentTransactionRead,
+            order.paymentPolicy ? getPaymentAccess(order) : null,
+            newUploadsCountRead,
+        ]);
+
+        // Send the complete order details
+        const orderData = toPlainObject(order);
+
+        // Linked services get the same derived state as any other order, so the badge on a
+        // service inside a project reads identically to the badge on that service's own row.
+        linkedServices.forEach((service) => {
+            service.orderState = getOrderState(service);
+            service.uploadAllowance = uploadAllowanceNow(service);
+        });
 
         // Derived state, from the one place that owns that decision
         // (helpers/orderStatusEngine.js). This endpoint used to build its own `status` string
@@ -184,7 +209,7 @@ const getOrderDetails = async (req, res) => {
 
         const responseData = {
             ...orderData,
-            paymentAccess: order.paymentPolicy ? await require('../../helpers/offerPaymentPolicy').getPaymentAccess(order) : null,
+            paymentAccess,
             orderState,
             lifecycleTimeline,
             // When the order reached the state it is in now — powers the "since" on a status badge.
@@ -205,6 +230,10 @@ const getOrderDetails = async (req, res) => {
 
         if (!isAdmin) {
             Object.assign(responseData, getCustomerTimeline(orderData));
+        }
+
+        if (newUploadsCount !== null) {
+            responseData.newUploadsCount = newUploadsCount;
         }
 
         res.status(200).json({

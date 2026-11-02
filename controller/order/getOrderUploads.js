@@ -12,7 +12,7 @@ const getOrderUploads = async (req, res) => {
     const { orderId } = req.params;
     const isAdmin = req.userRole === "admin";
 
-    const order = await orderModel.findById(orderId).select("_id userId").lean();
+    const order = await orderModel.findById(orderId).select("_id userId isServicePlan").lean();
     if (!order) {
       return res.status(404).json({
         message: "Order not found",
@@ -27,6 +27,8 @@ const getOrderUploads = async (req, res) => {
     // An admin reads the order owner's uploads, not their own.
     const history = await getOrderUploadHistory(orderId, {
       userId: isAdmin ? order.userId : req.userId,
+      order,
+      forTeam: isAdmin,
     });
 
     return res.status(200).json({

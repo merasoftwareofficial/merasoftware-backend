@@ -123,6 +123,7 @@ async function commitSubmission(req, { instructions, files, receipt = false }) {
       await measureUpload(req.uploadTiming, 'request_save', () => UpdateRequest.create([{
         _id: requestId, userId: req.userId, updatePlanId: current._id,
         instructions, files, status: 'pending', deliveryStatus: receipt ? 'queued' : 'ready',
+        awaitingFirstDownload: true,
       }], { session }));
       if (req.externalUpload) {
         const { link, reservationId } = req.externalUpload;

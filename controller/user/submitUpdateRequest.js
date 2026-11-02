@@ -232,7 +232,8 @@ const submitCore = asyncHandler(async (req, res) => {
           timestamp: new Date(msg.timestamp || Date.now())
         })),
         files: fileObjects,
-        status: 'pending'
+        status: 'pending',
+        awaitingFirstDownload: true
       });
     
       // Save the request
