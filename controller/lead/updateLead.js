@@ -58,7 +58,12 @@ const updateLeadController = async (req, res) => {
     const previousStatus = lead.status;
     if (action === "setBehaviour") {
       const data = await setBehaviour(leadId, req.body.behaviour, req.userId);
-      return res.json({ message: "Behaviour updated", data, success: true, error: false });
+      let finalMessage;
+      if (req.body.behaviour === NEGATIVE && lead.clientBehaviour !== NEGATIVE) {
+        try { finalMessage = await require('../../helpers/finalMessage').prepareFor(await leadModel.findById(leadId).lean()); }
+        catch (error) { console.error('Client behaviour saved; final message unavailable:', error.message); finalMessage = 'unavailable'; }
+      }
+      return res.json({ message: "Behaviour updated", data, finalMessage, success: true, error: false });
     }
 
     if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {

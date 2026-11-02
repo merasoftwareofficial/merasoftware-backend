@@ -173,6 +173,7 @@ async function setBehaviour(leadId, value, actor) {
   if (before === value) return { clientBehaviour: value };
   await Lead.updateOne({ _id: lead._id }, {
     $set: { clientBehaviour: value },
+    $inc: { clientBehaviourRevision: 1 },
     $push: { followUps: line(`Client behaviour: ${leadStatusLabel(before)} to ${leadStatusLabel(value)}.`, lead.status, actor) },
   });
   return { clientBehaviour: value };

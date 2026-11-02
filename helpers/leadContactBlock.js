@@ -61,15 +61,18 @@ async function contactBlocks() {
 
   if (!rows.length) return blocks;
   const [leads, sent] = await Promise.all([
-    Lead.find({ _id: { $in: rows.map(row => row.leadId) }, status: NEGATIVE, deletedAt: null }).select('phone').lean(),
+    Lead.find({ _id: { $in: rows.map(row => row.leadId) }, $or: [{ status: NEGATIVE }, { status: 'Won', clientBehaviour: NEGATIVE, convertedToUserId: { $ne: null } }], deletedAt: null }).select('phone status clientBehaviour clientBehaviourRevision convertedToUserId').lean(),
     reviewsSent(rows),
   ]);
-  const phoneOf = new Map(leads.map(lead => [String(lead._id), lead.phone]));
+  const phoneOf = new Map(leads.map(lead => [String(lead._id), lead]));
   for (const row of rows) {
-    const leadPhone = phoneOf.get(String(row.leadId));
-    if (leadPhone === undefined) continue; // the admin moved it out of Negative: the countdown no longer counts
-    const key = phoneKey(row.phone || leadPhone);
-    if (!key || clientKeys.has(key) || blocks.has(key)) continue;
+    const lead = phoneOf.get(String(row.leadId));
+    if (!lead) continue;
+    const client = row.subjectKind === 'client';
+    if (client && (process.env.CLIENT_FINAL_MESSAGE_ENABLED !== 'true' || lead.status !== 'Won' || String(lead.convertedToUserId) !== String(row.clientId) || (lead.clientBehaviourRevision || 0) !== (row.behaviourRevision || 0))) continue;
+    if (!client && lead.status !== NEGATIVE) continue;
+    const key = phoneKey(row.phone || lead.phone);
+    if (!key || (!client && clientKeys.has(key)) || blocks.has(key)) continue;
     if (row.status === 'review' && !(row.draftId ? sent.pressed.has(String(row.draftId)) : sent.unlinked)) continue;
     blocks.set(key, row.status === 'replied' ? 'needs-decision' : 'final-message');
   }
@@ -97,7 +100,15 @@ async function assertDraftMayGo(draftId) {
   const draft = await EmailDraft.findById(draftId).select('event leadId whatsappTo').lean();
   if (!draft || !MARKETING_EVENTS.includes(draft.event)) return;
   // The Final Message's own draft: the block exists because of it.
-  if (draft.event === 'lead.finalMessage' && await FinalMessage.exists({ draftId: draft._id })) return;
+  if (draft.event === 'lead.finalMessage') {
+    const row = await FinalMessage.findOne({ draftId: draft._id }).lean();
+    if (row?.subjectKind === 'client') {
+      const lead = await Lead.findById(row.leadId).lean();
+      if (!await require('./finalMessage').clientEligible(lead, row) || row.status !== 'review') throw Object.assign(new Error('This client or final message changed. Refresh before sending.'), { status: 409 });
+      return;
+    }
+    if (row) return;
+  }
   const lead = draft.leadId ? await Lead.findById(draft.leadId).select('phone status requestedByUserId').lean() : null;
   if (!lead && !draft.whatsappTo) return;
   await assertMayContact({ status: lead?.status, requestedByUserId: lead?.requestedByUserId, phone: draft.whatsappTo || lead?.phone });

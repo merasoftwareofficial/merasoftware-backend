@@ -59,6 +59,113 @@ const incoming = (message, at = new Date(), number = PHONE) => inbound.handle({ 
 const pastDeadline = id => FinalMessage.updateOne({ leadId: id }, { $set: { deadlineAt: new Date(Date.now() - 1000), sentAt: new Date(Date.now() - 100 * HOUR) } });
 const row = id => FinalMessage.findOne({ leadId: id }).lean();
 const stage = async id => (await Lead.findById(id).lean()).status;
+
+test('client final message follows a sent WhatsApp without changing Matured', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    assert.equal(marked.finalMessage, 'prepared');
+    assert.equal((await row(clientLead._id)).subjectKind, 'client');
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+    await sendQueue(phone());
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'waiting');
+    assert.equal((await audience('Won')).count, 0);
+    await pastDeadline(clientLead._id);
+    await followFinalMessages();
+    const saved = await Lead.findById(clientLead._id).lean();
+    assert.equal(saved.status, 'Won');
+    assert.equal(saved.clientBehaviour, 'Dead');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client reply stays Negative for a decision and stale behaviour cancels an old wait', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+    await sendQueue(phone()); await followFinalMessages();
+    await incoming({ conversation: 'Please call me' }, new Date(Date.now() + 5000));
+    await followFinalMessages();
+    assert.equal((await row(clientLead._id)).status, 'replied');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
+    const list = await call('/auto-reply/final-message', 'GET');
+    assert.equal(list.data.needsDecision.length, 1);
+    await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Positive' });
+    const decision = await call('/auto-reply/final-message/decision', 'POST', { id: String((await row(clientLead._id))._id), choice: 'dead' });
+    assert.equal(decision.status, 409);
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Positive');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client audit reports safe missing records and flags uncertain matches without writing', async () => {
+  const { auditClientFinalMessages } = require('../scripts/auditClientFinalMessages');
+  const linked = await User.create({ name: 'Linked', email: 'linked@example.test', phone: '9000000011', roles: ['customer'] });
+  await lead({ name: 'Linked', phone: '9000000011', status: 'Won', convertedToUserId: linked._id });
+  const missing = await User.create({ name: 'Missing', email: 'missing@example.test', phone: '9000000012', roles: ['customer'] });
+  await User.create({ name: 'Ambiguous', email: 'ambiguous@example.test', phone: '9000000013', roles: ['customer'] });
+  await lead({ phone: '9000000013', email: 'ambiguous@example.test' });
+  const before = await Lead.countDocuments();
+  const result = await auditClientFinalMessages();
+  assert.equal(result.clients, 3); assert.equal(result.linked, 1); assert.equal(result.missing, 1); assert.equal(result.ambiguous, 1);
+  assert.deepEqual(result.candidates, [String(missing._id)]);
+  assert.equal(await Lead.countDocuments(), before);
+});
+
+test('already Negative clients appear in a separate batch and each message stays in review', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id, clientBehaviour: 'Negative' });
+    const counts = await call('/admin/final-message/count', 'GET');
+    assert.equal(counts.data.clientCount, 1);
+    const prepared = await call('/admin/final-message/prepare?scope=client', 'POST');
+    assert.equal(prepared.data.prepared, 1);
+    assert.equal((await row(clientLead._id)).status, 'review');
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('starting a new client episode preserves the previous decision and does not send automatically', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+    await sendQueue(phone()); await followFinalMessages();
+    await incoming({ conversation: 'Please call me' }, new Date(Date.now() + 5000));
+    await followFinalMessages();
+    const previous = await row(clientLead._id);
+    assert.equal((await call('/auto-reply/final-message/decision', 'POST', { id: String(previous._id), choice: 'keep' })).status, 200);
+    const next = await call(`/admin/leads/${clientLead._id}/final-message?new=1`, 'POST');
+    assert.equal(next.status, 200);
+    const current = await row(clientLead._id);
+    assert.equal(current.status, 'review');
+    assert.notEqual(current.episodeId, previous.episodeId);
+    assert.equal(current.episodeHistory.at(-1).decision, 'keep');
+    assert.equal(current.episodeHistory.at(-1).lastReplyText, 'Please call me');
+    assert.equal(await Queue.countDocuments(), 1);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('concurrent client preparation creates only one tracked draft', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id, clientBehaviour: 'Negative' });
+    const results = await Promise.all([call(`/admin/leads/${clientLead._id}/final-message`, 'POST'), call(`/admin/leads/${clientLead._id}/final-message`, 'POST')]);
+    assert.ok(results.some(result => result.status === 200));
+    assert.equal(await FinalMessage.countDocuments({ leadId: clientLead._id }), 1);
+    assert.ok(await EmailDraft.findById((await row(clientLead._id)).draftId));
+    assert.equal(await EmailDraft.countDocuments({ event: 'lead.finalMessage' }), 1);
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
 async function sentAndWaiting(fields) {
   const { _id } = await lead(fields);
   const marked = await markNegative(_id);

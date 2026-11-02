@@ -5,6 +5,7 @@ const { FinalMessage, Lock, Queue, State, STATE_ID, finishedExpiry } = require('
 const { DEAD, NEGATIVE } = require('./leadStatuses');
 const { findLeadsByPhone } = require('./leadPhone');
 const { workerAlive } = require('./whatsappReadiness');
+const { clientEligible, clientAutomationEnabled, isClientRow } = require('./finalMessage');
 
 // Every minute (index.js): follows each final message after the admin's decision. Never sends: a message only
 // reaches the queue through the review popup. A lead becomes Dead only here, or by the admin's hand.
@@ -26,6 +27,11 @@ async function endRow(row, status) { await FinalMessage.updateOne({ _id: row._id
 /** What the admin decided and how far the message got. */
 async function followMessage(row, time) {
   const queued = await Queue.findOne({ emailDraftId: row.draftId }).select('status to sentAt').lean();
+  if (isClientRow(row) && !await clientEligible(await Lead.findById(row.leadId).lean(), row)) {
+    if (queued?.status === 'pending') await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
+    if (queued?.status !== 'sending') await endRow(row, 'stopped');
+    return;
+  }
   if (queued) {
     if (queued.status === 'sent') {
       const sentAt = queued.sentAt || time;
@@ -34,7 +40,7 @@ async function followMessage(row, time) {
     } else if (['pending', 'sending'].includes(queued.status)) {
       if (row.status !== 'queued') await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'queued', phone: queued.to } });
       const lead = await Lead.findById(row.leadId).select('status deletedAt').lean();
-      if (queued.status === 'pending' && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
+      if (!isClientRow(row) && queued.status === 'pending' && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
         const { modifiedCount } = await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
         if (modifiedCount) await FinalMessage.updateOne({ _id: row._id }, { $set: { status: 'not-sent' } });
       }
@@ -55,9 +61,16 @@ const repliedAfterSend = row => row.lastReplyAt && row.sentAt && row.lastReplyAt
 
 /** A reply of any kind: the lead stays Negative and the admin sees it. A late one brings a Dead lead back to Negative. */
 async function settleReply(row, time) {
+  if (isClientRow(row)) {
+    const lead = await Lead.findById(row.leadId).lean();
+    if (row.status === 'dead') {
+      if (!clientAutomationEnabled() || !lead || lead.deletedAt || lead.clientBehaviour !== DEAD || String(lead.convertedToUserId) !== String(row.clientId) || (lead.clientBehaviourRevision || 0) !== (row.behaviourRevision || 0)) return endRow(row, 'stopped');
+      await Lead.updateOne({ _id: lead._id, clientBehaviour: DEAD, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: NEGATIVE } });
+    } else if (!await clientEligible(lead, row)) return endRow(row, 'stopped');
+  }
   const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, status: row.status }, { $set: { status: 'replied', replySeenAt: time } });
   if (!modifiedCount) return;
-  if (row.status === 'dead') await Lead.updateOne({ _id: row.leadId, status: DEAD }, { $set: { status: NEGATIVE } });
+  if (row.status === 'dead' && !isClientRow(row)) await Lead.updateOne({ _id: row.leadId, status: DEAD }, { $set: { status: NEGATIVE } });
   await addNote(row.leadId, `Replied to the final message: ${row.lastReplyText || 'Message'}`);
 }
 
@@ -70,6 +83,13 @@ const ignoredToNote = row => row.sentAt && row.lastIgnoredAt >= row.sentAt && (!
 
 /** No reply in time: Dead, only if the lead is still Negative. The admin may have moved it meanwhile. */
 async function closeRow(row) {
+  if (isClientRow(row)) {
+    const lead = await Lead.findById(row.leadId).lean();
+    if (!await clientEligible(lead, row)) return endRow(row, 'stopped');
+    const changed = await Lead.updateOne({ _id: row.leadId, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Client behaviour moved to Dead.`, 'Won') } });
+    if (!changed.modifiedCount) return endRow(row, 'stopped');
+    return endRow(row, 'dead');
+  }
   const leads = await findLeadsByPhone(row.phone, { status: NEGATIVE, deletedAt: null, convertedToUserId: null });
   const own = leads.some(lead => String(lead._id) === String(row.leadId));
   if (!own) return endRow(row, 'stopped');

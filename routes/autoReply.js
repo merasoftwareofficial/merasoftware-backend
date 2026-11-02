@@ -78,16 +78,17 @@ router.get('/final-message', handle(async () => {
     readHours(),
     readIgnored(),
     FinalMessage.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-    FinalMessage.find({ status: 'replied', decision: null }).sort({ replySeenAt: -1 }).select('leadId phone lastReplyAt lastReplyText').lean(),
+    FinalMessage.find({ status: 'replied', decision: null }).sort({ replySeenAt: -1 }).select('leadId phone lastReplyAt lastReplyText subjectKind clientId behaviourRevision').lean(),
   ]);
-  const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) }, deletedAt: null }).select('name status').lean();
+  const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) }, deletedAt: null }).select('name status clientBehaviour clientBehaviourRevision convertedToUserId').lean();
   return {
     hours, minHours: MIN_HOURS, maxHours: MAX_HOURS, ignoredReplies,
     counts: Object.fromEntries(counts.map(row => [row._id, row.count])),
     // A lead the admin has already moved by hand needs no decision here.
     needsDecision: replied.flatMap(row => {
       const lead = leads.find(item => String(item._id) === String(row.leadId));
-      return lead?.status === NEGATIVE ? [{ ...row, name: lead.name || '' }] : [];
+      const validClient = row.subjectKind === 'client' && lead?.status === 'Won' && lead.clientBehaviour === NEGATIVE && String(lead.convertedToUserId) === String(row.clientId) && (lead.clientBehaviourRevision || 0) === (row.behaviourRevision || 0);
+      return (validClient || (row.subjectKind !== 'client' && lead?.status === NEGATIVE)) ? [{ ...row, name: lead.name || '' }] : [];
     }),
   };
 }));

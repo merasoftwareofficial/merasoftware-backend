@@ -112,6 +112,11 @@ inboxSchema.index({ phone: 1, createdAt: 1 });
 export const FINAL_MESSAGE_STATUSES = ['review', 'queued', 'waiting', 'replied', 'dead', 'not-sent', 'email-only', 'stopped'];
 const finalMessageSchema = new mongoose.Schema({
   leadId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+  subjectKind: { type: String, enum: ['lead', 'client'], default: 'lead' },
+  clientId: mongoose.Schema.Types.ObjectId,
+  behaviourRevision: Number,
+  episodeId: String,
+  episodeHistory: { type: [mongoose.Schema.Types.Mixed], default: [] },
   phone: { type: String, default: null, index: true }, // digits with country code; replies from it are noted below
   draftId: mongoose.Schema.Types.ObjectId, // the reviewed message; its queue row has this as emailDraftId
   hours: Number, // the wait this message promised, whatever the setting becomes later

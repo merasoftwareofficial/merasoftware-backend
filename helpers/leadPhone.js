@@ -71,10 +71,13 @@ async function leadForNewRequest(phone, { name, email }) {
 /** The client wrote to us: a Dead behaviour ends. Nothing else about them changes. */
 async function clearClientDead(filter) {
   const now = new Date();
+  const clients = await leadModel.find({ ...filter, clientBehaviour: DEAD }).select('_id').lean();
   await leadModel.updateMany({ ...filter, clientBehaviour: DEAD }, {
     $unset: { clientBehaviour: 1 },
+    $inc: { clientBehaviourRevision: 1 },
     $push: { followUps: { note: "Client wrote to us. Behaviour: Dead to Neutral.", badge: WON, date: now, createdAt: now } },
   });
+  await FinalMessage.updateMany({ leadId: { $in: clients.map(client => client._id) }, subjectKind: 'client', status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
 }
 
 module.exports = { phoneKey, findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, leadForNewRequest, clearClientDead };

@@ -169,6 +169,9 @@ const leadSchema = new mongoose.Schema({
     type: String,
     enum: CLIENT_BEHAVIOURS,
   },
+  // Incremented whenever an administrator changes client behaviour. Tracked
+  // messages use this to reject an old countdown after a later change.
+  clientBehaviourRevision: { type: Number, default: 0 },
   // Versioned proposal/quotation files (Phase 6A). Each upload is a new version
   // so the full revision history / timeline is preserved (client changes over time).
   proposals: {

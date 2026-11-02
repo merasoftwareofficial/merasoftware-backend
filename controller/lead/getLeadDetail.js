@@ -31,7 +31,7 @@ const getLeadDetailController = async (req, res) => {
     }
 
     const [finalMessage, blocked, offerTargets, clientAvailable] = await Promise.all([
-      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision").lean(),
+      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind").lean(),
       blockForLead(lead),
       targetsForLead(lead._id),
       lead.convertedToUserId ? userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }) : null,
