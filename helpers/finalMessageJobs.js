@@ -23,11 +23,12 @@ async function addNote(leadId, note) {
   if (lead) await Lead.updateOne({ _id: leadId }, { $push: { followUps: timelineEntry(note, lead.status) } });
 }
 
-const rowGuard = row => ({ _id: row._id, status: row.status, ...(isClientRow(row) ? { episodeId: row.episodeId } : {}) });
+const { cycleGuard: rowGuard } = require('./stopFinalMessage');
 async function endRow(row, status) { await FinalMessage.updateOne(rowGuard(row), { $set: { status } }); }
 
 /** What the admin decided and how far the message got. */
 async function followMessage(row, time) {
+  if (row.outboundChecks?.length && await require('./stopFinalMessage').processOutbound(row) !== 'clear') return;
   const queued = await Queue.findOne({ emailDraftId: row.draftId }).select('status to sentAt messageId messageChat text').lean();
   if (isClientRow(row) && !await clientEligible(await Lead.findById(row.leadId).lean(), row)) {
     if (queued?.status === 'pending') await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
@@ -45,7 +46,7 @@ async function followMessage(row, time) {
       const lead = await Lead.findById(row.leadId).select('status deletedAt').lean();
       if (!isClientRow(row) && queued.status === 'pending' && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
         const { modifiedCount } = await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
-        if (modifiedCount) await FinalMessage.updateOne({ _id: row._id }, { $set: { status: 'not-sent' } });
+        if (modifiedCount) await FinalMessage.updateOne({ ...rowGuard(row), status: { $in: ['review', 'queued'] } }, { $set: { status: 'not-sent' } });
       }
     } else {
       await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'not-sent', phone: queued.to } }); // failed, expired, cancelled or skipped: no timer, and it may go again
@@ -92,13 +93,14 @@ const ignoredToNote = row => row.sentAt && row.lastIgnoredAt >= row.sentAt && (!
 
 /** No reply in time: Dead, only if the lead is still Negative. The admin may have moved it meanwhile. */
 async function closeRow(row) {
+  if (await require('./stopFinalMessage').processOutbound(row) !== 'clear') return;
   if (isClientRow(row)) {
     const lead = await Lead.findById(row.leadId).lean();
     if (!await clientEligible(lead, row)) return endRow(row, 'stopped');
     await mongoose.connection.transaction(async session => {
       // Incoming replies update this same row. A competing inbound write makes
       // Mongo retry the transaction, which then sees the reply and cannot close.
-      const claimed = await FinalMessage.updateOne({ _id: row._id, episodeId: row.episodeId, status: 'waiting', $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { status: 'dead' } }, { session });
+      const claimed = await FinalMessage.updateOne({ ...rowGuard(row), 'outboundChecks.0': { $exists: false }, $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { status: 'dead' } }, { session });
       if (!claimed.modifiedCount) return;
       const changed = await Lead.updateOne({ _id: row.leadId, deletedAt: null, convertedToUserId: row.clientId, status: 'Won', clientBehaviour: NEGATIVE, clientBehaviourRevision: row.behaviourRevision ? row.behaviourRevision : { $in: [null, 0] } }, { $set: { clientBehaviour: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Client behaviour moved to Dead.`, 'Won') } }, { session });
       if (!changed.modifiedCount) throw new Error('Client changed while the final message was closing.');
@@ -108,11 +110,15 @@ async function closeRow(row) {
   const leads = await findLeadsByPhone(row.phone, { status: NEGATIVE, deletedAt: null, convertedToUserId: null });
   const own = leads.some(lead => String(lead._id) === String(row.leadId));
   if (!own) return endRow(row, 'stopped');
-  for (const lead of leads) {
-    await Lead.updateOne({ _id: lead._id, status: NEGATIVE },
-      { $set: { status: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Moved to Dead.`, DEAD) } });
-  }
-  return endRow(row, 'dead');
+  await mongoose.connection.transaction(async session => {
+    const claimed = await FinalMessage.updateOne({ ...rowGuard(row), 'outboundChecks.0': { $exists: false }, $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { status: 'dead' } }, { session });
+    if (!claimed.modifiedCount) return;
+    for (const lead of leads) {
+      const changed = await Lead.updateOne({ _id: lead._id, status: NEGATIVE },
+        { $set: { status: DEAD }, $push: { followUps: timelineEntry(`No reply to the final message in ${row.hours} hours. Moved to Dead.`, DEAD) } }, { session });
+      if (String(lead._id) === String(row.leadId) && !changed.modifiedCount) throw new Error('Lead changed while its countdown was closing.');
+    }
+  });
 }
 
 async function followFinalMessages() {
@@ -127,6 +133,9 @@ async function followFinalMessages() {
   };
   try {
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
+    for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] } }).lean()) {
+      await attempt(row, item => require('./stopFinalMessage').processOutbound(item));
+    }
     if (!clientAutomationEnabled()) {
       for (const row of await FinalMessage.find({ subjectKind: 'client', status: 'waiting' }).lean()) await attempt(row, item => endRow(item, 'stopped'));
     }

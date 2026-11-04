@@ -31,11 +31,11 @@ const getLeadDetailController = async (req, res) => {
       });
     }
 
-    const [finalMessage, blocked, offerTargets, clientAvailable] = await Promise.all([
-      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind draftId hours").lean(),
+    const [finalMessage, blocked, offerTargets, clientAccount] = await Promise.all([
+      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind draftId hours stoppedAt stopReason stopSource").lean(),
       blockForLead(lead),
       targetsForLead(lead._id),
-      lead.convertedToUserId ? userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }) : null,
+      lead.convertedToUserId ? userModel.findOne({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }).select("name email phone").lean() : null,
     ]);
     // Present the latest delivery result without waiting for the minute job or changing tracking.
     if (finalMessage && ['review', 'queued'].includes(finalMessage.status)) {
@@ -54,7 +54,9 @@ const getLeadDetailController = async (req, res) => {
     lead.finalMessage = finalMessage;
     lead.contactBlock = blocked ? { reason: blocked, label: LABELS[blocked], message: MESSAGES[blocked] } : null;
     lead.offerTargets = offerTargets;
-    lead.clientAvailable = Boolean(clientAvailable);
+    lead.clientAvailable = Boolean(clientAccount);
+    // The client account holds the real name, phone and email (Edit Details starts from these, not the lead's copy).
+    lead.client = clientAccount ? { name: clientAccount.name || "", email: clientAccount.email || "", phone: clientAccount.phone || "" } : null;
     lead.serverNow = new Date();
     if (lead.convertedToUserId && lead.clientBehaviour === 'Negative') lead.finalMessageReadiness = await require('../../helpers/clientFinalMessageReadiness').clientStartReadiness(lead);
 

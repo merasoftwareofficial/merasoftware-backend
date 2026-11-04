@@ -125,7 +125,7 @@ test('only the worker talks to WhatsApp, and only whatsappQueue.js adds to the q
   const files = [];
   const walk = dir => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', '.git', 'tests', 'uploads'].includes(entry.name)) continue;
+      if (['node_modules', '.git', 'tests', 'uploads', 'backup'].includes(entry.name)) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (/\.(c|m)?js$/.test(entry.name)) files.push(full);

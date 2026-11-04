@@ -13,7 +13,7 @@ const getLeadsController = async (req, res) => {
 
     const leads = await leadModel
       .find({ deletedAt: null })
-      .select("name phone email source status proposalSentAt convertedToUserId requestedByUserId clientBehaviour createdAt updatedAt")
+      .select("name nameFromWhatsapp businessName phone altPhone email source status proposalSentAt convertedToUserId requestedByUserId clientBehaviour createdAt updatedAt")
       .sort({ updatedAt: -1 })
       .lean();
 

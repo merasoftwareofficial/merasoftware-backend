@@ -6,6 +6,10 @@ const { buildTemplatedMail } = require('./emailTemplates');
 const { hasEmail, proposalValues } = require('./leadProposalMessage');
 const { readHours } = require('./finalMessage');
 const { normalizePhone } = require('./whatsappQueue');
+const { hasConfirmedName } = require('./leadName');
+
+// A name guessed from WhatsApp is never used to greet: the message goes without a name until it is confirmed.
+const greetingName = lead => (hasConfirmedName(lead) ? lead.name : '');
 
 // Send message on a lead's page: any lead, any stage, as many times as the admin wants. This file only decides which
 // actions fit a lead and fills them from the saved lead. Templates, the review popup, sending, the WhatsApp queue and
@@ -17,8 +21,8 @@ const emailOf = lead => (hasEmail(lead) ? lead.email : '');
 
 // Each action this popup offers, in the dropdown's order. Other actions need data a lead doesn't have.
 const TYPES = {
-  'lead.message': { values: lead => ({ name: lead.name || '' }) },
-  'lead.created': { values: lead => ({ name: lead.name || '' }) },
+  'lead.message': { values: lead => ({ name: greetingName(lead) }) },
+  'lead.created': { values: lead => ({ name: greetingName(lead) }) },
   'lead.proposal': {
     fits: lead => !!latestProposal(lead),
     values: lead => proposalValues(lead, latestProposal(lead)),

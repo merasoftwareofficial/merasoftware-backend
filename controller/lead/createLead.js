@@ -2,7 +2,8 @@ const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const AdminSettings = require("../../models/adminSettingsModel");
 const { creditWalletInstant } = require("../../helpers/transactionService");
-const { findLeadsByPhone } = require("../../helpers/leadPhone");
+const { findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
+const { isAccountEmail } = require("../../helpers/emailValidator");
 
 const createLeadController = async (req, res) => {
   try {
@@ -14,11 +15,14 @@ const createLeadController = async (req, res) => {
       });
     }
 
-    const { name, phone, email, source, notes, referredByUserId } = req.body;
+    const { name, phone, email, source, notes, referredByUserId, businessName, altPhone } = req.body;
 
     const cleanName = (name || "").trim();
     const cleanPhone = (phone || "").trim();
     const cleanEmail = (email || "").trim().toLowerCase();
+    // Optional extras: search and contact only, never used to match or block a person.
+    const cleanBusinessName = String(businessName || "").trim();
+    const cleanAltPhone = String(altPhone || "").trim();
 
     // Only meaningful when Source = "Reference" and an existing customer was
     // matched/selected in the Add Lead form. Validated here so a stale/tampered
@@ -52,6 +56,23 @@ const createLeadController = async (req, res) => {
       });
     }
 
+    // Same rule as Edit Lead (updateLead.js "editDetails"): an email that is there must be a real address.
+    if (cleanEmail && !isAccountEmail(cleanEmail)) {
+      return res.status(400).json({
+        message: "Please provide a valid email address",
+        error: true,
+        success: false,
+      });
+    }
+
+    if (cleanAltPhone && phoneKey(cleanAltPhone) === phoneKey(cleanPhone)) {
+      return res.status(400).json({
+        message: "The alternate number is the same as the phone number",
+        error: true,
+        success: false,
+      });
+    }
+
     // Duplicate guard within leads only (phone or email match)
     const duplicateOr = [];
     if (cleanEmail) duplicateOr.push({ email: cleanEmail });
@@ -70,7 +91,9 @@ const createLeadController = async (req, res) => {
 
     const lead = new leadModel({
       name: cleanName,
+      businessName: cleanBusinessName,
       phone: cleanPhone,
+      altPhone: cleanAltPhone,
       email: cleanEmail,
       source: (source || "").trim(),
       notes: notes || "",

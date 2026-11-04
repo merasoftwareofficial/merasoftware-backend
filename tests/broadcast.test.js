@@ -55,6 +55,15 @@ test('stage groups ignore badges; proposal audience includes only badged Contact
   const result = await audience('Contacted');
   assert.equal(result.count, 2); assert.deepEqual(result.excluded, { invalidPhone: 1, duplicatePhone: 1, noName: 0, doNotDisturb: 0 });
 });
+
+test('a name guessed from WhatsApp counts as no name: a message by name leaves the lead out', async () => {
+  await Lead.create([{ name: 'Ravi', nameFromWhatsapp: true, phone: '9876543201', status: 'Inquiry' }, { name: 'Amit', phone: '9876543202', status: 'Inquiry' }]);
+  const byName = await audience('Inquiry', { requireName: true });
+  assert.deepEqual(byName.recipients.map((row) => row.name), ['Amit']);
+  assert.equal(byName.excluded.noName, 1);
+  const plain = await audience('Inquiry');
+  assert.deepEqual(plain.recipients.map((row) => row.name).sort(), ['', 'Amit']);
+});
 test('codec round-trips formatting and field chips; values are literal; unsupported fields/structures are rejected', () => {
   const canonical = content(named());
   assert.deepEqual(decode(encode(canonical)), canonical);

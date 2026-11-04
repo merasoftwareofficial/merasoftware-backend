@@ -1,3 +1,11 @@
+## Final Message Stop/identity corrections — 4 November 2026
+
+Verified local corrections and remaining rollout gates: [FINAL_MESSAGE_CORRECTIONS.md](FINAL_MESSAGE_CORRECTIONS.md). Proven defects: lost automated acknowledgement caused false manual Stop; unguarded stage-moved job overwrote Stop; manual provenance depended on temporary drafts; sending status blocked Stop during typing. Also covered interrupted manual-result settlement.
+
+Corrections preserve the existing queue/sender and scheduling rules. Sender freezes per-attempt ID/source before transport, retains provenance after TTL, and distinguishes preparing from irreversible handoff. Shared cycle guards and transactional Stop/handoff prevent competing writes from reviving stopped cycles. Unknown delivery holds closure; pre-handoff retries retain configured limits, while uncertain post-handoff errors do not resend automatically. Periodic classification recovers successful manual sends without echoes. Explicit new cycles ignore previous manual attempts.
+
+292/292 isolated backend/worker/email regression checks and diff whitespace check passed. No frontend code change, live delivery, production write, deploy or historical recovery in this correction set. Original data/cycle times were not migrated. Do not reuse the old 21-candidate snapshot without fresh conversation/Stop eligibility checks. Details, file ownership, test command and staged rollout requirements are in the linked handover.
+
 ## Template review saves — 31 October 2026
 
 Popup Save template creates a new custom template; explicit management Edit still updates. Shared backend POST /templates validates sourceTemplateId/action/application and reuses canonical editor conversion; templateOptions remains action scoped. Website `src/app/admin/email-control/email-control-panel.tsx` and portal `src/components/EmailReviewDialog.js` add/select the new ID and retain all options. Originals/defaults remain unchanged; chips remain reusable. Includes pre-save Add Lead and phone-only proposal previews through the common portal dialog. Lead-page manual messaging is deferred.

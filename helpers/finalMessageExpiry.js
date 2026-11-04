@@ -10,6 +10,7 @@ const hasReply = row => row.lastReplyAt && row.sentAt && row.lastReplyAt >= row.
 // Used both by the scheduler and immediately before the worker sends (after typing).
 async function eligible(row) {
   if (process.env.ENABLE_WHATSAPP !== 'true' || !row?.expiryEnabled || row.status !== 'dead' || hasReply(row) || !row.originalMessage?.id) return false;
+  if (await require('./stopFinalMessage').processOutbound(row) !== 'clear') return false;
   const lead = await Lead.findById(row.leadId).lean();
   if (!lead || lead.deletedAt || normalizePhone(lead.phone) !== row.phone) return false;
   if (row.subjectKind === 'client') {
@@ -23,8 +24,10 @@ async function canSend(item) {
   if (!item.finalMessageExpiryId) {
     if (item.event !== 'lead.finalMessage' || !item.emailDraftId) return true;
     const original = await FinalMessage.findOne({ draftId: item.emailDraftId }).lean();
-    if (original?.subjectKind !== 'client') return true;
+    if (!original) return true; // an ordinary, untracked message using this template
     if (!['review', 'queued'].includes(original.status)) return false;
+    if (await require('./stopFinalMessage').processOutbound(original) !== 'clear') return false;
+    if (original.subjectKind !== 'client') return true;
     const lead = await Lead.findById(original.leadId).lean();
     return (await require('./clientFinalMessageReadiness').clientReadiness(lead, original)).ready;
   }
@@ -43,7 +46,7 @@ async function dispatch() {
     const mail = await applyDefault(EVENT, {}, {});
     if (!mail?.plain?.trim()) continue;
     await mongoose.connection.transaction(async session => {
-      const claimed = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: 'dead', expiryQueuedAt: null,
+      const claimed = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: 'dead', expiryQueuedAt: null, 'outboundChecks.0': { $exists: false },
         $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { expiryQueuedAt: new Date() } }, { session });
       if (!claimed.modifiedCount) return;
       await enqueueWhatsApp({ to: row.phone, text: mail.plain, event: EVENT, application: 'portal',

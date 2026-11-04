@@ -7,6 +7,7 @@ const { EmailDraft } = require('../models/emailControlModel');
 const { DEFAULT_IGNORED_REPLIES, MAX_IGNORED_LENGTH, MAX_IGNORED_REPLIES, replyWords } = require('../whatsapp/src/finalMessageReplies.js');
 const { CONTACTED, DEAD, NEGATIVE } = require('./leadStatuses');
 const { findLeadsByPhone } = require('./leadPhone');
+const { hasConfirmedName } = require('./leadName');
 const { isAccountEmail } = require('./emailValidator');
 const { normalizePhone } = require('./whatsappQueue');
 const { prepareTemplatedMail } = require('./emailService');
@@ -118,7 +119,8 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
     oldActive = false;
   }
   const resolved = isClientRow(own) && (['dead', 'stopped', 'email-only'].includes(own.status) || (own.status === 'replied' && own.decision));
-  const reason = client ? (other || oldActive ? 'already-sent' : isClientRow(own) && own.status === 'review' ? 'in-review' : isClientRow(own) && !CAN_SEND_AGAIN.includes(own.status) && !(newEpisode && resolved) ? 'already-sent' : null) : blockedReason(lead, rows, clients);
+  const restartingStopped = newEpisode && own?.status === 'stopped' && own.stopSource;
+  const reason = client ? (other || oldActive ? 'already-sent' : isClientRow(own) && own.status === 'review' ? 'in-review' : isClientRow(own) && !CAN_SEND_AGAIN.includes(own.status) && !(newEpisode && resolved) ? 'already-sent' : null) : blockedReason(lead, restartingStopped ? rows.filter(item => String(item._id) !== String(own._id)) : rows, clients);
   if (reason === 'in-review') {
     // Closed without a decision, or the page was left: the same draft opens again.
     const own = rows.find(row => String(row.leadId) === String(lead._id));
@@ -141,12 +143,13 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
       previous = await EmailDraft.findOne({ dedupeKey }).lean();
     }
   }
+  const cycleStartedAt = new Date();
   const { draftId } = await prepareTemplatedMail(EVENT, lead, email, hours, { dedupeKey });
   if (!draftId) return 'unavailable';
   const draft = client ? await EmailDraft.findById(draftId).lean() : null;
   const promisedHours = Number.parseInt(draft?.values?.timeLimit, 10) || hours;
-  const old = own && client && (!isClientRow(own) || (newEpisode && resolved)) ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
-  const update = { $set: { phone: normalizePhone(lead.phone), draftId, hours, status: 'review', expiryEnabled: true, ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, expiryQueuedAt: 1, originalMessage: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
+  const old = own && ((client && (!isClientRow(own) || (newEpisode && resolved))) || restartingStopped) ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
+  const update = { $set: { phone: normalizePhone(lead.phone), draftId, cycleStartedAt, hours, status: 'review', expiryEnabled: true, ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, expiryQueuedAt: 1, originalMessage: 1, stoppedAt: 1, stopReason: 1, stoppedBy: 1, stopSource: 1, outboundChecks: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
   if (client) update.$set.hours = promisedHours;
   try {
     if (client) {
@@ -158,7 +161,11 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
       const guard = own ? { _id: own._id, draftId: own.draftId, status: own.status } : { leadId: lead._id, draftId: { $exists: false } };
       const saved = await FinalMessage.updateOne(guard, update, { upsert: !own });
       if (!saved.modifiedCount && !saved.upsertedCount) { unregisterReviewDraft(draftId); return 'in-review'; }
-    } else await FinalMessage.updateOne({ leadId: lead._id }, update, { upsert: true });
+    } else {
+      const guard = own ? require('./stopFinalMessage').cycleGuard(own) : { leadId: lead._id, draftId: { $exists: false } };
+      const saved = await FinalMessage.updateOne(guard, update, { upsert: !own });
+      if (!saved.modifiedCount && !saved.upsertedCount) { unregisterReviewDraft(draftId); return 'in-review'; }
+    }
   } catch (error) {
     if (client) unregisterReviewDraft(draftId);
     if (client && error.code === 11000) return 'in-review';
@@ -211,7 +218,7 @@ async function decideReply(id, choice, userId) {
     return { status: chosen.status };
   }
   if (!lead || lead.deletedAt || lead.status !== NEGATIVE) fail('This lead has moved out of Negative. Open it in Leads.', 409);
-  if (chosen.status === CONTACTED && !lead.name) fail("Add this lead's name first: use Edit Lead.");
+  if (chosen.status === CONTACTED && !hasConfirmedName(lead)) fail("Add this lead's name first: use Edit Lead.");
   const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, decision: null }, { $set: { decision: choice, decidedAt: new Date(), decidedBy: userId } });
   if (!modifiedCount) fail('This reply has already been decided.', 409);
   // Dead covers every Negative lead with this number, as the job does: another would stay in Broadcast's Negative group.

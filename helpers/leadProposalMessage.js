@@ -3,6 +3,7 @@ const { reviewWithDoc, reviewTextFromEditor, reviewSubjectFromEditor, editableRe
 const { render, compose, withRequiredLinks } = require("./emailMarkup");
 const { isAccountEmail } = require("./emailValidator");
 const { enqueueWhatsApp, normalizePhone, messageText } = require("./whatsappQueue");
+const { hasConfirmedName } = require("./leadName");
 
 // The message telling a lead about their proposal. Most leads have only a phone, and WhatsApp otherwise
 // only copies a sent email, so: a lead with an email gets the normal reviewed email (and its WhatsApp
@@ -11,8 +12,9 @@ const EVENT = "lead.proposal";
 
 const hasEmail = (lead) => isAccountEmail(lead.email);
 
+// A name guessed from WhatsApp is not used to greet until it is confirmed.
 const proposalValues = (lead, proposal) => ({
-  name: lead.name,
+  name: hasConfirmedName(lead) ? lead.name : "",
   amount: proposal.amount === null || proposal.amount === undefined ? "" : `₹${Number(proposal.amount).toLocaleString("en-IN")}`,
   link: proposal.downloadLink,
 });

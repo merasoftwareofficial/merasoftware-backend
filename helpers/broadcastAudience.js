@@ -3,6 +3,7 @@ const { INQUIRY, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NEGATIVE, UNHAPPY, WO
 const { normalizePhone } = require('./whatsappQueue');
 const { fail } = require('./broadcastContent');
 const { contactBlocks } = require('./leadContactBlock');
+const { hasConfirmedName } = require('./leadName');
 // Dead and Wrong are never a group.
 const GROUPS = [CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NEGATIVE, UNHAPPY, WON, PROPOSAL_SENT, INQUIRY].map(id => ({ id, label: leadStatusLabel(id) }));
 function groupQuery(group) {
@@ -14,7 +15,7 @@ function groupQuery(group) {
 // requireName: the message greets by name, so a lead with none is left out rather than sent "Hi , thanks".
 // `noName` always counts them, so the admin sees how many such a message would skip.
 async function audience(group, { requireName = false } = {}) {
-  const [leads, blocks] = await Promise.all([Lead.find(groupQuery(group)).select('_id name phone status proposalSentAt').sort({ _id: 1 }).lean(), contactBlocks()]);
+  const [leads, blocks] = await Promise.all([Lead.find(groupQuery(group)).select('_id name nameFromWhatsapp phone status proposalSentAt').sort({ _id: 1 }).lean(), contactBlocks()]);
   const phones = new Set(), recipients = [];
   const excluded = { invalidPhone: 0, duplicatePhone: 0, noName: 0, doNotDisturb: 0 };
   for (const lead of leads) {
@@ -22,15 +23,15 @@ async function audience(group, { requireName = false } = {}) {
     if (!phone) { excluded.invalidPhone++; continue; }
     if (blocks.has(phone)) { excluded.doNotDisturb++; continue; }
     if (phones.has(phone)) { excluded.duplicatePhone++; continue; }
-    if (!lead.name) { excluded.noName++; if (requireName) continue; } // before the number is taken: another lead with it may have a name
+    if (!hasConfirmedName(lead)) { excluded.noName++; if (requireName) continue; } // before the number is taken: another lead with it may have a name
     phones.add(phone);
-    recipients.push({ leadId: lead._id, phone, name: lead.name });
+    recipients.push({ leadId: lead._id, phone, name: hasConfirmedName(lead) ? lead.name : '' });
   }
   return { recipients, total: leads.length, count: recipients.length, excluded };
 }
 async function eligible(group, recipient, { requireName = false } = {}) {
-  const lead = await Lead.findOne({ ...groupQuery(group), _id: recipient.leadId }).select('name phone').lean();
-  if (!lead || (requireName && !lead.name)) return null;
+  const lead = await Lead.findOne({ ...groupQuery(group), _id: recipient.leadId }).select('name nameFromWhatsapp phone').lean();
+  if (!lead || (requireName && !hasConfirmedName(lead))) return null;
   if (normalizePhone(lead.phone) !== recipient.phone) return null;
   return (await contactBlocks()).has(recipient.phone) ? null : lead;
 }

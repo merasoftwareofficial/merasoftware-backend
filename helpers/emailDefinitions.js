@@ -7,6 +7,7 @@
 const { formatIndiaDate, formatIndiaDateTime } = require('./dateTime');
 const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation');
 const { tableBlock, listBlock } = require('./emailMarkup');
+const { hasConfirmedName } = require('./leadName');
 
 const ADMIN_EMAILS = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
 const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
@@ -79,7 +80,7 @@ const definitions = {
     build(lead, proposal) {
       if (!lead.email) return null;
       const amount = proposal.amount === null || proposal.amount === undefined ? '' : `₹${Number(proposal.amount).toLocaleString('en-IN')}`;
-      return { to: [lead.email], requiredLinks: [proposal.downloadLink], values: { name: text(lead.name), amount, link: proposal.downloadLink } };
+      return { to: [lead.email], requiredLinks: [proposal.downloadLink], values: { name: text(hasConfirmedName(lead) ? lead.name : ''), amount, link: proposal.downloadLink } };
     },
   },
   // The last message to a Negative lead (helpers/finalMessage.js). No name: a Negative lead may have none.

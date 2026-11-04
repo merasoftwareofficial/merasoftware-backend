@@ -257,6 +257,7 @@ router.post("/admin/leads/:leadId/proposal/:version/whatsapp", authToken, requir
 router.get("/admin/final-message/count", authToken, require('../controller/lead/finalMessage').countController);
 router.post("/admin/final-message/prepare", authToken, require('../controller/lead/finalMessage').prepareAllController);
 router.post("/admin/leads/:leadId/final-message", authToken, require('../controller/lead/finalMessage').prepareOneController);
+router.post("/admin/leads/:leadId/final-message/stop", authToken, require('../controller/lead/finalMessage').stopController);
 router.post("/admin/leads/:leadId/message", authToken, require('../controller/lead/leadMessage'));
 // Trash (soft-delete) system — admin only. Lead trash reuses the DELETE /admin/leads/:leadId
 // route above (now soft-deletes). Distinct /admin/trash* paths, no shadowing.

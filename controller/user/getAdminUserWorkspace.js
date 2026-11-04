@@ -53,8 +53,10 @@ const getAdminUserWorkspace = async (req, res) => {
       });
     }
 
-    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id clientBehaviour").lean();
+    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id clientBehaviour businessName altPhone").lean();
     customer.leadId = linkedLead?._id || null;
+    customer.businessName = linkedLead?.businessName || "";
+    customer.altPhone = linkedLead?.altPhone || "";
     customer.clientBehaviour = linkedLead ? linkedLead.clientBehaviour || 'Contacted' : null;
 
     const [orders, rawOrderRefs, transactions, monthlyInvoices, projectInvoices, updateRequestCounts] = await Promise.all([

@@ -3,6 +3,7 @@ import { matchesAdMessage } from './autoReplyRules.js';
 import { DEFAULT_IGNORED_REPLIES, isIgnoredReply } from './finalMessageReplies.js';
 import { AUTO_REPLY_EVENT, FinalMessage as FinalMessageModel, OUR_SIDE_REPLIED, STATE_ID, finishedExpiry } from './models.js';
 import { effectiveSettings } from './settings.js';
+import stopFinalMessage from '../../helpers/stopFinalMessage.js';
 
 const MAX_SAVED_TEXT = 2_000;
 
@@ -131,6 +132,11 @@ export function createInbound({ Inbox, Queue, Rule, State, FinalMessage = FinalM
     }
     const candidates = messages.filter(isCandidate);
     const ours = messages.filter(isOurMessage);
+    for (const message of ours) {
+      if (!incomingText(message) && !Object.keys(normalizeMessageContent(message.message) || {}).some(key => REPLY_KINDS[key])) continue;
+      const phone = await chatPhone(message.key, socket).catch(() => null);
+      if (phone) await stopFinalMessage.noteOutgoing(phone, message.key.id, messageTime(message)).catch(error => logger.error({ err: error }, 'Final Message could not check our outgoing message'));
+    }
     if (!candidates.length && !ours.length) return;
     const state = await State.findById(STATE_ID).select('autoReply settings').lean();
     if (!state?.autoReply?.recognise) return;

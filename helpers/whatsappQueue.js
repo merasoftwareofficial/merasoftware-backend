@@ -45,7 +45,7 @@ async function enqueueWhatsApp({ to, text, skipReason, ...fields }, { session } 
   const row = to
     ? { status: 'pending', to }
     : { status: 'skipped', lastError: skipReason || NO_PHONE, expiresAt: finishedExpiry(new Date()) };
-  const data = { ...fields, text: String(text || '').slice(0, MAX_TEXT), ...row };
+  const data = { source: ['lead.message', 'lead.proposal'].includes(fields.event) ? 'manual' : 'automated', ...fields, text: String(text || '').slice(0, MAX_TEXT), ...row };
   return session ? (await Queue.create([data], { session }))[0] : Queue.create(data);
 }
 
@@ -59,6 +59,7 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
     return;
   }
   const text = messageText(draft);
+  const source = draft.leadId ? 'manual' : 'automated';
   const targets = recipients || (draft.to || []).map(email => ({ email }));
   const failures = [];
   for (const target of targets) {
@@ -66,7 +67,8 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
     try {
       const saved = recipients ? target.phone : await savedPhoneFor(email);
       await enqueueWhatsApp({ to: normalizePhone(saved), skipReason: saved ? BAD_PHONE : NO_PHONE,
-        emailDraftId: draft._id, email, event: draft.event, application: draft.application, text });
+        emailDraftId: draft._id, email, event: draft.event, application: draft.application, text,
+        source });
     } catch (error) {
       // 11000: this recipient is already queued. Any other error loses only this recipient's copy.
       if (error.code !== 11000) {
@@ -78,4 +80,17 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
   if (strict && failures.length) throw failures[0];
 }
 
-module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText };
+// Compatibility for queues created before provenance was stored. Missing temporary lead drafts
+// are unknown, never silently reclassified as automatic. New queue rows need no draft lookup.
+async function queueSource(item) {
+  if (item.source) return item.source;
+  if (item.event === 'lead.message') return 'manual';
+  if (item.event === 'lead.finalMessage' || item.finalMessageExpiryId) return 'automated';
+  if (item.emailDraftId) {
+    const draft = await require('../models/emailControlModel').EmailDraft.findById(item.emailDraftId).select('leadId').lean();
+    if (!draft) return 'unknown';
+    if (draft.leadId) return 'manual';
+  }
+  return item.event && !item.event.startsWith('lead.') ? 'automated' : 'unknown';
+}
+module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText, queueSource };

@@ -130,8 +130,8 @@ it('passes a quoted original to WhatsApp and cancels if eligibility changes whil
   await wa.sockets[0].emit('connection.update', { connection: 'open' });
   const jid = '919876543210@s.whatsapp.net';
   const quoted = { key: { id: 'original', remoteJid: jid, fromMe: true }, message: { conversation: 'Final offer' } };
-  await connection.transport.send(jid, 'Your offer period has ended.', 0, { quoted, beforeSend: async () => eligible });
-  assert.deepEqual(wa.sockets[0].messageOptions, [{ quoted }]);
+  await connection.transport.send(jid, 'Your offer period has ended.', 0, { quoted, messageId: 'persisted-id', beforeSend: async () => eligible });
+  assert.deepEqual(wa.sockets[0].messageOptions, [{ quoted, messageId: 'persisted-id' }]);
   await assert.rejects(connection.transport.send(jid, 'Expired', 4000, { quoted, beforeSend: async () => eligible }), { code: 'FINAL_MESSAGE_CHANGED' });
   assert.equal(wa.sockets[0].messageOptions.length, 1);
   assert.deepEqual(wa.sockets[0].calls.at(-1), ['presence', 'unavailable', undefined]);

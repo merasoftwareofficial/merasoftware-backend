@@ -13,7 +13,7 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const Lead = require('../models/leadModel');
 const User = require('../models/userModel');
 const { EmailDraft, EmailPolicy, EmailTemplate } = require('../models/emailControlModel');
-const { FinalMessage, Lock, Queue, State, STATE_ID } = require('../whatsapp/src/models.js');
+const { FinalMessage, Lock, Queue, State, STATE_ID, OutgoingAttempt } = require('../whatsapp/src/models.js');
 const { RECOMMENDED } = require('../whatsapp/src/settings.js');
 const { createSender } = require('../whatsapp/src/sender.js');
 const { createInbound } = require('../whatsapp/src/inbound.js');
@@ -47,7 +47,10 @@ const decide = async (id, choice, channels) => {
 const listening = () => State.updateOne({ _id: STATE_ID }, { $set: { connection: 'connected', heartbeatAt: new Date(), settings: { ...RECOMMENDED, quietHours: false, jitterSec: 0, typing: false, minGapSec: 0 } } }, { upsert: true });
 function phone() {
   const sent = [];
-  return { sent, isConnected: () => true, resolve: async to => `${to}@s.whatsapp.net`, send: async (jid, text) => { sent.push([jid, text]); return `id-${sent.length}`; } };
+  return { sent, isConnected: () => true, resolve: async to => `${to}@s.whatsapp.net`, send: async (jid, text, typing, options = {}) => {
+    if (options.beforeSend && !await options.beforeSend()) throw Object.assign(new Error('Cycle changed'), { code: 'FINAL_MESSAGE_CHANGED' });
+    sent.push([jid, text]); return options.messageId || `id-${new mongoose.Types.ObjectId()}`;
+  } };
 }
 const sendQueue = async transport => {
   await State.updateOne({ _id: STATE_ID }, { $set: { nextSendAt: null } }); // the real gap between messages is not under test here
@@ -342,13 +345,14 @@ before(async () => {
   app.get('/api/admin/final-message/count', authToken, final.countController);
   app.post('/api/admin/final-message/prepare', authToken, final.prepareAllController);
   app.post('/api/admin/leads/:leadId/final-message', authToken, final.prepareOneController);
+  app.post('/api/admin/leads/:leadId/final-message/stop', authToken, final.stopController);
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}/api`;
   global.fetch = async () => new Response(JSON.stringify({ id: 'provider-id' }), { status: 200 });
 });
 beforeEach(async () => {
   process.env.ENABLE_WHATSAPP = 'true';
-  await Promise.all([Lead, User, EmailDraft, EmailPolicy, EmailTemplate, Queue, FinalMessage, State, Lock].map(model => model.deleteMany({})));
+  await Promise.all([Lead, User, EmailDraft, EmailPolicy, EmailTemplate, Queue, FinalMessage, State, Lock, OutgoingAttempt].map(model => model.deleteMany({})));
   admin = await User.create({ name: 'Admin', email: 'admin@example.test', roles: ['admin'] });
   await listening();
 });
@@ -564,6 +568,307 @@ test('client readiness differentiates account, identity and phone blockers witho
     await User.updateOne({ _id: account._id }, { $set: { deletedAt: new Date() } });
     assert.equal((await clientReadiness(current)).code, 'account-unavailable');
     assert.equal((await Lead.findById(item._id)).clientBehaviour, 'Negative');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('manual stop preserves current status and deadline, is idempotent, and rejects a stale cycle', async () => {
+  const { id } = await sentAndWaiting();
+  const before = await row(id);
+  const path = `/admin/leads/${id}/final-message/stop`;
+  const customer = await User.create({ name: 'Member', email: 'member-stop@example.test', roles: ['customer'] });
+  const denied = await nativeFetch(`${base}${path}`, { method: 'POST', headers: { Cookie: `token=${jwt.sign({ _id: String(customer._id), role: 'customer' }, process.env.TOKEN_SECRET_KEY)}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ draftId: String(before.draftId), reason: 'Phone call' }) });
+  assert.equal(denied.status, 403);
+  assert.equal((await call(path, 'POST', { draftId: String(new mongoose.Types.ObjectId()), reason: 'Phone call' })).status, 409);
+  assert.equal((await call(path, 'POST', { draftId: String(before.draftId), reason: '' })).status, 400);
+  const stopped = await call(path, 'POST', { draftId: String(before.draftId), reason: 'Client asked by phone' });
+  assert.equal(stopped.status, 200);
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal(await stage(id), 'Negative');
+  assert.equal(+new Date((await row(id)).deadlineAt), +before.deadlineAt);
+  assert.equal((await call(path, 'POST', { draftId: String(before.draftId), reason: 'Again' })).data.alreadyStopped, true);
+  await pastDeadline(id); await followFinalMessages();
+  assert.equal(await stage(id), 'Negative');
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 0);
+  assert.equal((await Lead.findById(id)).followUps.filter(x => x.note.includes('countdown stopped:')).length, 1);
+  assert.equal((await call(`/admin/leads/${id}/final-message`)).status, 409, 'normal preparation cannot resume a stopped cycle');
+  assert.equal((await call(`/admin/leads/${id}/final-message?new=1`)).status, 200);
+  assert.equal((await row(id)).stopSource, undefined);
+  assert.equal((await row(id)).episodeHistory.length, 1);
+});
+
+test('stop cancels a queued closure but does not pretend an in-flight or sent closure can be recalled', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id); await followFinalMessages();
+  const cycle = await row(id);
+  const expiry = await Queue.findOne({ finalMessageExpiryId: cycle.draftId });
+  await Queue.updateOne({ _id: expiry._id }, { $set: { status: 'sending' } });
+  const path = `/admin/leads/${id}/final-message/stop`;
+  assert.equal((await call(path, 'POST', { draftId: String(cycle.draftId), reason: 'Phone call' })).status, 409);
+  await Queue.updateOne({ _id: expiry._id }, { $set: { status: 'sent' } });
+  assert.match((await call(path, 'POST', { draftId: String(cycle.draftId), reason: 'Phone call' })).message, /already been sent/);
+  await Queue.updateOne({ _id: expiry._id }, { $set: { status: 'pending' } });
+  assert.equal((await call(path, 'POST', { draftId: String(cycle.draftId), reason: 'Phone call' })).status, 200);
+  assert.equal((await Queue.findById(expiry._id)).status, 'cancelled');
+  assert.equal(await stage(id), 'Dead', 'stopping does not alter the saved status');
+});
+
+test('our normal chat and system manual message stop the countdown independently of Auto Reply switches; automated sends do not', async () => {
+  for (const kind of ['automated', 'phone', 'system-manual']) {
+    await Promise.all([FinalMessage.deleteMany({}), Queue.deleteMany({}), Lead.deleteMany({})]);
+    const { id } = await sentAndWaiting();
+    await FinalMessage.updateOne({ leadId: id }, { $set: { sentAt: new Date(Date.now() - 5000) } });
+    const messageId = `our-${kind}`;
+    if (kind !== 'phone') await Queue.create({ to: PHONE, text: 'A message', status: 'sent', messageId, event: kind === 'automated' ? 'sendProjectCreatedEmail' : 'lead.message' });
+    await State.updateOne({ _id: STATE_ID }, { $set: { 'autoReply.recognise': false } });
+    await inbound.handle({ type: 'notify', messages: [{ key: { id: messageId, remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true }, message: { conversation: 'We discussed this by phone' }, messageTimestamp: Math.floor(Date.now() / 1000) }] });
+    assert.equal((await row(id)).status, kind === 'automated' ? 'waiting' : 'stopped', kind);
+    assert.equal(await stage(id), 'Negative');
+  }
+});
+
+test('outgoing echo arriving before its queue result defers timeout and is classified after the sender settles', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id);
+  const pending = await Queue.create({ to: PHONE, text: 'Service notification', event: 'sendProjectCreatedEmail', status: 'sending' });
+  const message = { key: { id: 'early-echo', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true }, message: { conversation: 'Service notification' }, messageTimestamp: Math.floor(Date.now() / 1000) };
+  await inbound.handle({ type: 'notify', messages: [message] });
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'waiting');
+  await Queue.updateOne({ _id: pending._id }, { $set: { status: 'sent', messageId: 'early-echo' } });
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'dead', 'an automated echo must not stop its own flow');
+});
+
+test('system manual sends stop the cycle without requiring a WhatsApp echo, whereas service sends do not', async () => {
+  const { id } = await sentAndWaiting();
+  await Queue.create({ to: PHONE, text: 'Service notification', event: 'sendProjectCreatedEmail' });
+  await sendQueue(phone());
+  assert.equal((await row(id)).status, 'waiting');
+  await Queue.create({ to: PHONE, text: 'We spoke by phone', event: 'lead.message' });
+  await sendQueue(phone());
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal((await row(id)).stopSource, 'outgoing');
+});
+
+test('a stop committed just before timeout prevents Dead and closure atomically', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id);
+  const current = await row(id);
+  const update = FinalMessage.updateOne;
+  let intervened = false;
+  FinalMessage.updateOne = async function(filter, change, options) {
+    if (!intervened && filter.status === 'waiting' && change?.$set?.status === 'dead') {
+      intervened = true;
+      await require('../helpers/stopFinalMessage').stopCycle(current, { reason: 'Stop before timeout', actor: admin._id });
+    }
+    return update.call(this, filter, change, options);
+  };
+  try { await followFinalMessages(); }
+  finally { FinalMessage.updateOne = update; }
+  assert.equal(intervened, true);
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal(await stage(id), 'Negative');
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 0);
+});
+
+test('an automated echo with a lost acknowledgement never becomes a manual Stop', async () => {
+  const { id } = await sentAndWaiting();
+  const pending = await Queue.create({ to: PHONE, text: 'Notification', event: 'sendProjectCreatedEmail', status: 'sending' });
+  await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, 'lost-ack', new Date());
+  await Queue.updateOne({ _id: pending._id }, { $set: { status: 'failed' } });
+  const result = await require('../helpers/stopFinalMessage').processOutbound(await row(id));
+  assert.equal(result, 'pending', 'unknown legacy delivery requires reconciliation');
+  assert.equal((await row(id)).status, 'waiting');
+});
+
+test('a background queue cancellation cannot overwrite a committed manual Stop', async () => {
+  const item = await lead();
+  const marked = await markNegative(item._id);
+  await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+  await followFinalMessages();
+  await Lead.updateOne({ _id: item._id }, { $set: { status: 'Contacted' } });
+  const current = await row(item._id);
+  const update = Queue.updateOne;
+  let stopped = false;
+  Queue.updateOne = async function(filter, change, options) {
+    const result = await update.call(this, filter, change, options);
+    if (!stopped && change?.$set?.status === 'cancelled') {
+      stopped = true;
+      await require('../helpers/stopFinalMessage').stopCycle(current, { reason: 'Called by phone', actor: admin._id });
+    }
+    return result;
+  };
+  try { await followFinalMessages(); } finally { Queue.updateOne = update; }
+  assert.equal(stopped, true);
+  assert.equal((await row(item._id)).status, 'stopped');
+});
+
+test('manual template provenance survives removal of its temporary draft', async () => {
+  const { id } = await sentAndWaiting();
+  const draft = await EmailDraft.create({ event: 'lead.proposal', leadId: id, application: 'portal', to: ['ravi@example.test'], subject: 'Proposal', plain: 'Following our call', status: 'sent', expiresAt: new Date(Date.now() + HOUR) });
+  await require('../helpers/whatsappQueue').enqueueWhatsAppForEmail(draft, { recipients: [{ email: 'ravi@example.test', phone: PHONE }], strict: true });
+  await EmailDraft.deleteOne({ _id: draft._id });
+  const queued = await Queue.findOne({ emailDraftId: draft._id });
+  await Queue.updateOne({ _id: queued._id }, { $set: { status: 'sent', messageId: 'manual-template' } });
+  await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, 'manual-template', new Date());
+  assert.equal((await row(id)).status, 'stopped');
+});
+
+test('Stop during typing cancels the closure before the transport handoff', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id); await followFinalMessages();
+  const cycle = await row(id);
+  let delivered = false;
+  const transport = { ...phone(), async send(jid, text, typingMs, options) {
+    const result = await call(`/admin/leads/${id}/final-message/stop`, 'POST', { draftId: String(cycle.draftId), reason: 'Stop during typing' });
+    assert.equal(result.status, 200);
+    if (!await options.beforeSend()) throw Object.assign(new Error('Stopped'), { code: 'FINAL_MESSAGE_CHANGED' });
+    delivered = true;
+    return options.messageId;
+  } };
+  await sendQueue(transport);
+  assert.equal(delivered, false);
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal((await Queue.findOne({ finalMessageExpiryId: cycle.draftId })).status, 'cancelled');
+});
+
+test('an acknowledged-lost automated attempt retains its identity across queue retention and duplicate delayed echoes', async () => {
+  const { id } = await sentAndWaiting();
+  const notification = await require('../helpers/whatsappQueue').enqueueWhatsApp({ to: PHONE, text: 'Notification', event: 'sendProjectCreatedEmail' });
+  let identity;
+  const transport = { ...phone(), async send(jid, text, typing, options) {
+    identity = options.messageId;
+    const saved = await OutgoingAttempt.findById(identity).lean();
+    assert.equal(saved.source, 'automated');
+    assert.equal(saved.phase, 'preparing');
+    assert.equal(await options.beforeSend(), true);
+    await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, identity, new Date());
+    assert.equal((await row(id)).status, 'waiting');
+    throw new Error('Acknowledgement lost after handoff');
+  } };
+  await sendQueue(transport);
+  assert.equal((await Queue.findById(notification._id)).status, 'failed', 'ambiguous handoff must not retry automatically');
+  await Queue.deleteOne({ _id: notification._id });
+  for (let i = 0; i < 2; i++) await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, identity, new Date());
+  assert.equal((await row(id)).status, 'waiting');
+  await pastDeadline(id); await followFinalMessages();
+  assert.equal((await row(id)).status, 'dead');
+});
+
+test('a manual system attempt stops the cycle even after its queue and draft are removed', async () => {
+  const { id } = await sentAndWaiting();
+  const manual = await require('../helpers/whatsappQueue').enqueueWhatsApp({ to: PHONE, text: 'Following our call', event: 'lead.message' });
+  // Simulate a crash after transport acceptance but before the queue-result/noteOutgoing write.
+  const identity = 'manual-before-crash';
+  await OutgoingAttempt.create({ _id: identity, queueId: manual._id, to: PHONE, source: 'manual', phase: 'handoff' });
+  await Queue.deleteOne({ _id: manual._id });
+  await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, identity, new Date());
+  assert.equal((await row(id)).status, 'stopped');
+});
+
+test('manual delivery without an echo is recovered from sender evidence, and uncertain delivery postpones closure', async () => {
+  for (const phase of ['sent', 'handoff', 'failed']) {
+    await Promise.all([FinalMessage.deleteMany({}), Queue.deleteMany({}), Lead.deleteMany({}), OutgoingAttempt.deleteMany({})]);
+    const { id } = await sentAndWaiting();
+    await OutgoingAttempt.create({ _id: `manual-no-echo-${phase}`, to: PHONE, source: 'manual', phase, handedOffAt: new Date() });
+    await pastDeadline(id); await followFinalMessages();
+    assert.equal((await row(id)).status, phase === 'sent' ? 'stopped' : 'waiting');
+    assert.equal(await stage(id), 'Negative');
+    assert.equal(await Queue.countDocuments({ finalMessageExpiryId: (await row(id)).draftId }), 0);
+  }
+});
+
+test('a crash between the successful queue result and attempt settlement recovers a manual send', async () => {
+  const { id } = await sentAndWaiting();
+  const manual = await Queue.create({ to: PHONE, text: 'We spoke', source: 'manual', event: 'lead.message', status: 'sent', messageId: 'accepted-before-crash' });
+  await OutgoingAttempt.create({ _id: 'accepted-before-crash', queueId: manual._id, to: PHONE, source: 'manual', phase: 'handoff', handedOffAt: new Date() });
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'stopped');
+});
+
+test('Stop loses safely after handoff, while a Stop winning the claim race prevents delivery', async () => {
+  for (const stopFirst of [false, true]) {
+    await Promise.all([FinalMessage.deleteMany({}), Queue.deleteMany({}), Lead.deleteMany({})]);
+    const { id } = await sentAndWaiting();
+    await pastDeadline(id); await followFinalMessages();
+    const cycle = await row(id);
+    let delivered = false;
+    let stopStatus;
+    const stop = async () => { stopStatus = (await call(`/admin/leads/${id}/final-message/stop`, 'POST', { draftId: String(cycle.draftId), reason: 'Called by phone' })).status; };
+    const transport = { ...phone(), async send(jid, text, typing, options) {
+      if (stopFirst) await stop();
+      const allowed = await options.beforeSend();
+      if (!stopFirst) await stop();
+      if (!allowed) throw Object.assign(new Error('Stopped'), { code: 'FINAL_MESSAGE_CHANGED' });
+      delivered = true;
+      return options.messageId;
+    } };
+    await sendQueue(transport);
+    assert.equal(stopStatus, stopFirst ? 200 : 409);
+    assert.equal(delivered, !stopFirst);
+    assert.equal((await row(id)).status, stopFirst ? 'stopped' : 'dead');
+  }
+});
+
+test('unknown legacy echo remains unresolved when the old queue row is deleted', async () => {
+  const { id } = await sentAndWaiting();
+  const legacy = await Queue.create({ to: PHONE, text: 'Unknown acknowledgement', event: 'sendProjectCreatedEmail', status: 'failed' });
+  await require('../helpers/stopFinalMessage').noteOutgoing(PHONE, 'legacy-no-id', new Date());
+  await Queue.deleteOne({ _id: legacy._id });
+  assert.equal(await require('../helpers/stopFinalMessage').processOutbound(await row(id)), 'pending');
+  assert.equal((await row(id)).status, 'waiting');
+});
+
+test('an outgoing echo committed just before timeout prevents Dead until it is classified', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id);
+  const update = FinalMessage.updateOne;
+  let inserted = false;
+  FinalMessage.updateOne = async function(filter, change, options) {
+    if (!inserted && change?.$set?.status === 'dead') {
+      inserted = true;
+      await update.call(this, { leadId: id }, { $addToSet: { outboundChecks: { id: 'arrived-before-timeout', at: new Date() } } });
+    }
+    return update.call(this, filter, change, options);
+  };
+  try { await followFinalMessages(); } finally { FinalMessage.updateOne = update; }
+  assert.equal((await row(id)).status, 'waiting');
+  assert.equal(await stage(id), 'Negative');
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'stopped');
+});
+
+test('a new explicit cycle ignores retained manual sends from its previous cycle', async () => {
+  const { id } = await sentAndWaiting();
+  const current = await row(id);
+  await OutgoingAttempt.create({ _id: 'previous-cycle-manual', to: PHONE, source: 'manual', phase: 'sent' });
+  await require('../helpers/stopFinalMessage').processOutbound(current);
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal((await call(`/admin/leads/${id}/final-message?new=1`)).status, 200);
+  assert.equal(await require('../helpers/stopFinalMessage').processOutbound(await row(id)), 'clear');
+  assert.equal((await row(id)).status, 'review');
+});
+
+test('Stop during a client first-message preparation prevents the initial send without changing Won', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+    const cycle = await row(clientLead._id);
+    let delivered = false;
+    const transport = { ...phone(), async send(jid, text, typing, options) {
+      assert.equal((await call(`/admin/leads/${clientLead._id}/final-message/stop`, 'POST', { draftId: String(cycle.draftId), reason: 'Client called' })).status, 200);
+      if (!await options.beforeSend()) throw Object.assign(new Error('Stopped'), { code: 'FINAL_MESSAGE_CHANGED' });
+      delivered = true;
+      return options.messageId;
+    } };
+    await sendQueue(transport); await followFinalMessages();
+    assert.equal(delivered, false);
+    assert.equal((await row(clientLead._id)).status, 'stopped');
+    assert.equal(await stage(clientLead._id), 'Won');
+    assert.equal((await Lead.findById(clientLead._id)).clientBehaviour, 'Negative');
   } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
 });
 

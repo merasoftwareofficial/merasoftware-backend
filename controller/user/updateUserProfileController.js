@@ -1,4 +1,6 @@
+const mongoose = require("mongoose");
 const userModel = require("../../models/userModel");
+const { syncClientLeads } = require("../../helpers/wonLead");
 
 async function updateUserProfileController(req, res) {
     try {
@@ -17,15 +19,21 @@ async function updateUserProfileController(req, res) {
             updateData.profilePic = profilePic;
         }
 
-        const updatedUser = await userModel.findByIdAndUpdate(
-            userId,
-            updateData,
-            { new: true }
-        ).select('-password');
+        // A client's Won lead keeps the same name and phone as the account: both change together.
+        let updatedUser;
+        await mongoose.connection.transaction(async (session) => {
+            updatedUser = await userModel.findByIdAndUpdate(
+                userId,
+                updateData,
+                { new: true, session }
+            ).select('-password');
 
-        if (!updatedUser) {
-            throw new Error("User not found");
-        }
+            if (!updatedUser) {
+                throw new Error("User not found");
+            }
+
+            await syncClientLeads(updatedUser, { session });
+        });
 
         res.status(200).json({
             data: {

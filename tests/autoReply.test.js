@@ -139,8 +139,11 @@ test('all On, a new number: one Inquiry lead with the details, and one reply in 
   const message = await Inbox.create(row());
   assert.deepEqual(await processInbox(), { reason: 'done', closed: 1 });
   const lead = await Lead.findOne().lean();
+  // The profile name "Ravi" is a person's name: it fills the name as a guess, and the lead stays Inquiry.
   assert.equal(lead.status, 'Inquiry');
-  assert.equal(lead.name, undefined);
+  assert.equal(lead.name, 'Ravi');
+  assert.equal(lead.nameFromWhatsapp, true);
+  assert.equal(lead.businessName, '');
   assert.equal(lead.phone, `+${PHONE}`);
   assert.equal(lead.source, 'WhatsApp ad');
   assert.equal(lead.inquiry.message, DEFAULT_AD_MESSAGE);
@@ -250,6 +253,10 @@ test('every stage: one remark and one reply, on the same lead, with the stage as
     [{ phone: '9876543210', status: 'Dead' }, 'Inquiry', 'Dead'],
     [{ name: 'T', phone: '9876543210', status: 'Positive', deletedAt: new Date() }, 'Contacted', 'Trash'],
     [{ phone: '9876543210', status: 'Negative', deletedAt: new Date() }, 'Inquiry', 'Trash'],
+    // A name guessed from WhatsApp is not a real name: these come back as Inquiry too.
+    [{ name: 'Ravi', nameFromWhatsapp: true, phone: '9876543210', status: 'Negative' }, 'Inquiry', 'Negative'],
+    [{ name: 'Ravi', nameFromWhatsapp: true, phone: '9876543210', status: 'Dead' }, 'Inquiry', 'Dead'],
+    [{ name: 'Ravi', nameFromWhatsapp: true, phone: '9876543210', status: 'Negative', deletedAt: new Date() }, 'Inquiry', 'Trash'],
   ]) {
     await freshStart();
     await Lead.create({ ...lead, deletedBy: lead.deletedAt ? admin._id : null });

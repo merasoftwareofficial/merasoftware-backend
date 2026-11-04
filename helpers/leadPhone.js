@@ -3,6 +3,7 @@ const userModel = require("../models/userModel");
 const { FinalMessage } = require("../whatsapp/src/models.js");
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE, WON, WRONG } = require("./leadStatuses");
 const { normalizePhone } = require("./whatsappQueue");
+const { hasConfirmedName } = require("./leadName");
 
 // Saved numbers come in many forms (98765…, +91 98765…), so they are compared normalised, never as text.
 // A number normalizePhone can't read still has its digits, so it stays the same person every time.
@@ -40,7 +41,7 @@ async function findAccountsByPhone(phone) {
 async function claimInquiryLead(phone, { name, email, ...fields }, { session } = {}) {
   const [lead] = await findLeadsByPhone(phone, { status: INQUIRY, deletedAt: null, convertedToUserId: null }, { session });
   if (!lead) return null;
-  lead.set({ ...fields, name, email: email || lead.email, status: CONTACTED });
+  lead.set({ ...fields, name, nameFromWhatsapp: false, email: email || lead.email, status: CONTACTED });
   return lead.save({ session });
 }
 
@@ -62,7 +63,9 @@ async function leadForNewRequest(phone, { name, email }) {
   const returning = leads.filter((lead) => lead.status === DEAD || waiting.has(String(lead._id)));
   for (const lead of returning) {
     await endFinalMessage(lead._id);
-    lead.set({ status: CONTACTED, name: lead.name || name, email: lead.email || email || "" });
+    // A name the person gives replaces one guessed from their WhatsApp profile.
+    const keepName = hasConfirmedName(lead) || !name;
+    lead.set({ status: CONTACTED, name: keepName ? lead.name : name, nameFromWhatsapp: keepName ? lead.nameFromWhatsapp : false, email: lead.email || email || "" });
     await lead.save();
   }
   return returning[0] || leads.find((lead) => lead.status === WRONG) || null;

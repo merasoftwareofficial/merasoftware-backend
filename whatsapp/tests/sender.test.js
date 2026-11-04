@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys';
-import { Auth, Lock, Queue, State, STATE_ID } from '../src/models.js';
+import { Auth, Lock, Queue, State, STATE_ID, OutgoingAttempt } from '../src/models.js';
 import { createSender, dayKey } from '../src/sender.js';
 import { createLease } from '../src/lease.js';
 import { useMongoAuthState } from '../src/mongoAuthState.js';
@@ -46,7 +46,7 @@ after(async () => {
 });
 beforeEach(async () => {
   clock = Date.parse('2026-10-20T06:00:00Z');
-  await Promise.all([Queue.deleteMany({}), State.deleteMany({}), Auth.deleteMany({}), Lock.deleteMany({})]);
+  await Promise.all([Queue.deleteMany({}), State.deleteMany({}), Auth.deleteMany({}), Lock.deleteMany({}), OutgoingAttempt.deleteMany({})]);
   await setRules({});
 });
 
@@ -157,6 +157,29 @@ describe('sender', () => {
     const item = await Queue.findOne().lean();
     assert.equal(item.status, 'failed');
     assert.match(item.lastError, /not sent again/i);
+  });
+
+  it('allocates a durable identity for each pre-handoff retry and never retries an uncertain handoff', async () => {
+    const identities = [];
+    const transport = { ...fakeWhatsApp(), async send(jid, text, typing, options) {
+      const intent = await OutgoingAttempt.findById(options.messageId).lean();
+      assert.equal(intent.phase, 'preparing');
+      identities.push(options.messageId);
+      if (identities.length === 1) throw new Error('Disconnected before handoff');
+      assert.equal(await options.beforeSend(), true);
+      throw new Error('Acknowledgement lost');
+    } };
+    const sender = createSender({ Queue, State, transport, config, now, random: () => 0 });
+    await enqueue('919876543210', 'x');
+    assert.equal((await sender.step()).reason, 'pending');
+    advance(300_000);
+    assert.equal((await sender.step()).reason, 'failed');
+    assert.notEqual(identities[0], identities[1]);
+    advance(300_000);
+    assert.equal((await sender.step()).reason, 'empty');
+    assert.equal(identities.length, 2);
+    assert.equal((await OutgoingAttempt.findById(identities[1])).source, 'automated');
+    assert.equal((await sender.recoverInterrupted()), 0);
   });
 
   it('allows one queue row per email recipient, and several recipients per email', async () => {

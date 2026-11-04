@@ -26,6 +26,9 @@ const queueSchema = new mongoose.Schema({
   nextAttemptAt: { type: Date, default: Date.now },
   lastError: String,
   messageId: String,
+  source: { type: String, enum: ['manual', 'automated', 'unknown'] },
+  sendPhase: { type: String, enum: ['preparing', 'handoff'] },
+  attemptMessageId: String,
   messageChat: String,
   sentAt: Date,
   expiresAt: { type: Date, index: { expireAfterSeconds: 0 } }, // set when finished; Mongo deletes the row then
@@ -127,9 +130,16 @@ const finalMessageSchema = new mongoose.Schema({
   status: { type: String, enum: FINAL_MESSAGE_STATUSES, default: 'review' },
   sentAt: Date,
   deadlineAt: Date,
+  cycleStartedAt: Date,
   expiryEnabled: Boolean, // opt in at preparation; never send for historical cycles
   expiryQueuedAt: Date, // permanent marker, even after queue retention deletes the copy
   originalMessage: { id: String, chat: String, text: String },
+  stoppedAt: Date,
+  stopReason: String,
+  stoppedBy: mongoose.Schema.Types.ObjectId,
+  stopSource: { type: String, enum: ['admin', 'outgoing'] },
+  sendRevision: { type: Number, default: 0 },
+  outboundChecks: { type: [{ _id: false, id: String, at: Date, source: { type: String, enum: ['unknown'] } }], default: undefined },
   // Written by the worker (inbound.js), acted on by the backend job (helpers/finalMessageJobs.js).
   lastReplyAt: Date,
   lastReplyText: String,
@@ -146,6 +156,21 @@ const finalMessageSchema = new mongoose.Schema({
 finalMessageSchema.index({ status: 1, deadlineAt: 1 });
 
 export const Rule = mongoose.models.WhatsappAutoReplyRule || mongoose.model('WhatsappAutoReplyRule', ruleSchema);
+// Sender bookkeeping, not another queue. No TTL: a delayed own-message echo must retain its
+// provenance even after the temporary email draft and finished queue row have been deleted.
+const outgoingAttemptSchema = new mongoose.Schema({
+  _id: String, // Baileys message ID, allocated and committed before transport.send
+  queueId: mongoose.Schema.Types.ObjectId,
+  to: String,
+  source: { type: String, enum: ['manual', 'automated', 'unknown'], required: true },
+  cycleDraftId: mongoose.Schema.Types.ObjectId,
+  phase: { type: String, enum: ['preparing', 'handoff', 'sent', 'failed', 'cancelled'], required: true },
+  resultMessageId: String,
+  handedOffAt: Date,
+}, { timestamps: true, collection: 'whatsapp_outgoing_attempts' });
+outgoingAttemptSchema.index({ to: 1, resultMessageId: 1 });
+outgoingAttemptSchema.index({ to: 1, createdAt: 1, source: 1, phase: 1 });
+export const OutgoingAttempt = mongoose.models.WhatsappOutgoingAttempt || mongoose.model('WhatsappOutgoingAttempt', outgoingAttemptSchema);
 export const FinalMessage = mongoose.models.WhatsappFinalMessage || mongoose.model('WhatsappFinalMessage', finalMessageSchema);
 export const Inbox = mongoose.models.WhatsappInbox || mongoose.model('WhatsappInbox', inboxSchema);
 export const Queue = mongoose.models.WhatsappQueue || mongoose.model('WhatsappQueue', queueSchema);

@@ -7,6 +7,8 @@ const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByPhone,
 const { replyText } = require('./autoReplyContent');
 const { enqueueWhatsApp } = require('./whatsappQueue');
 const { ensureWonLead, isClient } = require('./wonLead');
+const { hasConfirmedName } = require('./leadName');
+const { guessFromProfileName } = require('./whatsappProfileName');
 
 // Every minute (index.js): turns recognised messages into a lead and a queued reply, as the admin's switches say.
 // Never sends: the reply goes into the queue and waits its turn like every other message (whatsapp/src/sender.js).
@@ -50,7 +52,7 @@ async function addRemark(lead, row, { status = lead.status, cameBackFrom } = {})
 async function reopen(lead, row, cameBackFrom) {
   await endFinalMessage(lead._id);
   // A trashed Matured lead stays Matured: it belongs to a client.
-  const status = lead.convertedToUserId ? lead.status : lead.name ? CONTACTED : INQUIRY;
+  const status = lead.convertedToUserId ? lead.status : hasConfirmedName(lead) ? CONTACTED : INQUIRY;
   await addRemark(lead, row, { status, cameBackFrom });
 }
 
@@ -117,8 +119,12 @@ async function processKnownPerson(row, switches, rule) {
 async function makeLead(row) {
   // A crash after the create and before the row closed: this row's lead already exists.
   const existing = await Lead.findOne({ 'inquiry.inboxId': row._id }).select('_id').lean();
+  // The profile name is only a guess: it may fill the name and/or business name, and the lead stays Inquiry.
+  const guess = guessFromProfileName(row.profileName);
   const lead = existing || await Lead.create({
     phone: `+${row.phone}`, status: INQUIRY, source: SOURCE,
+    ...(guess.name ? { name: guess.name, nameFromWhatsapp: true } : {}),
+    ...(guess.businessName ? { businessName: guess.businessName } : {}),
     inquiry: inquiryDetails(row),
   });
   await Inbox.updateOne({ _id: row._id }, { $set: { leadId: lead._id } });

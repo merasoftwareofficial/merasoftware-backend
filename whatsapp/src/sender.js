@@ -1,8 +1,11 @@
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { SLOT_MS, STATE_ID, finishedExpiry } from './models.js';
+import { SLOT_MS, STATE_ID, OutgoingAttempt, finishedExpiry } from './models.js';
+import { generateMessageIDV2 } from '@whiskeysockets/baileys';
 import { effectiveSettings, inQuietHours, typingTime } from './settings.js';
 import expiry from '../../helpers/finalMessageExpiry.js';
+import stopFinalMessage from '../../helpers/stopFinalMessage.js';
+import whatsappQueue from '../../helpers/whatsappQueue.js';
 
 const INTERRUPTED = 'The service restarted while sending this message, so it may or may not have arrived. Not sent again automatically, to avoid a duplicate.';
 const NOT_ON_WHATSAPP = 'This number is not on WhatsApp.';
@@ -67,7 +70,7 @@ export function createSender({
     if (!slot) return { waitMs: POLL_MS, reason: 'busy' };
     await failInterrupted(time);
     const item = await Queue.findOneAndUpdate({ status: 'pending', nextAttemptAt: { $lte: time } },
-      { $set: { status: 'sending' }, $inc: { attempts: 1 } }, { sort: { createdAt: 1 }, new: true }).lean();
+      { $set: { status: 'sending', sendPhase: 'preparing', attemptMessageId: generateMessageIDV2() }, $inc: { attempts: 1 } }, { sort: { createdAt: 1 }, new: true }).lean();
     if (!item) { await releaseSlot(); return { waitMs: POLL_MS, reason: 'empty' }; }
     // Book the shortest gap now, so even a lost final write cannot let the next message go sooner.
     await State.updateOne({ _id: STATE_ID, sendingBy: owner }, { $set: { nextSendAt: new Date(time.getTime() + rules.minGapSec * 1000) } });
@@ -78,9 +81,15 @@ export function createSender({
     renew.unref?.();
     let outcome;
     let attempted = false;
+    let handedOff = false;
     try {
+      const source = await whatsappQueue.queueSource(item);
+      await OutgoingAttempt.create({ _id: item.attemptMessageId, queueId: item._id, to: item.to, source,
+        cycleDraftId: item.finalMessageExpiryId || (item.event === 'lead.finalMessage' ? item.emailDraftId : undefined), phase: 'preparing' });
+      await Queue.updateOne({ _id: item._id, status: 'sending', attemptMessageId: item.attemptMessageId }, { $set: { source } });
       if (!await expiry.canSend(item)) {
         await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: expiry.CANCELLED, expiresAt: finishedExpiry(now()) } });
+        await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'cancelled' } });
         await releaseSlot();
         return { waitMs: POLL_MS, reason: 'cancelled', itemId: item._id };
       }
@@ -89,17 +98,23 @@ export function createSender({
         outcome = { status: 'failed', lastError: NOT_ON_WHATSAPP };
       } else {
         attempted = true;
-        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), item.finalMessageExpiryId || item.event === 'lead.finalMessage' ? {
+        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), {
+          messageId: item.attemptMessageId,
           ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
-          beforeSend: () => expiry.canSend(item),
-        } : undefined);
+          beforeSend: async () => {
+            if (!await expiry.canSend(item) || !await stopFinalMessage.claimHandoff(item)) return false;
+            handedOff = true;
+            await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'handoff', handedOffAt: now() } });
+            return true;
+          },
+        });
         outcome = { status: 'sent', messageId, messageChat: jid, sentAt: now(), lastError: null };
       }
     } catch (error) {
       const message = error?.message || 'Unknown sending error';
       outcome = error?.code === 'FINAL_MESSAGE_CHANGED'
         ? { status: 'cancelled', lastError: expiry.CANCELLED }
-        : item.attempts >= rules.maxAttempts
+        : handedOff || item.attempts >= rules.maxAttempts
         ? { status: 'failed', lastError: message }
         : { status: 'pending', lastError: message, nextAttemptAt: new Date(now().getTime() + rules.retryDelayMin * 60_000) };
     } finally {
@@ -107,7 +122,12 @@ export function createSender({
     }
     const done = now();
     if (outcome.status !== 'pending') outcome.expiresAt = finishedExpiry(done);
-    await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: outcome });
+    await Queue.updateOne({ _id: item._id, status: 'sending', attemptMessageId: item.attemptMessageId }, { $set: outcome });
+    await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: outcome.status === 'pending' ? 'failed' : outcome.status, ...(outcome.messageId ? { resultMessageId: outcome.messageId } : {}) } });
+    if (outcome.status === 'sent' && outcome.messageId) {
+      await (await import('../../helpers/stopFinalMessage.js')).default.noteOutgoing(item.to, outcome.messageId, outcome.sentAt)
+        .catch(error => console.error('[final message] could not record our outgoing message:', error.message));
+    }
 
     // Every step that talked to WhatsApp waits the full gap, even a failed one: it may still have arrived.
     // The gap is written in the same write that frees the slot, so no copy can start in between.

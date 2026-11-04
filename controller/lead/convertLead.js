@@ -11,6 +11,7 @@ const {
 const { executeGuestCascadeDelete } = require("../../helpers/guestCascadeDelete");
 const { sendClientAccountCreatedEmail } = require("../../helpers/emailService");
 const { NO_MARKETING_STATUSES, behaviourFromStatus } = require("../../helpers/leadStatuses");
+const { hasConfirmedName } = require("../../helpers/leadName");
 
 const convertLeadController = async (req, res) => {
   try {
@@ -66,9 +67,10 @@ const convertLeadController = async (req, res) => {
     const cleanEmail = (lead.email || "").trim().toLowerCase();
 
     // Checked before anything is created: an account made for a lead that then can't save would be left behind.
-    if (!(lead.name || "").trim()) {
+    // A name guessed from WhatsApp is not enough for an account: the admin confirms it in Edit Lead first.
+    if (!hasConfirmedName(lead)) {
       return res.status(400).json({
-        message: "This lead has no name. Add a name before converting.",
+        message: lead.nameFromWhatsapp ? "This lead's name came from WhatsApp. Confirm it in Edit Lead before converting." : "This lead has no name. Add a name before converting.",
         error: true,
         success: false,
       });

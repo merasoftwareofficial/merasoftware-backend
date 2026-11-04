@@ -1,6 +1,7 @@
 const userModel = require("../../models/userModel");
 const readClientActivity = require('../../helpers/clientActivity');
 const purgeExpiredGuests = require("../../helpers/purgeExpiredGuests");
+const { clientLeadExtras } = require("../../helpers/wonLead");
 
 const toTimestamp = (value) => {
   const timestamp = value ? new Date(value).getTime() : NaN;
@@ -40,6 +41,8 @@ async function getAdminClients(req, res, dashboard = false) {
 
     const clientIds = clients.map((client) => client._id);
     const activityByClient = await readClientActivity(clientIds);
+    // Business name and alternate number live on the client's lead; the list shows and searches them.
+    const extrasByClient = dashboard ? new Map() : await clientLeadExtras(clientIds);
 
     const enrichedClients = clients.map((client) => {
       const activity = latestCandidate([
@@ -49,6 +52,7 @@ async function getAdminClients(req, res, dashboard = false) {
       ]);
       return {
         ...client,
+        ...(extrasByClient.get(client._id.toString()) || {}),
         latestActivityAt: activity?.value || client.createdAt,
         latestActivitySource: activity?.source || "client_created",
       };

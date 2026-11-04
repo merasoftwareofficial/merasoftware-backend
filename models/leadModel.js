@@ -133,6 +133,23 @@ const leadSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  // Optional, the admin's choice. Search and contact only: matching, duplicates and sending use `phone`.
+  businessName: {
+    type: String,
+    default: "",
+    trim: true,
+  },
+  altPhone: {
+    type: String,
+    default: "",
+    trim: true,
+  },
+  // The name was guessed from the WhatsApp profile (helpers/whatsappProfileName.js). Until the admin
+  // saves it, or the person gives a name themselves, it counts as no name (helpers/leadName.js).
+  nameFromWhatsapp: {
+    type: Boolean,
+    default: false,
+  },
   // Set when WhatsApp Auto Reply added this person (helpers/autoReplyJobs.js).
   inquiry: {
     type: new mongoose.Schema({
@@ -140,7 +157,7 @@ const leadSchema = new mongoose.Schema({
       message: { type: String, default: "" },
       firstAt: { type: Date },
       lastAt: { type: Date },
-      profileName: { type: String, default: "" }, // WhatsApp's display name: a hint, never the lead's real name
+      profileName: { type: String, default: "" }, // WhatsApp's display name as given; a new lead's name/businessName may be guessed from it
     }, { _id: false }),
     default: undefined,
   },

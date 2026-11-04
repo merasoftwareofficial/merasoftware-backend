@@ -1,5 +1,6 @@
 const userModel = require("../../models/userModel");
 const mongoose = require("mongoose");
+const { syncClientLeads } = require("../../helpers/wonLead");
 
 async function updatePartnerCustomer(req, res) {
     try {
@@ -56,14 +57,20 @@ async function updatePartnerCustomer(req, res) {
         if (phone) updateData.phone = phone;
 
         // Update customer details
-        const updatedCustomer = await userModel.findByIdAndUpdate(
-            customerId,
-            updateData,
-            { 
-                new: true, // Return updated document
-                runValidators: true // Run schema validations
-            }
-        ).select('name email phone createdAt walletBalance');
+        // A client's Won lead keeps the same name, phone and email as the account: both change together.
+        let updatedCustomer;
+        await mongoose.connection.transaction(async (session) => {
+            updatedCustomer = await userModel.findByIdAndUpdate(
+                customerId,
+                updateData,
+                {
+                    new: true, // Return updated document
+                    runValidators: true, // Run schema validations
+                    session
+                }
+            ).select('name email phone createdAt walletBalance');
+            await syncClientLeads(updatedCustomer, { session });
+        });
 
         res.json({
             success: true,

@@ -56,4 +56,16 @@ const prepareOneController = async (req, res) => {
   }
 };
 
-module.exports = { countController, prepareAllController, prepareOneController };
+const stopController = async (req, res) => {
+  try {
+    if (req.userRole !== 'admin') return reply(res, 403, 'Forbidden');
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason || reason.length > 500) return reply(res, 400, 'Enter a reason between 1 and 500 characters.');
+    if (!require('mongoose').isValidObjectId(req.body?.draftId)) return reply(res, 400, 'Refresh the page to load the current countdown.');
+    const row = await require('../../whatsapp/src/models.js').FinalMessage.findOne({ leadId: req.params.leadId, draftId: req.body.draftId }).lean();
+    if (!row) return reply(res, 409, 'This countdown changed. Refresh before stopping it.');
+    const data = await require('../../helpers/stopFinalMessage').stopCycle(row, { reason, actor: req.userId });
+    return reply(res, 200, 'Countdown stopped. Current status is unchanged.', data);
+  } catch (error) { return reply(res, error.status || 400, error.message); }
+};
+module.exports = { countController, prepareAllController, prepareOneController, stopController };

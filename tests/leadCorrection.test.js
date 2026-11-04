@@ -326,7 +326,7 @@ test('the backfill counts first, creates only missing leads, never links, and ca
 });
 
 
-test('matured converted leads accept notes and files but cannot regress or edit account details', async () => {
+test('matured converted leads accept notes and files but cannot regress their stage', async () => {
   const created = await lead('Won', { convertedToUserId: new mongoose.Types.ObjectId(), followUps: [{ note: 'Before conversion', badge: 'Positive' }] });
   const path = `/admin/leads/${created._id}`;
   assert.equal((await send(path, { action: 'followUp', note: 'Client called', badge: 'Won' }, pdf)).status, 200);
@@ -336,7 +336,6 @@ test('matured converted leads accept notes and files but cannot regress or edit 
   assert.ok(row.followUps[1].attachment.driveFileId);
   assert.equal((await send(path, { action: 'followUp', note: 'Regress', badge: 'Contacted' })).status, 400);
   assert.equal((await send(path, { action: 'followUp', note: ' ', badge: 'Won' })).status, 400);
-  assert.equal((await send(path, { action: 'editDetails', name: 'Other' })).status, 409);
   const followUpId = String(created.followUps[0]._id);
   assert.equal((await send(path, { action: 'editFollowUp', followUpId, note: 'Corrected history', badge: 'Positive' })).status, 200);
   assert.equal((await send(path, { action: 'editFollowUp', followUpId, note: 'Change history', badge: 'Negative' })).status, 400);

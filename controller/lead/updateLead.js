@@ -1,12 +1,15 @@
 const path = require("path");
+const mongoose = require("mongoose");
 const leadModel = require("../../models/leadModel");
+const userModel = require("../../models/userModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
 const offerTargetModel = require("../../models/offerTargetModel");
 const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES } = require("../../helpers/leadStatuses");
 const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
-const { findAccountsByPhone, findLeadsByPhone } = require("../../helpers/leadPhone");
+const { findAccountsByPhone, findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
+const { hasConfirmedName } = require("../../helpers/leadName");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
 let KEY_FILE_PATH;
@@ -18,7 +21,7 @@ if (process.env.NODE_ENV === "production" && process.env.GOOGLE_DRIVE_CREDENTIAL
 const FOLLOWUP_FOLDER_NAME = "LeadFollowUpFiles";
 
 const NEEDS_NAME = { message: "Add this lead's name first: use Edit Lead.", error: true, success: false };
-const missingNameFor = (lead, status) => !lead.name && !NAME_OPTIONAL_STATUSES.includes(status);
+const missingNameFor = (lead, status) => !hasConfirmedName(lead) && !NAME_OPTIONAL_STATUSES.includes(status);
 // A lead just marked Negative: the popup asks whether its final message goes. The stage is saved whatever happens here.
 const offerFinalMessage = async (lead, previousStatus) => {
   if (lead.status !== NEGATIVE || previousStatus === NEGATIVE) return undefined;
@@ -60,7 +63,8 @@ const updateLeadController = async (req, res) => {
       return res.json({ message: "Current status updated", data, finalMessage: data.finalMessage, finalMessageReadiness: data.finalMessageReadiness, success: true, error: false });
     }
 
-    if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {
+    // A client's lead keeps its follow-ups and its contact details editable (editDetails keeps the account in step).
+    if (lead.convertedToUserId && !["followUp", "editFollowUp", "editDetails"].includes(action)) {
       return res.status(409).json({
         message: "This lead is already converted to a client and cannot be edited",
         error: true,
@@ -236,14 +240,23 @@ const updateLeadController = async (req, res) => {
 
     // Edit the lead's own contact details. Same rules as createLead.js: name and
     // phone are required, email is optional and stored lowercase, and no other
-    // lead may already hold the same phone or email. Source and notes change
-    // only when sent, so a form that edits just the contact fields keeps them.
+    // lead may already hold the same phone or email. Source, notes, business name
+    // and alternate number change only when sent, so a form that edits just the
+    // contact fields keeps them.
+    // A client's (converted) lead can be edited too: its email is the login email and
+    // stays as it is, and a new name or phone is written to the client account as well.
     if (action === "editDetails") {
+      const clientId = lead.convertedToUserId;
+      // The account is the source of truth for a client's name, phone and email; the lead holds a copy.
+      // A trashed or missing account leaves only the lead to edit.
+      const account = clientId ? await userModel.findOne({ _id: clientId, deletedAt: null }).select("name email phone").lean() : null;
       const cleanName = (req.body.name || "").trim();
       const cleanPhone = (req.body.phone || "").trim();
       const cleanEmail = (req.body.email || "").trim().toLowerCase();
       const hasSource = req.body.source !== undefined;
       const cleanSource = hasSource ? String(req.body.source).trim() : lead.source;
+      const cleanBusinessName = req.body.businessName !== undefined ? String(req.body.businessName).trim() : lead.businessName;
+      const cleanAltPhone = req.body.altPhone !== undefined ? String(req.body.altPhone).trim() : lead.altPhone;
 
       if (!cleanName) {
         return res.status(400).json({
@@ -264,6 +277,23 @@ const updateLeadController = async (req, res) => {
       if (cleanEmail && !isAccountEmail(cleanEmail)) {
         return res.status(400).json({
           message: "Please provide a valid email address",
+          error: true,
+          success: false,
+        });
+      }
+
+      const lockedEmail = account ? String(account.email || "").toLowerCase() : (lead.email || "");
+      if (clientId && cleanEmail !== lockedEmail) {
+        return res.status(400).json({
+          message: "A client's email is their login email and cannot be changed here",
+          error: true,
+          success: false,
+        });
+      }
+
+      if (cleanAltPhone && phoneKey(cleanAltPhone) === phoneKey(cleanPhone)) {
+        return res.status(400).json({
+          message: "The alternate number is the same as the phone number",
           error: true,
           success: false,
         });
@@ -291,10 +321,13 @@ const updateLeadController = async (req, res) => {
       const duplicateOr = [{ phone: cleanPhone }];
       if (cleanEmail) duplicateOr.push({ email: cleanEmail });
 
+      // A client's own project requests (customerProjectRequest.js) carry the client's phone and
+      // email: they are the same person, not a duplicate.
+      const others = { _id: { $ne: lead._id }, ...(clientId ? { requestedByUserId: { $ne: clientId } } : {}) };
       const existingLead = await leadModel
-        .findOne({ _id: { $ne: lead._id }, $or: duplicateOr })
+        .findOne({ ...others, $or: duplicateOr })
         .lean();
-      if (existingLead || (await findLeadsByPhone(cleanPhone, { _id: { $ne: lead._id } })).length) {
+      if (existingLead || (await findLeadsByPhone(cleanPhone, others)).length) {
         return res.status(409).json({
           message: "A lead with this phone or email already exists",
           error: true,
@@ -302,17 +335,44 @@ const updateLeadController = async (req, res) => {
         });
       }
 
+      // The client account holds the same phone: no other account may already use the new one.
+      // Compared with the account's number, which may differ from the lead's older copy.
+      const phoneChanged = phoneKey(cleanPhone) !== phoneKey(account ? account.phone : lead.phone);
+      if (clientId && phoneChanged) {
+        const otherAccounts = (await findAccountsByPhone(cleanPhone)).filter((user) => String(user._id) !== String(clientId) && !user.deletedAt);
+        if (otherAccounts.length) {
+          return res.status(409).json({
+            message: "Another account already uses this phone number",
+            error: true,
+            success: false,
+          });
+        }
+      }
+
       // Owner rule: an Inquiry becomes a real lead the moment it gets a name.
+      // Saving here is the admin confirming the name, so a WhatsApp guess becomes the real name.
       if (lead.status === INQUIRY) lead.status = CONTACTED;
       lead.name = cleanName;
+      lead.nameFromWhatsapp = false;
+      lead.businessName = cleanBusinessName;
       lead.phone = cleanPhone;
+      lead.altPhone = cleanAltPhone;
       lead.email = cleanEmail;
       lead.source = cleanSource;
       if (req.body.notes !== undefined) {
         lead.notes = req.body.notes;
       }
 
-      const savedLead = await lead.save();
+      // Account and lead change together or not at all.
+      let savedLead;
+      if (account) {
+        await mongoose.connection.transaction(async (session) => {
+          await userModel.updateOne({ _id: account._id }, { $set: { name: cleanName, phone: cleanPhone } }, { session });
+          savedLead = await lead.save({ session });
+        });
+      } else {
+        savedLead = await lead.save();
+      }
 
       return res.json({
         message: "Lead details updated",
