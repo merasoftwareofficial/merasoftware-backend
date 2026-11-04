@@ -44,6 +44,10 @@ const prepareOneController = async (req, res) => {
     if (req.userRole !== "admin") return reply(res, 403, "Forbidden");
     const lead = await leadModel.findById(req.params.leadId).lean();
     if (!lead) return reply(res, 404, "Lead not found");
+    if (lead.convertedToUserId) {
+      const readiness = await require('../../helpers/clientFinalMessageReadiness').clientStartReadiness(lead);
+      if (!readiness.ready) return reply(res, 409, readiness.message, { finalMessageReadiness: readiness });
+    }
     const outcome = await prepareFor(lead, { newEpisode: req.query?.new === '1' });
     return outcome === "prepared" ? reply(res, 200, "Final message prepared") : reply(res, 409, WHY_NOT[outcome]);
   } catch (error) {

@@ -171,11 +171,12 @@ async function setBehaviour(leadId, value, actor) {
   if (!lead.convertedToUserId) fail('Behaviour is only for clients. Use the stage for a lead.', 409);
   const before = lead.clientBehaviour || DEFAULT_CLIENT_BEHAVIOUR;
   if (before === value) return { clientBehaviour: value };
-  await Lead.updateOne({ _id: lead._id }, {
+  const changed = await Lead.updateOne({ _id: lead._id, clientBehaviourRevision: lead.clientBehaviourRevision ? lead.clientBehaviourRevision : { $in: [null, 0] } }, {
     $set: { clientBehaviour: value },
     $inc: { clientBehaviourRevision: 1 },
-    $push: { followUps: line(`Client behaviour: ${leadStatusLabel(before)} to ${leadStatusLabel(value)}.`, lead.status, actor) },
+    $push: { followUps: line(`Client current status: ${leadStatusLabel(before)} to ${leadStatusLabel(value)}.`, lead.status, actor) },
   });
+  if (!changed.modifiedCount) fail('This client status changed in another window. Refresh and try again.', 409);
   return { clientBehaviour: value };
 }
 

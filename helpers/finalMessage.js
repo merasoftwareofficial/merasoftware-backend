@@ -2,7 +2,7 @@ const Lead = require('../models/leadModel');
 const crypto = require('node:crypto');
 const mongoose = require('mongoose');
 const userModel = require('../models/userModel');
-const { FinalMessage, Lock, State, STATE_ID } = require('../whatsapp/src/models.js');
+const { FinalMessage, Lock, Queue, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
 const { EmailDraft } = require('../models/emailControlModel');
 const { DEFAULT_IGNORED_REPLIES, MAX_IGNORED_LENGTH, MAX_IGNORED_REPLIES, replyWords } = require('../whatsapp/src/finalMessageReplies.js');
 const { CONTACTED, DEAD, NEGATIVE } = require('./leadStatuses');
@@ -10,7 +10,8 @@ const { findLeadsByPhone } = require('./leadPhone');
 const { isAccountEmail } = require('./emailValidator');
 const { normalizePhone } = require('./whatsappQueue');
 const { prepareTemplatedMail } = require('./emailService');
-const { registerReviewDraft } = require('./emailController');
+const { registerReviewDraft, unregisterReviewDraft } = require('./emailController');
+const { clientReadiness } = require('./clientFinalMessageReadiness');
 
 // The last message to a Negative lead. It goes through the normal review popup and template (action lead.finalMessage),
 // so the admin chooses Send or Don't Send, and the channel. The job (finalMessageJobs.js) follows what happened next.
@@ -24,17 +25,7 @@ const isClientRow = row => row?.subjectKind === 'client';
 
 // Check the account and the canonical lead on every action, not just at preparation.
 async function clientEligible(lead, row) {
-  if (!clientAutomationEnabled() || !lead || lead.deletedAt || lead.status !== 'Won' || !lead.convertedToUserId || lead.clientBehaviour !== NEGATIVE) return false;
-  if (row && (String(row.clientId) !== String(lead.convertedToUserId) || (row.behaviourRevision || 0) !== (lead.clientBehaviourRevision || 0) || (row.phone && normalizePhone(lead.phone) !== row.phone))) return false;
-  const [account, links] = await Promise.all([
-    userModel.findOne({ _id: lead.convertedToUserId, roles: 'customer', deletedAt: null, isGuest: { $ne: true } }).select('phone').lean(),
-    Lead.countDocuments({ convertedToUserId: lead.convertedToUserId, deletedAt: null }),
-  ]);
-  if (!account || links !== 1) return false;
-  const phone = normalizePhone(lead.phone);
-  if (!phone || normalizePhone(account.phone) !== phone) return false;
-  const accounts = await userModel.find({ roles: 'customer', deletedAt: null, isGuest: { $ne: true }, phone: { $nin: ['', null] } }).select('phone').lean();
-  return accounts.filter(user => normalizePhone(user.phone) === phone).length === 1;
+  return (await clientReadiness(lead, row)).ready;
 }
 
 const readHours = async () => (await State.findById(STATE_ID).select('finalMessage').lean())?.finalMessage?.hours || DEFAULT_HOURS;
@@ -111,23 +102,69 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
   if (client && !await clientEligible(lead)) return 'client-ineligible';
   const own = rows.find(row => String(row.leadId) === String(lead._id));
   const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && ['review', 'queued', 'waiting', 'replied'].includes(row.status));
-  const oldActive = own && !isClientRow(own) && ['review', 'queued', 'waiting', 'replied'].includes(own.status);
+  let oldActive = own && !isClientRow(own) && ['review', 'queued', 'waiting', 'replied'].includes(own.status);
+  if (client && oldActive && newEpisode) {
+    const retired = await mongoose.connection.transaction(async session => {
+      const queued = await Queue.findOne({ emailDraftId: own.draftId }).session(session).lean();
+      const draft = await EmailDraft.findById(own.draftId).session(session).lean();
+      if (queued?.status === 'sending' || draft?.status === 'sending' || (draft?.delivery?.lockUntil > new Date())) return false;
+      await Queue.updateMany({ emailDraftId: own.draftId, status: 'pending' }, { $set: { status: 'cancelled', lastError: 'Replaced by an explicit client final-message cycle.', expiresAt: finishedExpiry(new Date()) } }, { session });
+      await EmailDraft.updateOne({ _id: own.draftId, status: { $in: ['staged', 'pending', 'failed'] } }, { $set: { status: 'skipped' } }, { session });
+      const changed = await FinalMessage.updateOne({ _id: own._id, draftId: own.draftId, status: own.status }, { $set: { status: 'stopped' } }, { session });
+      return Boolean(changed.modifiedCount);
+    });
+    if (!retired) return 'in-review';
+    own.status = 'stopped';
+    oldActive = false;
+  }
   const resolved = isClientRow(own) && (['dead', 'stopped', 'email-only'].includes(own.status) || (own.status === 'replied' && own.decision));
   const reason = client ? (other || oldActive ? 'already-sent' : isClientRow(own) && own.status === 'review' ? 'in-review' : isClientRow(own) && !CAN_SEND_AGAIN.includes(own.status) && !(newEpisode && resolved) ? 'already-sent' : null) : blockedReason(lead, rows, clients);
   if (reason === 'in-review') {
     // Closed without a decision, or the page was left: the same draft opens again.
     const own = rows.find(row => String(row.leadId) === String(lead._id));
     const draft = await EmailDraft.findById(own.draftId).lean();
+    if (client && (!draft || draft.expiresAt <= new Date() || draft.status === 'skipped')) {
+      await FinalMessage.updateOne({ _id: own._id, draftId: own.draftId, status: 'review' }, { $set: { status: 'not-sent' } });
+      return prepareForUnlocked(lead, { newEpisode });
+    }
     return draft && registerReviewDraft(draft) ? 'prepared' : 'in-review';
   }
   if (reason) return reason;
   const hours = await readHours();
   const email = isAccountEmail(lead.email) ? lead.email : '';
-  const { draftId } = await prepareTemplatedMail(EVENT, lead, email, hours);
+  let dedupeKey = client ? `client-final:${lead._id}:${lead.clientBehaviourRevision || 0}:${own?.draftId || 'first'}` : undefined;
+  if (client) {
+    let previous = await EmailDraft.findOne({ dedupeKey }).lean();
+    while (previous && (previous.status === 'skipped' || previous.expiresAt <= new Date())) {
+      if (['sent', 'sending', 'queued'].includes(previous.status)) return 'already-sent';
+      dedupeKey += `:retry:${previous._id}`;
+      previous = await EmailDraft.findOne({ dedupeKey }).lean();
+    }
+  }
+  const { draftId } = await prepareTemplatedMail(EVENT, lead, email, hours, { dedupeKey });
   if (!draftId) return 'unavailable';
+  const draft = client ? await EmailDraft.findById(draftId).lean() : null;
+  const promisedHours = Number.parseInt(draft?.values?.timeLimit, 10) || hours;
   const old = own && client && (!isClientRow(own) || (newEpisode && resolved)) ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
   const update = { $set: { phone: normalizePhone(lead.phone), draftId, hours, status: 'review', expiryEnabled: true, ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, expiryQueuedAt: 1, originalMessage: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
-  await FinalMessage.updateOne({ leadId: lead._id }, update, { upsert: true });
+  if (client) update.$set.hours = promisedHours;
+  try {
+    if (client) {
+      const current = await Lead.findById(lead._id).lean();
+      if (!await clientEligible(current) || (current.clientBehaviourRevision || 0) !== (lead.clientBehaviourRevision || 0)) {
+        unregisterReviewDraft(draftId);
+        return 'client-ineligible';
+      }
+      const guard = own ? { _id: own._id, draftId: own.draftId, status: own.status } : { leadId: lead._id, draftId: { $exists: false } };
+      const saved = await FinalMessage.updateOne(guard, update, { upsert: !own });
+      if (!saved.modifiedCount && !saved.upsertedCount) { unregisterReviewDraft(draftId); return 'in-review'; }
+    } else await FinalMessage.updateOne({ leadId: lead._id }, update, { upsert: true });
+  } catch (error) {
+    if (client) unregisterReviewDraft(draftId);
+    if (client && error.code === 11000) return 'in-review';
+    throw error;
+  }
+  if (draft) registerReviewDraft(draft);
   return 'prepared';
 }
 

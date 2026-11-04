@@ -4,7 +4,6 @@ const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
 const offerTargetModel = require("../../models/offerTargetModel");
 const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES } = require("../../helpers/leadStatuses");
-const { setBehaviour } = require("../../helpers/offerTargets");
 const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
 const { findAccountsByPhone, findLeadsByPhone } = require("../../helpers/leadPhone");
@@ -57,13 +56,8 @@ const updateLeadController = async (req, res) => {
     const isMatured = Boolean(lead.convertedToUserId) || lead.status === WON;
     const previousStatus = lead.status;
     if (action === "setBehaviour") {
-      const data = await setBehaviour(leadId, req.body.behaviour, req.userId);
-      let finalMessage;
-      if (req.body.behaviour === NEGATIVE && lead.clientBehaviour !== NEGATIVE) {
-        try { finalMessage = await require('../../helpers/finalMessage').prepareFor(await leadModel.findById(leadId).lean()); }
-        catch (error) { console.error('Client behaviour saved; final message unavailable:', error.message); finalMessage = 'unavailable'; }
-      }
-      return res.json({ message: "Behaviour updated", data, finalMessage, success: true, error: false });
+      const data = await require('../../helpers/clientStatus').changeClientStatus(leadId, req.body.behaviour, req.userId);
+      return res.json({ message: "Current status updated", data, finalMessage: data.finalMessage, finalMessageReadiness: data.finalMessageReadiness, success: true, error: false });
     }
 
     if (lead.convertedToUserId && !["followUp", "editFollowUp"].includes(action)) {

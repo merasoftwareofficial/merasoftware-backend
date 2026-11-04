@@ -8,6 +8,10 @@ const { enqueueWhatsAppForEmail } = require('./whatsappQueue');
 const requestScope = new AsyncLocalStorage();
 const eventScope = new AsyncLocalStorage();
 const suppressed = () => ({ data: null, error: null, suppressed: true });
+function unregisterReviewDraft(id) {
+  const scope = requestScope.getStore();
+  if (scope) scope.ids = scope.ids.filter(item => String(item) !== String(id));
+}
 // Reattach a persisted review after a business request/response interruption.
 function registerReviewDraft(draft) {
   const scope = requestScope.getStore();
@@ -357,4 +361,4 @@ async function sendSystemMail(event, mail, dedupeKey, source) {
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
   return decision.status === 'sent' ? 'sent' : 'paused';
 }
-module.exports = { recordHistory, registerReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };
+module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };

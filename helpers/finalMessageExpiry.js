@@ -20,7 +20,14 @@ async function eligible(row) {
 }
 
 async function canSend(item) {
-  if (!item.finalMessageExpiryId) return true;
+  if (!item.finalMessageExpiryId) {
+    if (item.event !== 'lead.finalMessage' || !item.emailDraftId) return true;
+    const original = await FinalMessage.findOne({ draftId: item.emailDraftId }).lean();
+    if (original?.subjectKind !== 'client') return true;
+    if (!['review', 'queued'].includes(original.status)) return false;
+    const lead = await Lead.findById(original.leadId).lean();
+    return (await require('./clientFinalMessageReadiness').clientReadiness(lead, original)).ready;
+  }
   const row = await FinalMessage.findOne({ draftId: item.finalMessageExpiryId }).lean();
   if (!row || row.phone !== item.to || !await eligible(row)) return false;
   const { EmailPolicy } = require('../models/emailControlModel');

@@ -102,6 +102,7 @@ async function assertDraftMayGo(draftId) {
   // The Final Message's own draft: the block exists because of it.
   if (draft.event === 'lead.finalMessage') {
     const row = await FinalMessage.findOne({ draftId: draft._id }).lean();
+    if (!row && !draft.leadId) throw Object.assign(new Error('This final message is not tracked yet. Retry from the client or lead page before sending.'), { status: 409 });
     if (row?.subjectKind === 'client') {
       const lead = await Lead.findById(row.leadId).lean();
       if (!await require('./finalMessage').clientEligible(lead, row) || row.status !== 'review') throw Object.assign(new Error('This client or final message changed. Refresh before sending.'), { status: 409 });

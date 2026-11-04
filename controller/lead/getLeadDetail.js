@@ -1,6 +1,7 @@
 const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
-const { FinalMessage } = require("../../whatsapp/src/models.js");
+const { FinalMessage, Queue } = require("../../whatsapp/src/models.js");
+const { EmailDraft } = require("../../models/emailControlModel");
 const { LABELS, MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
 const { targetsForLead } = require("../../helpers/offerTargets");
 
@@ -31,15 +32,31 @@ const getLeadDetailController = async (req, res) => {
     }
 
     const [finalMessage, blocked, offerTargets, clientAvailable] = await Promise.all([
-      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind").lean(),
+      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind draftId hours").lean(),
       blockForLead(lead),
       targetsForLead(lead._id),
       lead.convertedToUserId ? userModel.exists({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }) : null,
     ]);
+    // Present the latest delivery result without waiting for the minute job or changing tracking.
+    if (finalMessage && ['review', 'queued'].includes(finalMessage.status)) {
+      const [queued, draft] = await Promise.all([
+        Queue.findOne({ emailDraftId: finalMessage.draftId }).select('status sentAt').lean(),
+        EmailDraft.findById(finalMessage.draftId).select('status expiresAt delivery.channels delivery.emailStatus').lean(),
+      ]);
+      if (queued?.status === 'sent' && queued.sentAt) {
+        finalMessage.status = 'waiting';
+        finalMessage.sentAt = queued.sentAt;
+        finalMessage.deadlineAt = new Date(queued.sentAt.getTime() + finalMessage.hours * 3600000);
+      } else if (['pending', 'sending'].includes(queued?.status)) finalMessage.status = 'queued';
+      else if (queued || !draft || draft.status === 'skipped' || draft.expiresAt <= new Date()) finalMessage.status = 'not-sent';
+      else if (draft.delivery?.channels && !draft.delivery.channels.includes('whatsapp') && draft.delivery.emailStatus === 'sent') finalMessage.status = 'email-only';
+    }
     lead.finalMessage = finalMessage;
     lead.contactBlock = blocked ? { reason: blocked, label: LABELS[blocked], message: MESSAGES[blocked] } : null;
     lead.offerTargets = offerTargets;
     lead.clientAvailable = Boolean(clientAvailable);
+    lead.serverNow = new Date();
+    if (lead.convertedToUserId && lead.clientBehaviour === 'Negative') lead.finalMessageReadiness = await require('../../helpers/clientFinalMessageReadiness').clientStartReadiness(lead);
 
     return res.json({
       message: "Lead fetched successfully",

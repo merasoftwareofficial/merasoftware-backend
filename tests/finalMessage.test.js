@@ -69,7 +69,12 @@ test('client final message follows a sent WhatsApp without changing Matured', as
     assert.equal(marked.finalMessage, 'prepared');
     assert.equal((await row(clientLead._id)).subjectKind, 'client');
     await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+    assert.equal((await call(`/admin/leads/${clientLead._id}`, 'GET')).data.finalMessage.status, 'queued', 'detail reflects queueing before the minute job');
     await sendQueue(phone());
+    const delivered = (await call(`/admin/leads/${clientLead._id}`, 'GET')).data;
+    assert.equal(delivered.finalMessage.status, 'waiting');
+    assert.equal(Date.parse(delivered.finalMessage.deadlineAt) - Date.parse(delivered.finalMessage.sentAt), 24 * HOUR);
+    assert.ok(delivered.serverNow);
     await followFinalMessages();
     assert.equal((await row(clientLead._id)).status, 'waiting');
     assert.equal((await audience('Won')).count, 0);
@@ -331,6 +336,7 @@ before(async () => {
   app.use('/api', requestMiddleware);
   app.use('/api/email-control', require('../routes/emailControl'));
   app.use('/api/auto-reply', require('../routes/autoReply'));
+  app.use('/api/offer-targets', require('../routes/offerTargets'));
   app.post('/api/admin/leads/:leadId', authToken, leadFileUpload, require('../controller/lead/updateLead'));
   app.get('/api/admin/leads/:leadId', authToken, require('../controller/lead/getLeadDetail'));
   app.get('/api/admin/final-message/count', authToken, final.countController);
@@ -420,6 +426,145 @@ test('expiry transaction rolls back insertion failure and retries without duplic
   await followFinalMessages();
   assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 1);
   assert.ok((await row(id)).expiryQueuedAt);
+});
+
+test('client unavailable responses identify disabled automation and phone mismatch; same Negative recovers after correction', async () => {
+  const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543211', roles: ['customer'] });
+  const item = await lead({ status: 'Won', convertedToUserId: account._id });
+  delete process.env.CLIENT_FINAL_MESSAGE_ENABLED;
+  let result = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+  assert.equal(result.finalMessageReadiness.code, 'automation-disabled');
+  assert.equal(result.emailDraftIds, undefined);
+  result = await call(`/admin/leads/${item._id}/final-message`);
+  assert.equal(result.status, 409);
+  assert.match(result.message, /disabled on the server/);
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    result = await call(`/admin/leads/${item._id}/final-message`);
+    assert.equal(result.data.finalMessageReadiness.code, 'phone-mismatch');
+    await User.updateOne({ _id: account._id }, { $set: { phone: item.phone } });
+    result = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    assert.equal(result.finalMessage, 'prepared');
+    const again = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    assert.deepEqual(again.emailDraftIds, result.emailDraftIds);
+    assert.equal(await EmailDraft.countDocuments({ event: 'lead.finalMessage' }), 1);
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('both behaviour APIs prepare and resume the same tracked client review', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id });
+    const offer = await call(`/offer-targets/leads/${item._id}/behaviour`, 'PATCH', { behaviour: 'Negative' });
+    assert.equal(offer.data.finalMessage, 'prepared');
+    assert.equal(offer.emailStatus, 'awaiting-review');
+    const portal = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    assert.deepEqual(portal.emailDraftIds, offer.emailDraftIds);
+    assert.equal((await row(item._id)).subjectKind, 'client');
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client draft-link failure hides the orphan review, blocks Send and recovers one draft with its promised hours', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  const update = FinalMessage.updateOne;
+  try {
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id });
+    FinalMessage.updateOne = async (...args) => { if (args[1]?.$set?.status === 'review') throw new Error('link interrupted'); return update.apply(FinalMessage, args); };
+    const result = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    FinalMessage.updateOne = update;
+    assert.equal(result.finalMessage, 'unavailable');
+    assert.equal(result.emailDraftIds, undefined);
+    const orphan = await EmailDraft.findOne({ event: 'lead.finalMessage' }).lean();
+    await assert.rejects(require('../helpers/emailController').decide(String(orphan._id), String(admin._id), { choice: 'send' }, { application: 'portal', portalAdmin: true }), /not tracked yet/);
+    await call('/auto-reply/final-message/time', 'POST', { hours: 72 });
+    const recovered = await call(`/admin/leads/${item._id}/final-message`);
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.emailDraftIds[0], String(orphan._id));
+    assert.equal(await EmailDraft.countDocuments({ event: 'lead.finalMessage' }), 1);
+    assert.equal((await row(item._id)).hours, 24);
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { FinalMessage.updateOne = update; delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('expired client review can be recovered without changing the saved Negative status', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id });
+    const first = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await EmailDraft.updateOne({ _id: first.emailDraftIds[0] }, { $set: { expiresAt: new Date(0) } });
+    const second = await call(`/admin/leads/${item._id}/final-message`);
+    assert.equal(second.status, 200);
+    assert.notEqual(second.emailDraftIds[0], first.emailDraftIds[0]);
+    assert.equal((await Lead.findById(item._id)).clientBehaviour, 'Negative');
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('explicit legacy replacement refuses mid-send and preserves history while cancelling only unsent work', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id, clientBehaviour: 'Negative' });
+    const oldDraft = new mongoose.Types.ObjectId();
+    const queued = await Queue.create({ emailDraftId: oldDraft, to: PHONE, text: 'Old lead message', status: 'sending' });
+    await FinalMessage.create({ leadId: item._id, draftId: oldDraft, subjectKind: 'lead', phone: PHONE, hours: 24, status: 'queued' });
+    assert.equal((await call(`/admin/leads/${item._id}/final-message?new=1`)).status, 409);
+    await Queue.updateOne({ _id: queued._id }, { $set: { status: 'pending' } });
+    const result = await call(`/admin/leads/${item._id}/final-message?new=1`);
+    assert.equal(result.status, 200);
+    assert.equal((await Queue.findById(queued._id)).status, 'cancelled');
+    const cycle = await row(item._id);
+    assert.equal(cycle.subjectKind, 'client');
+    assert.equal(cycle.episodeHistory.length, 1);
+    assert.equal(String(cycle.episodeHistory[0].draftId), String(oldDraft));
+    assert.equal((await Lead.findById(item._id)).status, 'Won');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('a queued client message cannot send after its current status or phone changes', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id });
+    const response = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(response.emailDraftIds[0], 'send', 'whatsapp');
+    await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Active' });
+    const transport = phone();
+    await sendQueue(transport);
+    assert.equal(transport.sent.length, 0);
+    assert.equal((await Queue.findOne({ emailDraftId: response.emailDraftIds[0] })).status, 'cancelled');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('client readiness differentiates account, identity and phone blockers without mutating records', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const { clientReadiness } = require('../helpers/clientFinalMessageReadiness');
+    const account = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const item = await lead({ status: 'Won', convertedToUserId: account._id, clientBehaviour: 'Negative' });
+    const current = await Lead.findById(item._id).lean();
+    assert.equal((await clientReadiness({ ...current, convertedToUserId: null })).code, 'client-link-missing');
+    assert.equal((await clientReadiness({ ...current, deletedAt: new Date() })).code, 'lead-unavailable');
+    assert.equal((await clientReadiness({ ...current, clientBehaviour: 'Active' })).code, 'client-state');
+    assert.equal((await clientReadiness({ ...current, phone: '123' })).code, 'invalid-phone');
+    await EmailPolicy.create({ event: 'lead.finalMessage', mode: 'off' });
+    assert.equal((await require('../helpers/clientFinalMessageReadiness').clientStartReadiness(current)).code, 'template-disabled');
+    assert.equal((await clientReadiness(current)).ready, true, 'template Off blocks new preparation, not an existing timer');
+    await EmailPolicy.deleteMany({});
+    const duplicate = await lead({ phone: '9876543211', status: 'Won', convertedToUserId: account._id });
+    assert.equal((await clientReadiness(current)).code, 'duplicate-links');
+    await Lead.deleteOne({ _id: duplicate._id });
+    await User.create({ name: 'Shared', email: 'shared@example.test', phone: '+91 98765 43210', roles: ['customer'] });
+    assert.equal((await clientReadiness(current)).code, 'shared-phone');
+    await User.updateOne({ _id: account._id }, { $set: { deletedAt: new Date() } });
+    assert.equal((await clientReadiness(current)).code, 'account-unavailable');
+    assert.equal((await Lead.findById(item._id)).clientBehaviour, 'Negative');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
 });
 
 test('marking Negative saves the stage and opens a review; nothing enters the queue until Send', async () => {

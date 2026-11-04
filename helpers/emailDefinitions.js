@@ -88,8 +88,8 @@ const definitions = {
     text: lines('Hello ਜੀ,', '', 'ਤੁਹਾਡੇ ਵੱਲੋਂ response ਨਾ ਮਿਲਣ ਕਰਕੇ, ਤੁਹਾਡਾ "Online Digital Presence with Free Website" ਵਾਲਾ offer ਅਗਲੇ {{timeLimit}} ਵਿੱਚ close ਕੀਤਾ ਜਾ ਰਿਹਾ ਹੈ।', '', 'ਆਪਣਾ free website offer secure/resume ਕਰਨ ਲਈ ਕਿਰਪਾ ਕਰਕੇ ਹੁਣੇ reply ਕਰੋ।', '', 'Regards,', '', 'Mera Software'),
     variables: { timeLimit: detail('Time limit', '24 hours', 'The time set in Communication → Final Message; the wait follows the same setting') },
     blocks: {},
-    build(lead, email, hours) {
-      return { to: email ? [email] : [], phone: lead.phone, values: { timeLimit: `${hours} hours` } };
+    build(lead, email, hours, options = {}) {
+      return { to: email ? [email] : [], phone: lead.phone, dedupeKey: options.dedupeKey, values: { timeLimit: `${hours} hours` } };
     },
   },
   'lead.finalMessageExpired': {

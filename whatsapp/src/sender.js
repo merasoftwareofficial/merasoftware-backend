@@ -89,8 +89,8 @@ export function createSender({
         outcome = { status: 'failed', lastError: NOT_ON_WHATSAPP };
       } else {
         attempted = true;
-        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), item.finalMessageExpiryId ? {
-          quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } },
+        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), item.finalMessageExpiryId || item.event === 'lead.finalMessage' ? {
+          ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
           beforeSend: () => expiry.canSend(item),
         } : undefined);
         outcome = { status: 'sent', messageId, messageChat: jid, sentAt: now(), lastError: null };
