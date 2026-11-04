@@ -128,7 +128,7 @@ export function createConnection({ Auth, State, logger, onMessages, makeSocket =
       },
       // typingMs > 0: shows "typing…" in the chat for that long first. WhatsApp only shows it while the
       // account is online, so it goes online for the message and offline again after. A typing hiccup never stops the message.
-      async send(jid, text, typingMs = 0) {
+      async send(jid, text, typingMs = 0, options = {}) {
         if (!sock) throw new Error('WhatsApp is not connected');
         const socket = sock;
         const presence = (type, to) => socket.sendPresenceUpdate(type, to).catch(error => logger.warn({ err: error }, `presence ${type} failed`));
@@ -141,7 +141,8 @@ export function createConnection({ Auth, State, logger, onMessages, makeSocket =
           if (sock !== socket) throw new Error('WhatsApp disconnected while typing');
         }
         try {
-          const message = await socket.sendMessage(jid, { text });
+          if (options.beforeSend && !await options.beforeSend()) throw Object.assign(new Error('Final message cycle changed'), { code: 'FINAL_MESSAGE_CHANGED' });
+          const message = await socket.sendMessage(jid, { text }, options.quoted ? { quoted: options.quoted } : undefined);
           return message?.key?.id;
         } finally {
           if (typingMs > 0) await presence('unavailable');

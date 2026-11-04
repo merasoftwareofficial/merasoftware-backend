@@ -13,14 +13,26 @@ function portfolioSource(order) {
   if (!order?.userId || order.userId.isGuest) return null;
   const project = isProjectOrder(order);
   if (!project && !isPlanOrder(order) && !isServiceOrder(order)) return null;
+  const state = getOrderState(order);
   return {
     id: String(order._id), available: true, type: project ? 'project' : 'service',
     customerId: String(order.userId._id), customerName: String(order.userId.name || '').slice(0, 300),
     name: String(order.projectSnapshot?.displayName || order.servicePlanSnapshot?.serviceName || order.productId?.serviceName || order.orderItems?.[0]?.serviceName || 'Untitled project').slice(0, 300),
     category: String(order.projectSnapshot?.category || order.productId?.category || (project ? 'software' : 'services')).slice(0, 100),
-    state: getOrderState(order).code,
+    state: state.code,
     linkedProjectId: project ? '' : String(order.linkedProjectOrderId || ''),
     url: publicUrl(order.projectLink), captureAllowed: order.portfolioCaptureAllowed !== false,
+    // Admin-only identification: same progress the portal shows; null for services/plans.
+    progress: state.progress,
+    orderedAt: orderedAt(order),
   };
+}
+
+// Legacy orders without createdAt fall back to the ObjectId creation time.
+function orderedAt(order) {
+  const date = order.createdAt ? new Date(order.createdAt) : null;
+  if (date && !Number.isNaN(date.getTime())) return date.toISOString();
+  const id = String(order._id || '');
+  return /^[a-f0-9]{24}$/.test(id) ? new Date(parseInt(id.slice(0, 8), 16) * 1000).toISOString() : '';
 }
 module.exports = { portfolioSource, publicUrl };

@@ -92,6 +92,12 @@ const definitions = {
       return { to: email ? [email] : [], phone: lead.phone, values: { timeLimit: `${hours} hours` } };
     },
   },
+  'lead.finalMessageExpired': {
+    subject: 'Your offer has ended',
+    text: lines('Your offer period has ended, and your offer is now closed.', '', 'If you need digital marketing or website-related services in the future, please visit www.merasoftware.com.'),
+    variables: {},
+    blocks: {},
+  },
   // Send message on a lead's page (helpers/leadMessage.js): any lead, any stage. Only the name, so its templates fit every lead.
   'lead.message': {
     subject: 'A message for you',

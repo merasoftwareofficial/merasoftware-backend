@@ -18,12 +18,16 @@ test('source projection excludes private data and uses frozen project names', ()
   assert.equal(JSON.stringify(source).includes('private'), false);
   assert.equal(portfolioSource({ isWebsiteProject: true, userId: { isGuest: true } }), null);
   assert.equal(portfolioSource({ isWebsiteProject: true, userId: null }), null);
+  assert.equal(source.progress, 100); assert.equal(source.orderedAt, new Date(parseInt('a'.repeat(8), 16) * 1000).toISOString());
+  const running = portfolioSource({ _id: 'd'.repeat(24), userId: { _id: 'b'.repeat(24) }, isWebsiteProject: true, projectProgress: 40.4, orderVisibility: 'approved', createdAt: new Date('2026-10-12T05:00:00Z') });
+  assert.equal(running.state, 'in_progress'); assert.equal(running.progress, 40); assert.equal(running.orderedAt, '2026-10-12T05:00:00.000Z');
   assert.equal(publicUrl('javascript:alert(1)'), ''); assert.equal(publicUrl('https://user:password@example.com'), '');
 });
 test('standalone and linked services remain purchased orders, even after template deletion', () => {
   const source = portfolioSource({ _id: 'a'.repeat(24), userId: { _id: 'b'.repeat(24) }, isServicePlan: true,
     servicePlanSnapshot: { serviceName: 'SEO monthly' }, productId: null, linkedProjectOrderId: 'c'.repeat(24), servicePlanStatus: 'active', orderVisibility: 'approved' });
   assert.equal(source.type, 'service'); assert.equal(source.name, 'SEO monthly'); assert.equal(source.linkedProjectId, 'c'.repeat(24));
+  assert.equal(source.progress, null);
 });
 test('network checks reject loopback, private, mapped and reserved IPs and mixed DNS answers', async () => {
   for (const address of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '172.16.1.2', '192.168.1.1', '100.64.0.1', '0.0.0.0', '::1', 'fc00::1', 'fe80::1', '::ffff:127.0.0.1', '2001:db8::1']) assert.equal(isPublicAddress(address), false, address);

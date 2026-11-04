@@ -353,6 +353,75 @@ after(async () => {
   await db?.stop();
 });
 
+test('expiry uses the editable template, quotes the original and queues once across repeated jobs and queue retention', async () => {
+  const { id } = await sentAndWaiting();
+  const original = await Queue.findOne({ event: 'lead.finalMessage' }).lean();
+  const template = await require('../helpers/emailTemplates').systemTemplate('lead.finalMessageExpired');
+  assert.match(template.text, /^Your offer period has ended/);
+  assert.doesNotMatch(template.text, /24|hours|timeLimit/);
+  await EmailTemplate.updateOne({ _id: template._id }, { $set: { text: 'Your offer period has ended. Visit www.merasoftware.com.' } });
+  await pastDeadline(id);
+  await followFinalMessages();
+  await followFinalMessages();
+  const item = await Queue.findOne({ event: 'lead.finalMessageExpired' }).lean();
+  assert.equal(item.text, 'Your offer period has ended. Visit www.merasoftware.com.');
+  assert.equal(item.quotedMessage.id, original.messageId);
+  assert.equal(item.quotedMessage.chat, original.messageChat);
+  assert.equal(item.quotedMessage.text, original.text);
+  assert.equal(String(item.finalMessageExpiryId), String((await row(id)).draftId));
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 1);
+  let options;
+  const transport = phone();
+  const send = transport.send;
+  transport.send = async (...args) => { options = args[3]; return send(...args); };
+  await sendQueue(transport);
+  assert.deepEqual(options.quoted.key, { remoteJid: original.messageChat, id: original.messageId, fromMe: true });
+  assert.equal(options.quoted.message.conversation, original.text);
+  assert.equal((await Queue.findById(item._id)).status, 'sent');
+  await Queue.deleteOne({ _id: item._id });
+  await followFinalMessages();
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 0, 'permanent marker survives TTL');
+});
+
+test('pending expiry is cancelled for a real reply, a changed stage or changed phone; historical cycles send nothing', async () => {
+  for (const change of ['reply', 'stage', 'phone', 'historical']) {
+    await Promise.all([Queue.deleteMany({}), FinalMessage.deleteMany({}), Lead.deleteMany({})]);
+    const { id } = await sentAndWaiting();
+    if (change === 'historical') await FinalMessage.updateOne({ leadId: id }, { $unset: { expiryEnabled: 1 } });
+    await pastDeadline(id);
+    await followFinalMessages();
+    if (change === 'historical') {
+      assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 0);
+      continue;
+    }
+    if (change === 'reply') await incoming({ conversation: 'Please tell me more' });
+    if (change === 'stage') await Lead.updateOne({ _id: id }, { $set: { status: 'Contacted' } });
+    if (change === 'phone') await Lead.updateOne({ _id: id }, { $set: { phone: '9876543211' } });
+    const transport = phone();
+    await sendQueue(transport);
+    assert.equal(transport.sent.length, 0, change);
+    assert.equal((await Queue.findOne({ event: 'lead.finalMessageExpired' })).status, 'cancelled', change);
+  }
+});
+
+test('expiry transaction rolls back insertion failure and retries without duplicates; policy off postpones queueing', async () => {
+  const { id } = await sentAndWaiting();
+  await pastDeadline(id);
+  await EmailPolicy.create({ event: 'lead.finalMessageExpired', mode: 'off' });
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Dead');
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 0);
+  await EmailPolicy.updateOne({ event: 'lead.finalMessageExpired' }, { $set: { mode: 'auto' } });
+  const create = Queue.create;
+  Queue.create = async () => { throw new Error('expiry insert failed'); };
+  try { await assert.rejects(followFinalMessages(), /expiry insert failed/); }
+  finally { Queue.create = create; }
+  assert.equal((await row(id)).expiryQueuedAt, undefined);
+  await followFinalMessages();
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired' }), 1);
+  assert.ok((await row(id)).expiryQueuedAt);
+});
+
 test('marking Negative saves the stage and opens a review; nothing enters the queue until Send', async () => {
   const { _id } = await lead();
   const marked = await markNegative(_id);
@@ -457,7 +526,8 @@ test('listed words, emojis and reactions are not replies: the wait goes on to De
     await FinalMessage.updateOne({ leadId: id }, { $set: { sentAt: new Date(Date.now() - 1000) } });
     await followFinalMessages();
     assert.equal(await stage(id), 'Dead', JSON.stringify(message));
-    assert.equal(await Queue.countDocuments(), queued, 'nothing is queued by an ignored message');
+    assert.equal(await Queue.countDocuments(), queued + 1, 'only the deadline queues the expiry reply');
+    await sendQueue(phone()); // drain the expiry before starting the next person's original message
     assert.ok((await Lead.findById(id).lean()).followUps.some(item => item.note.includes('not counted as a reply')), JSON.stringify(message));
   }
 });
@@ -579,12 +649,14 @@ test('real replies stay Negative and wait for the admin: text, voice and photo, 
   assert.equal(data.needsDecision.length, 4);
 });
 
-test('this work adds no way to send: only the review decision reaches the queue, through enqueueWhatsApp', async () => {
+test('only the review decision and the dedicated expiry dispatcher can enqueue; reply handlers cannot send', async () => {
   const fs = require('node:fs'), path = require('node:path');
   for (const file of ['helpers/finalMessage.js', 'helpers/finalMessageJobs.js', 'whatsapp/src/finalMessageReplies.js', 'whatsapp/src/inbound.js', 'routes/autoReply.js', 'controller/lead/finalMessage.js']) {
     const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     for (const forbidden of ['enqueueWhatsApp', 'Queue.create', 'Queue.insert', 'sendMessage', 'transport.send']) assert.ok(!source.includes(forbidden), `${file} must not use ${forbidden}`);
   }
+  const jobs = fs.readFileSync(path.join(__dirname, '../helpers/finalMessageJobs.js'), 'utf8');
+  assert.ok(jobs.includes("require('./finalMessageExpiry').dispatch()"));
 });
 
 test('replies count with Auto Reply off, an older message is not a reply, and other chats save nothing', async () => {

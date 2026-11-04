@@ -2,6 +2,7 @@ import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { SLOT_MS, STATE_ID, finishedExpiry } from './models.js';
 import { effectiveSettings, inQuietHours, typingTime } from './settings.js';
+import expiry from '../../helpers/finalMessageExpiry.js';
 
 const INTERRUPTED = 'The service restarted while sending this message, so it may or may not have arrived. Not sent again automatically, to avoid a duplicate.';
 const NOT_ON_WHATSAPP = 'This number is not on WhatsApp.';
@@ -78,17 +79,27 @@ export function createSender({
     let outcome;
     let attempted = false;
     try {
+      if (!await expiry.canSend(item)) {
+        await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: expiry.CANCELLED, expiresAt: finishedExpiry(now()) } });
+        await releaseSlot();
+        return { waitMs: POLL_MS, reason: 'cancelled', itemId: item._id };
+      }
       const jid = await transport.resolve(item.to);
       if (!jid) {
         outcome = { status: 'failed', lastError: NOT_ON_WHATSAPP };
       } else {
         attempted = true;
-        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()));
-        outcome = { status: 'sent', messageId, sentAt: now(), lastError: null };
+        const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), item.finalMessageExpiryId ? {
+          quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } },
+          beforeSend: () => expiry.canSend(item),
+        } : undefined);
+        outcome = { status: 'sent', messageId, messageChat: jid, sentAt: now(), lastError: null };
       }
     } catch (error) {
       const message = error?.message || 'Unknown sending error';
-      outcome = item.attempts >= rules.maxAttempts
+      outcome = error?.code === 'FINAL_MESSAGE_CHANGED'
+        ? { status: 'cancelled', lastError: expiry.CANCELLED }
+        : item.attempts >= rules.maxAttempts
         ? { status: 'failed', lastError: message }
         : { status: 'pending', lastError: message, nextAttemptAt: new Date(now().getTime() + rules.retryDelayMin * 60_000) };
     } finally {

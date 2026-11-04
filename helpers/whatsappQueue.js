@@ -41,11 +41,12 @@ function messageText(draft) {
  * The only way into the WhatsApp queue. A row without a usable number is stored as 'skipped' with
  * the reason, so the admin page shows why nothing went. Throws on a database error (11000 = already queued).
  */
-async function enqueueWhatsApp({ to, text, skipReason, ...fields }) {
+async function enqueueWhatsApp({ to, text, skipReason, ...fields }, { session } = {}) {
   const row = to
     ? { status: 'pending', to }
     : { status: 'skipped', lastError: skipReason || NO_PHONE, expiresAt: finishedExpiry(new Date()) };
-  return Queue.create({ ...fields, text: String(text || '').slice(0, MAX_TEXT), ...row });
+  const data = { ...fields, text: String(text || '').slice(0, MAX_TEXT), ...row };
+  return session ? (await Queue.create([data], { session }))[0] : Queue.create(data);
 }
 
 /**

@@ -17,6 +17,8 @@ const queueSchema = new mongoose.Schema({
   application: { type: String, enum: ['website', 'portal'] },
   emailDraftId: mongoose.Schema.Types.ObjectId, // the sent email this WhatsApp copies
   broadcastRecipientId: mongoose.Schema.Types.ObjectId,
+  finalMessageExpiryId: mongoose.Schema.Types.ObjectId, // original draft id: one expiry per cycle
+  quotedMessage: { id: String, chat: String, text: String },
   email: { type: String, lowercase: true, trim: true }, // that email's recipient; one row per recipient
   // pending → sending → sent | failed; skipped = no usable phone; expired = waited more than a day.
   status: { type: String, enum: QUEUE_STATUSES, default: 'pending' },
@@ -24,11 +26,13 @@ const queueSchema = new mongoose.Schema({
   nextAttemptAt: { type: Date, default: Date.now },
   lastError: String,
   messageId: String,
+  messageChat: String,
   sentAt: Date,
   expiresAt: { type: Date, index: { expireAfterSeconds: 0 } }, // set when finished; Mongo deletes the row then
 }, { timestamps: true, collection: 'whatsapp_queue' });
 queueSchema.index({ status: 1, nextAttemptAt: 1, createdAt: 1 });
 queueSchema.index({ broadcastRecipientId: 1 }, { unique: true, partialFilterExpression: { broadcastRecipientId: { $type: 'objectId' } } });
+queueSchema.index({ finalMessageExpiryId: 1 }, { unique: true, partialFilterExpression: { finalMessageExpiryId: { $type: 'objectId' } } });
 // An email retried or reviewed twice still gives each recipient one WhatsApp.
 queueSchema.index({ emailDraftId: 1, email: 1 }, { unique: true, partialFilterExpression: { emailDraftId: { $exists: true } } });
 
@@ -123,6 +127,9 @@ const finalMessageSchema = new mongoose.Schema({
   status: { type: String, enum: FINAL_MESSAGE_STATUSES, default: 'review' },
   sentAt: Date,
   deadlineAt: Date,
+  expiryEnabled: Boolean, // opt in at preparation; never send for historical cycles
+  expiryQueuedAt: Date, // permanent marker, even after queue retention deletes the copy
+  originalMessage: { id: String, chat: String, text: String },
   // Written by the worker (inbound.js), acted on by the backend job (helpers/finalMessageJobs.js).
   lastReplyAt: Date,
   lastReplyText: String,

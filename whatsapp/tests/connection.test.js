@@ -31,9 +31,10 @@ function fakeWhatsApp() {
       emit: async (name, data) => { for (const fn of listeners[name] || []) await fn(data); },
       end() {}, logout: async () => {},
       calls: [], // what was said to WhatsApp, in order
+      messageOptions: [],
       sendPresenceUpdate: async (type, to) => { socket.calls.push(['presence', type, to]); },
       presenceSubscribe: async to => { socket.calls.push(['subscribe', to]); },
-      sendMessage: async (to, content) => { socket.calls.push(['message', to, content.text]); return { key: { id: 'msg-1' } }; },
+      sendMessage: async (to, content, options) => { socket.calls.push(['message', to, content.text]); socket.messageOptions.push(options); return { key: { id: 'msg-1' } }; },
     };
     sockets.push(socket);
     return socket;
@@ -116,6 +117,24 @@ it('after the number is unlinked from the phone, the old login is forgotten and 
   assert.ok(await until(() => wa.sockets.length === 3, 8000), 'reconnects for a new QR');
   assert.equal(wa.sockets[2].config.auth.creds.me, undefined, 'no leftover login');
   assert.equal((await State.findById(STATE_ID).lean()).connection, 'connecting');
+});
+
+it('passes a quoted original to WhatsApp and cancels if eligibility changes while typing', async () => {
+  const wa = fakeWhatsApp();
+  let eligible = true;
+  const connection = createConnection({ Auth, State, logger: silent, makeSocket: wa.makeSocket, fetchVersion: wa.fetchVersion,
+    wait: async () => { eligible = false; } });
+  open.push(connection);
+  connection.start();
+  await until(() => wa.sockets.length === 1);
+  await wa.sockets[0].emit('connection.update', { connection: 'open' });
+  const jid = '919876543210@s.whatsapp.net';
+  const quoted = { key: { id: 'original', remoteJid: jid, fromMe: true }, message: { conversation: 'Final offer' } };
+  await connection.transport.send(jid, 'Your offer period has ended.', 0, { quoted, beforeSend: async () => eligible });
+  assert.deepEqual(wa.sockets[0].messageOptions, [{ quoted }]);
+  await assert.rejects(connection.transport.send(jid, 'Expired', 4000, { quoted, beforeSend: async () => eligible }), { code: 'FINAL_MESSAGE_CHANGED' });
+  assert.equal(wa.sockets[0].messageOptions.length, 1);
+  assert.deepEqual(wa.sockets[0].calls.at(-1), ['presence', 'unavailable', undefined]);
 });
 
 it('shows "typing…" for the given time before the message, then goes offline; no typing time sends straight away', async () => {

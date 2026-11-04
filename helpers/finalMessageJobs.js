@@ -8,8 +8,8 @@ const { findLeadsByPhone } = require('./leadPhone');
 const { workerAlive } = require('./whatsappReadiness');
 const { clientEligible, clientAutomationEnabled, isClientRow } = require('./finalMessage');
 
-// Every minute (index.js): follows each final message after the admin's decision. Never sends: a message only
-// reaches the queue through the review popup. A lead becomes Dead only here, or by the admin's hand.
+// Every minute (index.js): follows the reviewed first message, replies and deadlines, then drains
+// the expiry-reply outbox. A lead becomes Dead only here, or by the admin's hand.
 const LOCK_ID = 'final-message-job';
 const LOCK_MS = 120_000;
 const LEGACY_COPY_MS = 5 * 60_000; // an email sent without a channel choice queues its WhatsApp copy just after
@@ -28,7 +28,7 @@ async function endRow(row, status) { await FinalMessage.updateOne(rowGuard(row),
 
 /** What the admin decided and how far the message got. */
 async function followMessage(row, time) {
-  const queued = await Queue.findOne({ emailDraftId: row.draftId }).select('status to sentAt').lean();
+  const queued = await Queue.findOne({ emailDraftId: row.draftId }).select('status to sentAt messageId messageChat text').lean();
   if (isClientRow(row) && !await clientEligible(await Lead.findById(row.leadId).lean(), row)) {
     if (queued?.status === 'pending') await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
     if (queued?.status !== 'sending') await endRow(row, 'stopped');
@@ -37,7 +37,8 @@ async function followMessage(row, time) {
   if (queued) {
     if (queued.status === 'sent') {
       const sentAt = queued.sentAt || time;
-      const changed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'waiting', phone: queued.to, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000) } });
+      const changed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'waiting', phone: queued.to, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000),
+        originalMessage: { id: queued.messageId, chat: queued.messageChat || `${queued.to}@s.whatsapp.net`, text: queued.text } } });
       if (changed.modifiedCount) await addNote(row.leadId, `Final message sent. Waiting ${row.hours} hours for a reply.`);
     } else if (['pending', 'sending'].includes(queued.status)) {
       if (row.status !== 'queued') await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'queued', phone: queued.to } });
@@ -141,6 +142,7 @@ async function followFinalMessages() {
     if (workerAlive(state, time) && state.connection === 'connected') {
       for (const row of await FinalMessage.find({ status: 'waiting', deadlineAt: { $lte: time } }).lean()) await attempt(row, closeRow);
     }
+    await require('./finalMessageExpiry').dispatch();
     return { reason: 'done' };
   } finally {
     await Lock.updateOne({ _id: LOCK_ID, owner }, { $set: { expiresAt: new Date(0) } });

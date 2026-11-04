@@ -126,7 +126,7 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
   const { draftId } = await prepareTemplatedMail(EVENT, lead, email, hours);
   if (!draftId) return 'unavailable';
   const old = own && client && (!isClientRow(own) || (newEpisode && resolved)) ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
-  const update = { $set: { phone: normalizePhone(lead.phone), draftId, hours, status: 'review', ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
+  const update = { $set: { phone: normalizePhone(lead.phone), draftId, hours, status: 'review', expiryEnabled: true, ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, expiryQueuedAt: 1, originalMessage: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
   await FinalMessage.updateOne({ leadId: lead._id }, update, { upsert: true });
   return 'prepared';
 }

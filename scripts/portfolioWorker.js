@@ -50,7 +50,7 @@ async function record(source, run) {
 async function reconcile() {
   const run = randomUUID();
   // A cursor bounds memory; tombstones are emitted only after a successful full scan.
-  const cursor = orderModel.find({}).select('userId productId projectSnapshot servicePlanSnapshot orderItems isWebsiteProject isServicePlan projectProgress orderVisibility servicePlanStatus planStatus isActive updatesUsed totalYearlyDaysRemaining linkedProjectOrderId projectLink portfolioCaptureAllowed')
+  const cursor = orderModel.find({}).select('userId productId projectSnapshot servicePlanSnapshot orderItems isWebsiteProject isServicePlan projectProgress orderVisibility servicePlanStatus planStatus isActive updatesUsed totalYearlyDaysRemaining linkedProjectOrderId projectLink portfolioCaptureAllowed createdAt')
     .populate('userId', '_id name isGuest')
     .populate('productId', 'serviceName category isWebsiteUpdate isMonthlyRenewablePlan isMonthlyLimitedPlan updateCount')
     .lean().cursor();
