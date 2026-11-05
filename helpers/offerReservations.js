@@ -12,8 +12,15 @@ const safeSlug = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)
 // The existing payment state for a submitted project payment awaiting admin approval.
 const PENDING_PAYMENT = { type: 'payment', status: 'pending', paymentStatus: 'pending-approval' };
 
-// The deadline in force: an admin extension, otherwise the original 72 hours.
+// The deadline in force: an admin extension, otherwise the original reservation hours.
 const deadlineOf = row => new Date(row.extendedUntil || row.expiresAt);
+// How many hours a new reservation of this offer lasts. Each offer sets it on the website
+// (src/lib/offers.ts reservationHoldHours, 1–720; owner decision 5 Nov 2026,
+// merasoftware/src/docs/reservation-countdown.md). Offers without it keep 72. It is read once, at
+// reserve time, into expiresAt: a later change to the offer never moves a running reservation.
+const DEFAULT_HOLD_HOURS = 72;
+const holdHours = offer => Number.isInteger(offer?.reservationHoldHours) && offer.reservationHoldHours >= 1 && offer.reservationHoldHours <= 720
+  ? offer.reservationHoldHours : DEFAULT_HOLD_HOURS;
 
 // underReview: a payment submitted before the deadline still awaits approval (read-only state).
 function reservationView(row, now = Date.now(), underReview = false) {
@@ -116,7 +123,7 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     }
     const [row] = await Reservation.create([{ userId, offerSlug, periodEndsAt, offerSnapshot: offer,
       regularPrice: Number(offer.mainPrice), reservedPrice: price, reservedAt: now,
-      expiresAt: new Date(now.getTime() + 72 * HOUR), origin: 'customer', leadId: lead?._id }], { session });
+      expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending' }], { session });
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
 }
@@ -141,7 +148,8 @@ async function attachProjectReservation({ order, offer, reservationId = null, se
     const regularPrice = Number(agreement?.regularPrice ?? offer.mainPrice);
     const reservedPrice = Number(agreement?.packagePrice ?? calculateBenefit(regularPrice, offer).finalPrice);
     [row] = await Reservation.create([{ userId: order.userId, offerSlug: offer.slug, periodEndsAt: new Date(offer.endsAt), offerSnapshot: offer,
-      regularPrice, reservedPrice, reservedAt: now, expiresAt: new Date(now.getTime() + 72 * HOUR), origin: 'admin_project', projectId: order._id }], { session });
+      regularPrice, reservedPrice, reservedAt: now, expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'admin_project', projectId: order._id,
+      closureStatus: 'pending' }], { session });
   }
   row.projectId = order._id;
   order.offerReservationId = row._id;
@@ -203,4 +211,4 @@ async function extendReservation({ reservationId, actorId, until, reason }) {
   return { reservation: reservationView(row), notice };
 }
 module.exports = { reserveOffer, listReservations, reservationView, attachProjectReservation, confirmReservationPayment,
-  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, reservationRefusal, reserveWindowHours, PENDING_PAYMENT };
+  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, reservationRefusal, reserveWindowHours, holdHours, PENDING_PAYMENT };

@@ -115,8 +115,10 @@ router.get('/summary', handle(async (req, res) => {
     EmailDraft.find({ ...ownership, status: { $in: UNDECIDED }, expiresAt: { $gt: now } }).select('status delivery.channels').lean(),
     EmailHistory.find(ownership).sort({ updatedAt: -1 }).limit(RECENT).select('application event to subject status sentAt updatedAt expiresAt').lean(),
   ]);
-  const inFlight = waiting.filter(row => row.status !== 'pending' && !row.delivery?.channels?.length).map(row => row._id);
-  const delivered = inFlight.length ? (await EmailHistory.distinct('draftId', { ...ownership, draftId: { $in: inFlight }, status: 'sent' })).length : 0;
+  // A channel send still 'sending' whose audit row says delivered had its last draft write fail; a
+  // channel send that 'failed' stays waiting so its failed part (e.g. WhatsApp) can be retried.
+  const inFlight = waiting.filter(row => row.status !== 'pending' && (!row.delivery?.channels?.length || row.status === 'sending')).map(row => row._id);
+  const delivered = inFlight.length ? (await EmailHistory.distinct('draftId', { ...ownership, draftId: { $in: inFlight }, status: { $in: ['sent', 'queued'] } })).length : 0;
   // Same status the history list shows: an undecided mail past its draft's expiry is "expired".
   const recent = latest.map(row => ({
     _id: row._id, application: row.application, event: row.event, label: byKey.get(row.event)?.label || row.event, to: row.to || [], subject: row.subject || '',
@@ -134,7 +136,10 @@ router.put('/policies/:event', handle(async (req, res) => {
   if (!(isCustomerTriggered(event) ? ['auto', 'off'] : ['review', 'off']).includes(req.body.mode)) throw new Error('Invalid sending rule');
   const defaultTemplate = req.body.defaultTemplate || null;
   if (defaultTemplate && (!mongoose.isValidObjectId(defaultTemplate) || !await EmailTemplate.exists({ _id: defaultTemplate, event }))) throw new Error('Choose a template for this action');
-  await EmailPolicy.findOneAndUpdate({ event }, { $set: { mode: req.body.mode, defaultTemplate } }, { upsert: true, runValidators: true });
+  // "Send via" is optional on a save: an older client that omits it leaves the saved route untouched.
+  const channel = req.body.channel;
+  if (channel !== undefined && !byKey.get(event).channels.includes(channel)) throw new Error(byKey.get(event).channels.length === 1 ? 'This action can only be sent by email' : 'Choose WhatsApp, Email or Both');
+  await EmailPolicy.findOneAndUpdate({ event }, { $set: { mode: req.body.mode, defaultTemplate, ...(channel !== undefined ? { channel } : {}) } }, { upsert: true, runValidators: true });
   res.json({ success: true });
 }));
 function validateTemplate(event, body) {
@@ -147,25 +152,20 @@ router.get('/preferences/:event', handle(async (req, res) => {
   const saved = await EmailReviewPreference.findOne({ actor: req.userId, application: req.emailApplication, event: req.params.event }).lean();
   const valid = saved?.templateId && await EmailTemplate.exists({ _id: saved.templateId, event: req.params.event });
   const fallback = saved?.templateId && !valid ? await resolveTemplate(req.params.event) : null;
-  res.json({ success: true, data: { channel: saved?.channel, templateId: valid ? String(saved.templateId) : fallback?._id ? String(fallback._id) : null, templateUnavailable: !!saved?.templateId && !valid } });
+  res.json({ success: true, data: { templateId: valid ? String(saved.templateId) : fallback?._id ? String(fallback._id) : null, templateUnavailable: !!saved?.templateId && !valid } });
 }));
+// Only the reviewer's template choice is remembered. The route is the action's own "Send via"
+// (Email Templates), so it is not remembered per reviewer any more.
 router.put('/preferences/:event', handle(async (req, res) => {
   templateChoiceAllowed(req); allowedEvent(req, req.params.event);
-  const fields = {};
-  if (req.body.channel !== undefined) {
-    if (!['email', 'whatsapp', 'both'].includes(req.body.channel)) throw new Error('Unknown delivery channel');
-    fields.channel = req.body.channel;
-  }
-  if (req.body.templateId !== undefined) {
-    if (req.body.templateId !== null && (!mongoose.isValidObjectId(req.body.templateId) || !await EmailTemplate.exists({ _id: req.body.templateId, event: req.params.event }))) throw new Error('Choose a template for this action');
-    fields.templateId = req.body.templateId;
-  }
-  if (!Object.keys(fields).length) throw new Error('Choose a channel or template');
+  if (req.body.templateId === undefined) throw new Error('Choose a template');
+  if (req.body.templateId !== null && (!mongoose.isValidObjectId(req.body.templateId) || !await EmailTemplate.exists({ _id: req.body.templateId, event: req.params.event }))) throw new Error('Choose a template for this action');
+  const fields = { templateId: req.body.templateId };
   const key = { actor: req.userId, application: req.emailApplication, event: req.params.event };
   let saved;
   try { saved = await EmailReviewPreference.findOneAndUpdate(key, { $set: fields }, { upsert: true, new: true, runValidators: true }).lean(); }
   catch (error) { if (error.code !== 11000) throw error; saved = await EmailReviewPreference.findOneAndUpdate(key, { $set: fields }, { new: true, runValidators: true }).lean(); }
-  res.json({ success: true, data: { channel: saved.channel, templateId: saved.templateId } });
+  res.json({ success: true, data: { templateId: saved.templateId } });
 }));
 router.patch('/templates/:id', handle(async (req, res) => {
   templateChoiceAllowed(req);

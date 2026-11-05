@@ -16,6 +16,8 @@ const policySchema = new Schema({
   // review/off for actions an admin performs; auto/off for customer-started mail (emailCatalog.js).
   mode: { type: String, enum: ['review', 'auto', 'off'], default: 'review' },
   defaultTemplate: { type: Schema.Types.ObjectId, default: null },
+  // "Send via" for this action; empty = emailCatalog.js defaultChannel. Read only through channelFor().
+  channel: { type: String, enum: ['email', 'whatsapp', 'both'] },
 }, { timestamps: true });
 const draftSchema = new Schema({
   event: { type: String, required: true },

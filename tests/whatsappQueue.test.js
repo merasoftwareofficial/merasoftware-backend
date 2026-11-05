@@ -26,6 +26,10 @@ const pendingDraft = (to, extra = {}) => EmailDraft.create({
   html: '<p>Hello Ravi</p>', expiresAt: new Date(Date.now() + 60 * 60_000), ...extra,
 });
 const send = draft => decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, portalAdmin);
+// A draft whose first email attempt started before "Send via" existed: its retry keeps that email
+// path, and a sent email still gets its WhatsApp copy. New drafts follow the action's Send via
+// (tests/reservationCountdown.test.js).
+const legacyDraft = to => pendingDraft(to, { status: 'failed', attemptCount: 1, failure: 'Provider timeout' });
 
 before(async () => {
   process.env.RESEND_API_KEY = 'not-a-real-provider-key';
@@ -72,10 +76,10 @@ test('the message is the email subject in bold, then the email text unchanged', 
   assert.equal(messageText({ subject: '', text: 'Only text' }), 'Only text');
 });
 
-test('a sent email queues one WhatsApp per recipient; without a usable phone the row is skipped with the reason', async () => {
+test('a legacy retry: a sent email queues one WhatsApp per recipient; without a usable phone the row is skipped with the reason', async () => {
   await userModel.create({ name: 'Ravi', email: 'ravi@example.test', phone: '+91 98765 43210', roles: ['customer'] });
   await userModel.create({ name: 'Bad', email: 'bad@example.test', phone: '12345', roles: ['customer'] });
-  const draft = await pendingDraft(['ravi@example.test', 'bad@example.test', 'subscriber@example.test']);
+  const draft = await legacyDraft(['ravi@example.test', 'bad@example.test', 'subscriber@example.test']);
   assert.equal((await send(draft)).status, 'sent');
 
   const rows = await waitForRows(3);
@@ -91,15 +95,15 @@ test('a sent email queues one WhatsApp per recipient; without a usable phone the
   assert.match(rows[2].lastError, /No phone number/);
 });
 
-test('no WhatsApp when the email is not sent: provider refused, Don’t Send, or WhatsApp turned off', async () => {
+test('a legacy retry: no WhatsApp when the email is not sent: provider refused, Don’t Send, or WhatsApp turned off', async () => {
   await userModel.create({ name: 'Ravi', email: 'ravi@example.test', phone: '9876543210', roles: ['customer'] });
   providerFails = true;
-  await assert.rejects(send(await pendingDraft(['ravi@example.test'])));
+  await assert.rejects(send(await legacyDraft(['ravi@example.test'])));
   providerFails = false;
   const skipped = await pendingDraft(['ravi@example.test']);
   await decide(String(skipped._id), null, { choice: 'skip' }, portalAdmin);
   delete process.env.ENABLE_WHATSAPP;
-  assert.equal((await send(await pendingDraft(['ravi@example.test']))).status, 'sent');
+  assert.equal((await send(await legacyDraft(['ravi@example.test']))).status, 'sent');
   await new Promise(r => setTimeout(r, 300));
   assert.equal(await Queue.countDocuments(), 0);
 });
@@ -139,12 +143,12 @@ test('only the worker talks to WhatsApp, and only whatsappQueue.js adds to the q
   assert.deepEqual(where(/35\.208\.75\.95|WHATSAPP_API_URL/), [], 'the old direct sender is gone');
 });
 
-test('a WhatsApp problem never changes the email result', async () => {
+test('a legacy retry: a WhatsApp problem never changes the email result', async () => {
   await userModel.create({ name: 'Ravi', email: 'ravi@example.test', phone: '9876543210', roles: ['customer'] });
   const original = Queue.create;
   Queue.create = async () => { throw new Error('database down'); };
   try {
-    assert.equal((await send(await pendingDraft(['ravi@example.test']))).status, 'sent');
+    assert.equal((await send(await legacyDraft(['ravi@example.test']))).status, 'sent');
     await new Promise(r => setTimeout(r, 300));
   } finally { Queue.create = original; }
   assert.equal(await Queue.countDocuments(), 0);

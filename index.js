@@ -40,6 +40,7 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
   cron.schedule('* * * * *', async () => {
     await require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message));
     await require('./helpers/reservationRepricing').reconcileDueReservations().catch(error => console.error('[reservation repricing]', error.message));
+    await require('./helpers/reservationClosure').closeDueReservations().catch(error => console.error('[reservation closure]', error.message));
   });
   console.log('Offer reservation jobs initialized');
 }

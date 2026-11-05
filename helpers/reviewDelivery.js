@@ -1,6 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const { EmailDraft, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
 const { normalizePhone, savedPhoneFor, enqueueWhatsAppForEmail } = require('./whatsappQueue');
+const { channelFor } = require('./emailCatalog');
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
 
 async function availability(draft) {
@@ -17,9 +18,14 @@ async function availability(draft) {
       { id: 'whatsapp', label: 'WhatsApp', enabled: !!whatsapp, reason: whatsapp ? '' : phoneReason },
       { id: 'both', label: 'Both', enabled: !!email && !!whatsapp, reason: !email ? 'A valid email address is missing.' : !whatsapp ? phoneReason : '' },
     ],
-    defaultChannel: email && whatsapp ? 'both' : email ? 'email' : 'whatsapp',
+    // The review opens on the action's own "Send via"; the reviewer may change it for this message.
+    defaultChannel: draft.event ? await actionChannel(draft.event) : email && whatsapp ? 'both' : email ? 'email' : 'whatsapp',
     recipients,
   };
+}
+// The action's "Send via" (emailCatalog.js channelFor): every send without an explicit choice uses it.
+async function actionChannel(event) {
+  return channelFor(event, await EmailPolicy.findOne({ event }).select('channel').lean());
 }
 function channelsFor(selection) {
   if (!['email', 'whatsapp', 'both'].includes(selection)) fail('Choose Email, WhatsApp or Both.', 400);
@@ -87,9 +93,13 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
       } catch (error) { delivery.whatsappStatus = 'failed'; errors.push(error.message); }
     }
     const status = errors.length ? 'failed' : delivery.channels.includes('email') ? 'sent' : 'queued';
-    await EmailDraft.updateOne({ _id: current._id, 'delivery.lockOwner': owner }, { $set: { status, failure: errors.join(' '), 'delivery.whatsappStatus': delivery.whatsappStatus, 'delivery.failure': errors.join(' ') } });
+    // Same rule as the email path: once the provider accepted the mail, a failed result write is
+    // logged and repaired from the audit row (emailOutbox.reconcileSent), never reported as a failed send.
+    const accepted = delivery.emailStatus === 'sent';
+    const tolerate = error => { if (!accepted) throw error; console.error('[email] Delivered; could not record the result:', error.message); };
+    await EmailDraft.updateOne({ _id: current._id, 'delivery.lockOwner': owner }, { $set: { status, failure: errors.join(' '), 'delivery.whatsappStatus': delivery.whatsappStatus, 'delivery.failure': errors.join(' ') } }).catch(tolerate);
     const result = await EmailDraft.findById(current._id);
-    await recordHistory(result, actor, true);
+    await recordHistory(result, actor, true).catch(tolerate);
     return { status, sentAt: result.sentAt, event: result.event, reference: result.reference,
       delivery: { channels: delivery.channels, email: delivery.emailStatus, whatsapp: delivery.whatsappStatus, failure: errors.join(' ') } };
   } finally {
@@ -97,4 +107,4 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
     await EmailDraft.updateOne({ _id: draft._id, 'delivery.lockOwner': owner }, { $unset: { 'delivery.lockOwner': 1, 'delivery.lockUntil': 1 } });
   }
 }
-module.exports = { availability, deliver, selectionFor, channelsFor };
+module.exports = { availability, actionChannel, deliver, selectionFor, channelsFor };

@@ -74,7 +74,13 @@ before(async () => {
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
-beforeEach(async () => { calls = []; providerFails = false; await Promise.all([EmailDraft.deleteMany({}), EmailPolicy.deleteMany({}), EmailTemplate.deleteMany({}), EmailHistory.deleteMany({})]); });
+// This suite tests the email path, so every action's "Send via" is Email here. The WhatsApp-only
+// default for customer mail is tested in reservationCountdown.test.js.
+beforeEach(async () => {
+  calls = []; providerFails = false;
+  await Promise.all([EmailDraft.deleteMany({}), EmailPolicy.deleteMany({}), EmailTemplate.deleteMany({}), EmailHistory.deleteMany({})]);
+  await EmailPolicy.insertMany(require('../helpers/emailCatalog').events.map(row => ({ event: row.key, channel: 'email' })));
+});
 after(async () => { global.fetch = nativeFetch; if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 
 test('cron and legacy mail builders cannot send or create review drafts', async () => {
@@ -213,7 +219,7 @@ test('website assertions are bound to body and path and cannot use expired acces
   assert.equal((await send(assertion(), { mode: 'review' })).status, 401);
   assert.equal((await send(assertion(), body, '/policies/invoice.project?application=portal')).status, 401);
   assert.equal((await send(assertion({}, -1))).status, 401);
-  assert.equal(await EmailPolicy.countDocuments(), 0);
+  assert.equal(await EmailPolicy.countDocuments({ mode: 'off' }), 0);
   assert.equal((await send(assertion())).status, 200);
   assert.equal(calls.length, 0);
 });

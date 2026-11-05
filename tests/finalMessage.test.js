@@ -911,11 +911,12 @@ test('a lead with no email offers only WhatsApp and shows the number; the settin
   assert.equal(waiting.deadlineAt - waiting.sentAt, 72 * HOUR);
 });
 
-test('a lead with an email and a number offers all channels, default Both', async () => {
+test('a lead with an email and a number offers all channels, default the action\'s Send via (WhatsApp)', async () => {
   const { _id } = await lead({ email: 'ravi@example.test' });
   const marked = await markNegative(_id);
   const draft = (await call(`/email-control/drafts/${marked.emailDraftIds[0]}`, 'GET')).data;
-  assert.equal(draft.defaultChannel, 'both');
+  assert.equal(draft.defaultChannel, 'whatsapp');
+  assert.ok(draft.channelOptions.every(row => row.enabled));
   await decide(marked.emailDraftIds[0], 'send', 'both');
   await sendQueue(phone());
   await followFinalMessages();

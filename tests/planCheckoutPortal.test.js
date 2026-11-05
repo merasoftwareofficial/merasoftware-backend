@@ -37,7 +37,8 @@ const buy = (plan, { upi, key, as, ...rest } = {}) => call('/customer/service-pl
 const setWallet = (amount) => User.updateOne({ _id: client._id }, { $set: { walletBalance: amount } });
 const wallet = async () => (await User.findById(client._id).lean()).walletBalance;
 const upload = (order) => assertUploadOrder(order, { fileCount: 1, serviceOrderId: String(order._id) }).then(() => 'allowed', (error) => error.message);
-const turnOn = (...events) => EmailPolicy.insertMany(events.map((event) => ({ event, mode: 'auto' })));
+// These tests read the mails' email text, so their Send via is Email (customer default is WhatsApp only).
+const turnOn = (...events) => EmailPolicy.insertMany(events.map((event) => ({ event, mode: 'auto', channel: 'email' })));
 // Customer-started mail goes out after the response; wait for it.
 async function mailsFor(event, count = 1) {
   for (let i = 0; i < 150; i += 1) {

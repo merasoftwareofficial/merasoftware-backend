@@ -19,6 +19,7 @@
     "test:lead-message": "node --test tests/leadMessage.test.js",
     "test:complimentary-upgrade": "node --test tests/complimentaryUpgrade.test.js",
     "test:offer-targets": "node --test tests/offerTargets.test.js",
+    "test:reservation-countdown": "node --test tests/reservationCountdown.test.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:external-upload": "node --test tests/externalUploadPhase21.test.js tests/externalUploadPhase3.test.js",
     "start": "node index.js",

@@ -3,7 +3,8 @@ const schema = new mongoose.Schema({
   reservationId: { type: mongoose.Schema.Types.ObjectId, required: true },
   version: { type: Number, required: true },
   deadline: { type: Date, required: true },
-  status: { type: String, enum: ['pending', 'paused', 'failed', 'sent', 'expired', 'superseded'], default: 'pending' },
+  // not-sent: the action's "Send via" can't reach this person (e.g. no phone); never retried.
+  status: { type: String, enum: ['pending', 'paused', 'failed', 'sent', 'expired', 'superseded', 'not-sent'], default: 'pending' },
   nextAttemptAt: { type: Date, default: Date.now },
   lockedUntil: { type: Date, default: null },
   failure: { type: String, default: '' },

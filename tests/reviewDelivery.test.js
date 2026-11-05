@@ -189,19 +189,24 @@ test('review copies preserve originals and defaults, retain chips and stay actio
 });
 
 
-test('personal review selections persist per actor and action without storing customer content', async () => {
+test('personal review selections remember the template only; the route is the action\'s Send via', async () => {
   const row = await draft();
   const templateId = row.selectedTemplateId;
   const url = '/email-control/preferences/lead.proposal';
   assert.equal((await api(url, 'PUT', { channel: 'whatsapp', templateId, text: 'Private customer', actor: customer._id })).status, 200);
-  assert.equal((await api(url)).data.channel, 'whatsapp');
+  assert.equal((await api(url)).data.channel, undefined, 'a channel is no longer remembered per reviewer');
   assert.equal((await api(url)).data.templateId, templateId);
-  assert.equal((await api('/email-control/preferences/lead.created')).data.channel, undefined);
   const other = await User.create({ name: 'Other admin', email: 'other-review@example.test', roles: ['admin'] });
-  assert.equal((await api(url, 'GET', undefined, other)).data.channel, undefined);
+  assert.equal((await api(url, 'GET', undefined, other)).data.templateId, null);
   assert.equal((await api(url, 'GET', undefined, customer)).status, 403);
-  assert.equal((await api(url, 'PUT', { channel: 'sms' })).status, 400);
-  assert.equal((await api('/email-control/preferences/website.subscription.confirm', 'PUT', { channel: 'email' })).status, 400);
+  assert.equal((await api(url, 'PUT', { channel: 'email' })).status, 400, 'a channel alone is not a preference');
+  // The action's Send via: saved once in Email Templates, read by every review.
+  assert.equal((await api('/email-control/policies/lead.proposal', 'PUT', { mode: 'review', channel: 'sms' })).status, 400);
+  assert.equal((await api('/email-control/policies/lead.proposal', 'PUT', { mode: 'review', channel: 'both' })).status, 200);
+  assert.equal((await EmailPolicy.findOne({ event: 'lead.proposal' }).lean()).channel, 'both');
+  assert.equal((await api('/email-control/policies/lead.proposal', 'PUT', { mode: 'off' })).status, 200);
+  assert.equal((await EmailPolicy.findOne({ event: 'lead.proposal' }).lean()).channel, 'both', 'a save without channel keeps it');
+  await EmailPolicy.deleteOne({ event: 'lead.proposal' });
   const unrelated = await EmailTemplate.create({ event: 'lead.created', name: 'Other action', subject: 'Welcome', text: 'Welcome' });
   assert.equal((await api(url, 'PUT', { templateId: String(unrelated._id) })).status, 400);
   const saved = await EmailReviewPreference.findOne({ actor: admin._id }).lean();

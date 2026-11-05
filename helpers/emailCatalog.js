@@ -45,6 +45,7 @@ const events = [
   ['offer.payment.reminder', 'Invoices', 'Offer payment reminder (scheduled)'],
   ['offer.reserved', 'Offers', 'Offer reservation confirmation', 'Offer reservation'],
   ['offer.reservation.extended', 'Offers', 'Offer reservation extended', 'Offer reservation'],
+  ['offer.reservation.expired', 'Offers', 'Offer reservation expired', 'Offer reservation'],
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation', 'Subscription'],
   ['website.subscription.manage', 'Website', 'Subscription management', 'Subscription'],
@@ -70,14 +71,28 @@ const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserCo
 // Plan steps are system mail too: they go out the moment the step happens (the client is told at
 // every step), whichever request or job caused it (helpers/servicePlanNotifications.js).
 const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliveryStuck', 'offer.payment.reminder','offer.reserved', 'offer.reservation.extended',
-  'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
+  'offer.reservation.expired', 'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
+// Mail addressed to admins or a developer. Every other action reaches a customer or a lead.
+const TEAM = new Set(['plan.request.admin', 'sendUpdateRequestNotification', 'sendUploadDeliveryStuck', 'sendDeveloperAssignmentEmail',
+  'sendAdminPurchaseConfirmationEmail', 'sendAdminUPIPendingNotification', 'sendContactRequestNotification', 'sendCallbackRequestNotification',
+  'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin']);
+// Subscription confirmation needs the email link; reviewDelivery.js refuses WhatsApp for it.
+const EMAIL_ONLY = new Set(['website.subscription.confirm', 'website.subscription.manage']);
+const CHANNELS = ['whatsapp', 'email', 'both'];
+// Each action's "Send via" until an admin changes it (merasoftware/src/docs/reservation-countdown.md,
+// owner decision 5 Nov 2026): customer mail goes by WhatsApp only while the system is tested, because a
+// wrong WhatsApp can be deleted for everyone and an email can't. Team mail keeps Email + WhatsApp.
+const defaultChannel = key => EMAIL_ONLY.has(key) ? 'email' : TEAM.has(key) ? 'both' : 'whatsapp';
 const catalog = events.map(([key, section, label, group = label]) => ({
   key, section, label, group, application: section === 'Website' ? 'website' : 'portal',
   trigger: SYSTEM_TRIGGERED.has(key) ? 'system' : CUSTOMER_TRIGGERED.has(key) ? 'customer' : 'admin',
+  audience: TEAM.has(key) ? 'team' : 'customer', defaultChannel: defaultChannel(key), channels: EMAIL_ONLY.has(key) ? ['email'] : CHANNELS,
 }));
 const byKey = new Map(catalog.map(event => [event.key, event]));
 const eventKeys = application => catalog.filter(event => event.application === application).map(event => event.key);
 const isCustomerTriggered = key => byKey.get(key)?.trigger === 'customer';
 const isAutomaticEvent = key => isCustomerTriggered(key) || byKey.get(key)?.trigger === 'system';
 const customerEventKeys = catalog.filter(event => event.trigger === 'customer').map(event => event.key);
-module.exports = { events: catalog, byKey, eventKeys, isCustomerTriggered, isAutomaticEvent, customerEventKeys };
+// The action's route: its saved policy, else its default. The one rule every send follows.
+const channelFor = (key, policy) => EMAIL_ONLY.has(key) ? 'email' : CHANNELS.includes(policy?.channel) ? policy.channel : defaultChannel(key);
+module.exports = { events: catalog, byKey, eventKeys, isCustomerTriggered, isAutomaticEvent, customerEventKeys, channelFor, CHANNELS };

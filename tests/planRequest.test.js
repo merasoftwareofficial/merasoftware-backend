@@ -183,7 +183,9 @@ test('both mails are Off until an admin turns them On; then they send to the tea
   assert.equal(calls.length, 0);
 
   await leadModel.deleteMany({});
-  await EmailPolicy.create([{ event: 'plan.request.admin', mode: 'auto' }, { event: 'plan.request.received', mode: 'auto' }]);
+  // The team mail keeps Both (email reaches the team; no phone on its address). The requester's mail is
+  // set to Email here because this test reads its email; its WhatsApp default is tested elsewhere.
+  await EmailPolicy.create([{ event: 'plan.request.admin', mode: 'auto' }, { event: 'plan.request.received', mode: 'auto', channel: 'email' }]);
   await visitor();
   await waitFor(async () => calls.length === 2);
   const admin = calls.find((mail) => mail.subject.startsWith('New plan request'));

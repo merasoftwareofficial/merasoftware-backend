@@ -109,6 +109,9 @@ beforeEach(async () => {
     { name: 'Plan Client', email: 'client@example.test', roles: ['customer'], walletBalance: 100000 },
   ]);
   await PlanCategory.create({ key: 'website_updates', label: 'Website Updates' });
+  // These tests read the plan mails' email, so the plan actions' Send via is Email here
+  // (customer default is WhatsApp only, tested in reservationCountdown.test.js).
+  await EmailPolicy.insertMany(require('../helpers/emailCatalog').events.filter(row => row.key.startsWith('plan.')).map(row => ({ event: row.key, channel: 'email' })));
   sent = [];
 });
 after(async () => {

@@ -143,13 +143,14 @@ test('recurring pay-later advances without losing old unpaid debt; first-only te
   }
 });
 test('automatic reminders reuse one durable send, stop after payment, and respect global Off', async () => {
+  await EmailPolicy.create({ event: 'offer.payment.reminder', channel: 'email' }); // this test counts provider mails
   const order = await project('pay_later', { dueDays: 0, reminderOffsets: [0] });
   const { processOfferPaymentReminders } = require('../cron/offerPaymentReminderCron');
   await processOfferPaymentReminders(new Date(Date.now() + 1000)); await processOfferPaymentReminders(new Date(Date.now() + 1000));
   assert.equal(sent.length, 1); assert.equal(await EmailHistory.countDocuments({ event: 'offer.payment.reminder', status: 'sent' }), 1);
   await Invoice.updateMany({ orderId: order._id, invoiceType: 'project' }, { $set: { status: 'paid', amountPaid: 699 } });
   await processOfferPaymentReminders(); assert.equal(sent.length, 1);
-  await EmailPolicy.create({ event: 'offer.payment.reminder', mode: 'off' }); await project('pay_later', { dueDays: 0, reminderOffsets: [0] }); await processOfferPaymentReminders(new Date(Date.now() + 1000)); assert.equal(sent.length, 1);
+  await EmailPolicy.updateOne({ event: 'offer.payment.reminder' }, { $set: { mode: 'off' } }); await project('pay_later', { dueDays: 0, reminderOffsets: [0] }); await processOfferPaymentReminders(new Date(Date.now() + 1000)); assert.equal(sent.length, 1);
 });
 test('later due installment locks even before its invoice exists; final statements do not count as bills', async () => {
   const order = await project('advance');

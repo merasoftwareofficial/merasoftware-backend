@@ -13,7 +13,8 @@ async function reconcileSent(ownership) {
       update: { $set: { status: 'sent', providerId: row.providerId, sentAt: row.sentAt, attempts: row.attempts, failure: '' } },
     } })));
   }
-  const drafts = await EmailDraft.find({ ...ownership, 'delivery.channels': { $exists: false }, status: 'sent' }).select('event actor application to subject providerId sentAt expiresAt attemptCount lastAttemptAt attempts source sender templateName').lean();
+  // A sent draft that included email (legacy, or a channel send with Email/Both) whose audit write failed.
+  const drafts = await EmailDraft.find({ ...ownership, $or: [{ 'delivery.channels': { $exists: false } }, { 'delivery.channels': 'email' }], status: 'sent' }).select('event actor application to subject providerId sentAt expiresAt attemptCount lastAttemptAt attempts source sender templateName').lean();
   if (!drafts.length) return;
   const complete = await EmailHistory.find({ draftId: { $in: drafts.map(d => d._id) }, status: 'sent' }).select('draftId').lean();
   const recorded = new Set(complete.map(row => String(row.draftId)));

@@ -97,6 +97,10 @@ router.post('/final-message/ignored', handle(async req => ({ ignoredReplies: awa
 
 router.post('/final-message/decision', handle(req => decideReply(req.body?.id, req.body?.choice, req.userId)));
 
+// The Reservation box: counts and the running reservations. The hours live on each offer and the
+// three messages are Email Templates actions, so this box only shows how reservations stand.
+router.get('/reservations', handle(() => require('../helpers/reservationClosure').reservationOverview()));
+
 // Applies to messages prepared from now on. A message already out keeps the wait it promised.
 router.post('/final-message/time', handle(async req => {
   const hours = Number(req.body?.hours);

@@ -175,7 +175,7 @@ test('the same lead can get a message again', async () => {
 
 test('Both sends one mail and one WhatsApp, and a nameless lead loses only the greeting', async () => {
   const both = await open((await lead({ email: 'ravi@example.test', status: 'Won' }))._id);
-  assert.equal(both.defaultChannel, 'both');
+  assert.equal(both.defaultChannel, 'whatsapp', 'the popup opens on the action\'s Send via');
   assert.equal((await send(both, 'both')).data.status, 'sent');
   assert.equal(mails.length, 1); assert.equal(await Queue.countDocuments(), 1);
   await Queue.deleteMany({});

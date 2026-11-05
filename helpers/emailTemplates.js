@@ -53,7 +53,10 @@ function validateTemplateVariables(event, subject, text) {
 async function systemTemplate(event) {
   if (!hasSystemTemplate(event)) return null;
   const filter = { event, system: true };
-  const { subject, text } = definitions[event];
+  const { subject, text, replaces } = definitions[event];
+  // A Standard copy still holding wording this action shipped before moves to the current wording.
+  // A copy the owner edited never matches, so it stays exactly as the owner wrote it.
+  if (replaces?.length) await EmailTemplate.updateOne({ ...filter, text: { $in: replaces } }, { $set: { text } });
   if (event === 'sendProjectUpdateEmail') {
     const legacy = require('./legacyProjectUpdateTemplate');
     await EmailTemplate.updateOne({ ...filter, subject: legacy.subject, text: legacy.text }, { $set: { subject, text } });

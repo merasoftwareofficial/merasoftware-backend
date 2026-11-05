@@ -6,7 +6,7 @@
 // its whole line from the mail (emailMarkup.render), so optional details need no logic here.
 const { formatIndiaDate, formatIndiaDateTime } = require('./dateTime');
 const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation');
-const { tableBlock, listBlock } = require('./emailMarkup');
+const { tableBlock, listBlock, escapeHtml } = require('./emailMarkup');
 const { hasConfirmedName } = require('./leadName');
 
 const ADMIN_EMAILS = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
@@ -56,6 +56,11 @@ const PROJECT = detail('Project name', 'Business Website');
 const INVOICE_NUMBER = detail('Invoice number', 'INV-1001');
 // The customer's own project page, the same address the project update mail links to.
 const projectPage = order => link(process.env.FORNTEND_URL, `/project-details/${order?._id}`);
+// The customer's invoice in the portal (view and download). WhatsApp can't carry the PDF, so every
+// invoice message links here and email still attaches the PDF (owner decision 5 Nov 2026).
+const invoicePage = invoice => (invoice?._id ? link(process.env.FORNTEND_URL, `/invoice-detail/${invoice._id}`) : '');
+const INVOICE_LINK = detail('Invoice link', 'https://app.merasoftware.com/invoice-detail/123', 'The invoice in the customer portal, to view or download');
+const invoiceLinks = invoice => (invoicePage(invoice) ? [invoicePage(invoice)] : []);
 const UPGRADE_LINK = detail('Project page link', 'https://app.merasoftware.com/project-details/123', 'The customer’s own project page');
 function upgradeMail(user, order) {
   if (!user?.email && !user?.phone) return null;
@@ -817,7 +822,7 @@ const definitions = {
       '**UPI:** vacomputers.com@okhdfcbank',
       '**Visit our office:** VA Computers, Near New Bus Stand, Majitha, 143601', '',
       '## Payment Instructions',
-      '- The invoice PDF is attached to this email for your records.',
+      '- View or download your invoice: {{invoiceLink}}',
       '- Please make the payment by {{dueDate}}.',
       '- After payment, please share the transaction screenshot with us for faster processing.',
       '- Your update requests will be processed only after payment confirmation.', '',
@@ -829,15 +834,17 @@ const definitions = {
     variables: {
       name: NAME, plan: PLAN, period: detail('Billing period', '1 Oct 2026 - 31 Oct 2026'), invoiceNumber: INVOICE_NUMBER,
       invoiceDate: detail('Invoice date', '1 Oct 2026'), amount: detail('Amount due', '₹3,000'), dueDate: detail('Payment due date', '8 Oct 2026'),
+      invoiceLink: INVOICE_LINK,
     },
     blocks: {},
     build(user, order, invoice = {}, invoicePdfBuffer) {
       if (!user?.email) return null;
       return {
-        to: [user.email],
+        to: [user.email], requiredLinks: invoiceLinks(invoice),
         values: {
           name: text(user.name), plan: getOrderDisplayName(order, 'Website Update Plan'), period: `${day(invoice.renewalPeriodStart)} - ${day(invoice.renewalPeriodEnd)}`,
           invoiceNumber: text(invoice.invoiceNumber), invoiceDate: day(invoice.invoiceDate), amount: money(invoice.amount), dueDate: day(invoice.dueDate),
+          invoiceLink: invoicePage(invoice),
         },
         attachments: invoicePdfBuffer ? [{ filename: `Invoice-${invoice.invoiceNumber}.pdf`, content: invoicePdfBuffer }] : [],
       };
@@ -877,14 +884,17 @@ const definitions = {
   },
   'invoice.project': {
     subject: 'Project payment summary - {{invoiceNumber}}',
-    text: lines('Hello {{name}},', '', 'Your current project payment summary ({{invoiceNumber}}) is attached.', '', ...SIGN_OFF),
-    variables: { name: NAME, invoiceNumber: INVOICE_NUMBER },
+    text: lines('Hello {{name}},', '', 'Your current project payment summary ({{invoiceNumber}}) is ready.', '',
+      '**View or download:** {{invoiceLink}}', '', ...SIGN_OFF),
+    replaces: [lines('Hello {{name}},', '', 'Your current project payment summary ({{invoiceNumber}}) is attached.', '', ...SIGN_OFF)],
+    variables: { name: NAME, invoiceNumber: INVOICE_NUMBER, invoiceLink: INVOICE_LINK },
     blocks: {},
     build(invoice, pdf) {
       const user = invoice?.userId;
       if (!user?.email) return null;
       return {
-        to: [user.email], values: { name: text(user.name || 'Customer'), invoiceNumber: text(invoice.invoiceNumber) },
+        to: [user.email], requiredLinks: invoiceLinks(invoice),
+        values: { name: text(user.name || 'Customer'), invoiceNumber: text(invoice.invoiceNumber), invoiceLink: invoicePage(invoice) },
         attachments: pdf ? [{ filename: `${invoice.invoiceNumber}.pdf`, content: pdf }] : [],
       };
     },
@@ -895,21 +905,28 @@ const definitions = {
       'Hello {{name}},', '',
       '{{message}}', '',
       '**Invoice:** {{invoiceNumber}}', '**Amount Due:** {{amount}}', '**Due Date:** {{dueDate}}', '',
-      'The invoice PDF is attached for your reference.', '',
+      '**View or download your invoice:** {{invoiceLink}}', '',
       'Regards,', 'Mera Software Team',
     ),
+    replaces: [lines(
+      'Hello {{name}},', '',
+      '{{message}}', '',
+      '**Invoice:** {{invoiceNumber}}', '**Amount Due:** {{amount}}', '**Due Date:** {{dueDate}}', '',
+      'The invoice PDF is attached for your reference.', '',
+      'Regards,', 'Mera Software Team',
+    )],
     variables: {
       name: NAME,
       message: detail('Reminder message', 'This is a friendly reminder that your invoice payment is still pending.', 'The text the admin chose or typed when sending the reminder'),
-      invoiceNumber: INVOICE_NUMBER, amount: detail('Amount due', '₹3,000'), dueDate: detail('Due date', '8 Oct 2026'),
+      invoiceNumber: INVOICE_NUMBER, amount: detail('Amount due', '₹3,000'), dueDate: detail('Due date', '8 Oct 2026'), invoiceLink: INVOICE_LINK,
     },
     blocks: {},
     build(invoice, reminderMessage, pdf) {
       const user = invoice?.userId;
       if (!user?.email) return null;
       return {
-        to: [user.email], reminderInvoice: invoice._id,
-        values: { name: text(user.name || 'Customer'), message: text(reminderMessage), invoiceNumber: text(invoice.invoiceNumber), amount: money(invoice.amount), dueDate: day(invoice.dueDate) },
+        to: [user.email], reminderInvoice: invoice._id, requiredLinks: invoiceLinks(invoice),
+        values: { name: text(user.name || 'Customer'), message: text(reminderMessage), invoiceNumber: text(invoice.invoiceNumber), amount: money(invoice.amount), dueDate: day(invoice.dueDate), invoiceLink: invoicePage(invoice) },
         attachments: pdf ? [{ filename: `Invoice-${invoice.invoiceNumber}.pdf`, content: pdf }] : [],
       };
     },
@@ -1042,24 +1059,57 @@ definitions['offer.payment.reminder'] = {
     return mail ? { ...mail, reminderInvoice: undefined } : null;
   },
 };
+// The hours this reservation was given: frozen at reserve time from the offer (offerReservations.js holdHours).
+const heldHours = reservation => String(Math.round((new Date(reservation.expiresAt) - new Date(reservation.reservedAt)) / 3600000));
+const noteBlock = value => ({ html: `<p style="margin:0 0 14px">${escapeHtml(value)}</p>`, text: value });
+const RESERVATION_STEPS = {
+  customer: 'Get your project started before then. After that time this offer expires and its price is no longer held for you.',
+  admin_project: 'Your project has started. Complete the first payment before then to keep the reserved price.',
+};
 definitions['offer.reserved'] = {
   subject: 'Your offer is reserved',
   text: lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
     '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
+    '**Reservation ends:** {{expiresAt}}', '',
+    'Your reservation lasts {{hours}} hours, until the time above.', '',
+    '{{nextStep}}', '',
+    '**My offers:** {{link}}', '', ...SIGN_OFF),
+  // The wording shipped before 5 Nov 2026: an unedited Standard copy moves to the text above.
+  replaces: [lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
+    '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
     '**Payment deadline:** {{expiresAt}}', '',
     'Your initial reservation lasts 72 hours. Any team extension is included in the payment deadline above. Complete the required first payment before that deadline to lock the agreed price.',
     'Our team will help you with your project and payment steps. Reserving does not itself confirm a payment or start a project.', '',
-    '**My offers:** {{link}}', '', ...SIGN_OFF),
+    '**My offers:** {{link}}', '', ...SIGN_OFF)],
   variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
     price: detail('Reserved price', '₹5,000'), reservedAt: detail('Reserved on', '24 Oct 2026, 10:00 am IST'),
-    expiresAt: detail('Payment deadline', '27 Oct 2026, 10:00 am IST'), link: detail('My offers', 'https://www.merasoftware.com/account/offers') },
-  blocks: {},
+    expiresAt: detail('Reservation ends', '27 Oct 2026, 10:00 am IST'), hours: detail('Reservation hours', '72', 'The hours the offer gave this reservation'),
+    link: detail('My offers', 'https://www.merasoftware.com/account/offers') },
+  blocks: { nextStep: { label: 'Next step', hint: 'Customer reservation: start the project before the deadline. Project created by the team: pay the first bill before it.',
+    sample: () => noteBlock(RESERVATION_STEPS.customer) } },
   build(reservation, user) {
     if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
     const href = link(process.env.PORTFOLIO_WEBSITE_URL, '/account/offers');
     return { to: [user.email], requiredLinks: [href], values: {
       name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
-      reservedAt: moment(reservation.reservedAt), expiresAt: moment(reservation.extendedUntil || reservation.expiresAt), link: href,
+      reservedAt: moment(reservation.reservedAt), expiresAt: moment(reservation.extendedUntil || reservation.expiresAt), hours: heldHours(reservation), link: href,
+    }, blocks: { nextStep: noteBlock(RESERVATION_STEPS[reservation.origin] || RESERVATION_STEPS.customer) } };
+  },
+};
+// Sent once when a reservation's deadline passes with no project on it (helpers/reservationClosure.js).
+definitions['offer.reservation.expired'] = {
+  subject: 'Your offer has expired',
+  text: lines('Hello {{name}},', '', 'Your reservation for {{offerTitle}} has ended, and this offer has now expired.', '',
+    'More offers are waiting for you. Visit our offers page:', '{{offersLink}}', '',
+    'Better luck next time!', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
+    offersLink: detail('Offers page', 'https://www.merasoftware.com/offers', 'The website offers page') },
+  blocks: {},
+  build(reservation, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
+    const href = link(process.env.PORTFOLIO_WEBSITE_URL, '/offers');
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), offersLink: href,
     } };
   },
 };
@@ -1278,4 +1328,7 @@ definitions['plan.purchase.admin'] = {
     } };
   },
 };
+// Invoice wording shipped before 5 Nov 2026 promised an attached PDF; an unedited Standard copy moves to the link.
+definitions.sendMonthlyInvoiceEmail.replaces = [definitions.sendMonthlyInvoiceEmail.text
+  .replace('- View or download your invoice: {{invoiceLink}}', '- The invoice PDF is attached to this email for your records.')];
 module.exports = { definitions, refundTable };

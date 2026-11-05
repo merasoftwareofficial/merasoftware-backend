@@ -174,7 +174,9 @@ function requestMiddleware(req, res, next) {
         if (leadDraft) {
           try {
             const result = await decide(String(leadDraft._id), req.userId, req.body.emailReview);
-            return json({ ...body, emailStatus: result.status, ...(result.delivery ? { messageDelivery: result.delivery } : {}) });
+            // A failed channel send stays in Email Control; its id lets the page offer the retry.
+            return json({ ...body, emailStatus: result.status, ...(result.delivery ? { messageDelivery: result.delivery } : {}),
+              ...(result.status === 'failed' ? { emailDraftIds: scope.ids.map(String) } : {}) });
           } catch {
             return json({ ...body, emailStatus: 'failed', emailDraftIds: scope.ids.map(String) });
           }
@@ -292,17 +294,43 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
     throw error;
   }
 }
-// A single channel coordinator wraps the existing email provider path. Legacy/automatic callers keep their behavior.
+// The one channel coordinator. A send without an explicit choice (automatic mail, or a review that
+// picked none) goes by its action's "Send via" (reviewDelivery.actionChannel). Only a draft whose first
+// email attempt started before channels existed keeps the email path, so its retry repeats that delivery.
 async function decideChannels(id, actor, decision, access) {
   if (decision.choice === 'send') {
     const draft = await EmailDraft.findOne({ _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } }).lean();
-    if (decision.channels !== undefined || draft?.delivery?.channels?.length) {
-      if (!draft) throw new Error('Draft is unavailable');
-      return require('./reviewDelivery').deliver({ draft, actor, decision, access, sendEmail: payload => decideEmail(id, actor, payload, access, { skipWhatsApp: true }), recordHistory, reviewedMail, validateContent });
+    const locked = !!draft?.delivery?.channels?.length;
+    if (draft && (locked || decision.channels !== undefined || (draft.status === 'pending' && !draft.attemptCount))) {
+      const delivery = require('./reviewDelivery');
+      // A retry repeats the channels its first attempt locked.
+      let chosen = locked && decision.channels === undefined ? { ...decision, channels: delivery.selectionFor(draft.delivery.channels) } : decision;
+      if (!locked && decision.channels === undefined) {
+        let channels = await delivery.actionChannel(draft.event);
+        if (actor === null) {
+          // Automatic mail (no reviewer to choose). Both: each part goes where it can, as the email +
+          // WhatsApp copy always did (a team address usually has no phone). A single route that can't
+          // reach this person is recorded as Not sent with the reason, never sent another way.
+          const { choices } = await delivery.availability(draft);
+          const usable = id => choices.find(row => row.id === id)?.enabled;
+          if (channels === 'both' && !usable('both')) channels = usable('email') ? 'email' : usable('whatsapp') ? 'whatsapp' : channels;
+          if (!usable(channels)) return markNotSent(draft, choices.find(row => row.id === channels)?.reason || 'Channel unavailable.');
+        }
+        chosen = { ...decision, channels };
+      }
+      return delivery.deliver({ draft, actor, decision: chosen, access, sendEmail: payload => decideEmail(id, actor, payload, access, { skipWhatsApp: true }), recordHistory, reviewedMail, validateContent });
     }
   }
   return decideEmail(id, actor, decision, access);
 }
+async function markNotSent(draft, reason) {
+  const failure = `Not sent: ${reason}`;
+  const skipped = await EmailDraft.findOneAndUpdate({ _id: draft._id, status: 'pending' }, { $set: { status: 'skipped', failure } }, { new: true });
+  if (skipped) await recordHistory(skipped, null);
+  return { status: 'skipped', notSent: true, failure, event: draft.event, reference: draft.reference };
+}
+// Delivered by the action's route: an email that was sent, or a WhatsApp-only message in the queue.
+const DELIVERED = ['sent', 'queued'];
 async function decide(id, actor, decision, access = {}) {
   if (decision.choice === 'send') await require('./leadContactBlock').assertDraftMayGo(id);
   const result = await decideChannels(id, actor, decision, access);
@@ -327,7 +355,7 @@ async function sendScheduledOfferReminder(invoice, customer, offset) {
   const result = await requestScope.run(scope, () => queueMail(event, mail));
   if (!result.draftId) return;
   const draft = await EmailDraft.findOneAndUpdate({ _id: result.draftId, status: 'staged' }, { $set: { status: 'pending' } }, { new: true }) || await EmailDraft.findById(result.draftId);
-  if (!draft || ['sent', 'sending', 'skipped'].includes(draft.status) || draft.expiresAt <= new Date()) return;
+  if (!draft || [...DELIVERED, 'sending', 'skipped'].includes(draft.status) || draft.expiresAt <= new Date()) return;
   await recordHistory(draft, null, true);
   // Re-read money immediately before sending; never remind a settled/cancelled bill.
   const fresh = await require('../models/invoiceModel').findById(invoice._id).lean();
@@ -341,27 +369,31 @@ async function sendReservationConfirmation(reservation, user) {
 // One durable path for reservation mail (confirmation, extension); dedupeKey makes a retry safe.
 async function sendReservationMail(event, reservation, user, dedupeKey) {
   const history = await EmailHistory.findOne({ dedupeKey }).lean();
-  if (history?.status === 'sent') return 'sent';
+  if (DELIVERED.includes(history?.status)) return 'sent';
   const mail = require('./emailTemplates').buildTemplatedMail(event, reservation, user);
   if (!mail) throw new Error('Reservation mail website URL or recipient is unavailable');
   return sendSystemMail(event, mail, dedupeKey, '/offer-reservations');
 }
 // Sends one system-triggered mail (emailCatalog.js SYSTEM_TRIGGERED) outside any review: staged,
-// recorded, then sent through decide() like a reviewed send, so the action's On/Off policy and the
-// WhatsApp mirror apply. dedupeKey makes it once-only: a retry or a second caller returns 'sent'.
+// recorded, then sent through decide() like a reviewed send, so the action's On/Off policy and its
+// "Send via" apply. dedupeKey makes it once-only: a retry or a second caller returns 'sent'.
+// 'sent' = delivered by the action's route; 'not-sent' = that route can't reach this person (never retried).
 async function sendSystemMail(event, mail, dedupeKey, source) {
   const history = await EmailHistory.findOne({ dedupeKey }).lean();
-  if (history?.status === 'sent') return 'sent';
+  if (DELIVERED.includes(history?.status)) return 'sent';
   mail.dedupeKey = dedupeKey;
   const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: source, userId: null } };
   const result = await requestScope.run(scope, () => queueMail(event, mail));
   if (!result.draftId) return 'paused';
   const draft = await EmailDraft.findOneAndUpdate({ _id: result.draftId, status: 'staged' }, { $set: { status: 'pending' } }, { new: true }) || await EmailDraft.findById(result.draftId);
-  if (draft?.status === 'sent') return 'sent';
+  if (DELIVERED.includes(draft?.status)) return 'sent';
+  if (draft?.status === 'skipped' && draft.failure?.startsWith('Not sent:')) return 'not-sent';
   if (!draft || draft.expiresAt <= new Date() || draft.status === 'skipped') return 'expired';
   if (draft.status === 'sending') throw new Error('Confirmation delivery is awaiting reconciliation');
   await recordHistory(draft, null, true);
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
-  return decision.status === 'sent' ? 'sent' : 'paused';
+  // A failed part of a channel send is retried by the caller's job: same draft, same provider key.
+  if (decision.status === 'failed') throw new Error(decision.delivery?.failure || 'Delivery failed');
+  return DELIVERED.includes(decision.status) ? 'sent' : decision.notSent ? 'not-sent' : 'paused';
 }
 module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };

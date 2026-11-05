@@ -35,15 +35,25 @@ const schema = new mongoose.Schema({
     }, { _id: false }),
     default: null,
   },
-  confirmationStatus: { type: String, enum: ['pending', 'sent', 'paused', 'failed', 'expired'], default: 'pending' },
+  // not-sent: the action's "Send via" can't reach this person (e.g. no phone); never retried.
+  confirmationStatus: { type: String, enum: ['pending', 'sent', 'paused', 'failed', 'expired', 'not-sent'], default: 'pending' },
   confirmationNextAttemptAt: { type: Date, default: Date.now },
   confirmationLockedUntil: { type: Date, default: null },
   confirmationFailure: { type: String, default: '' },
   pricingNextCheckAt: { type: Date, default: () => new Date(0) },
   pricingLockedUntil: { type: Date, default: null },
+  // The closing message (helpers/reservationClosure.js). Only reservations made after it shipped get
+  // 'pending'; older rows have no value and are never messaged. Decided once after the deadline:
+  // used (a project is attached), late (deadline over 24 h ago), sent, or not-sent (its route can't reach them).
+  closureStatus: { type: String, enum: ['pending', 'used', 'late', 'sent', 'not-sent', 'failed'] },
+  closureDecidedAt: { type: Date, default: null },
+  closureNextAttemptAt: { type: Date, default: null },
+  closureLockedUntil: { type: Date, default: null },
+  closureFailure: { type: String, default: '' },
 }, { timestamps: true });
 schema.index({ userId: 1, offerSlug: 1, periodEndsAt: 1 }, { unique: true });
 schema.index({ confirmationStatus: 1, confirmationNextAttemptAt: 1 });
 schema.index({ projectId: 1, confirmedAt: 1, 'resolution.status': 1 });
 schema.index({ pricingNextCheckAt: 1, expiresAt: 1, _id: 1 });
+schema.index({ closureStatus: 1, closureNextAttemptAt: 1 }, { partialFilterExpression: { closureStatus: { $in: ['pending', 'failed'] } } });
 module.exports = mongoose.model('offerReservation', schema);

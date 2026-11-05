@@ -44,6 +44,8 @@ beforeEach(async () => {
   for (const collection of Object.values(mongoose.connection.collections)) await collection.deleteMany({});
   catalogueDown = false;
   process.env.OFFER_RESERVATION_REPRICING_ENABLED = 'true';
+  // These notices are checked as email deliveries; the WhatsApp-only default is tested in reservationCountdown.test.js.
+  await EmailPolicy.insertMany(['offer.reserved', 'offer.reservation.extended'].map(event => ({ event, channel: 'email' })));
   [customer, admin] = await User.create([
     { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002', walletBalance: 20000 },
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },

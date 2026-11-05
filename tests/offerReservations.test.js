@@ -153,7 +153,10 @@ test('reservation save failure rolls back the new lead', async () => {
   try { await assert.rejects(reserve(), /Injected/); } finally { Reservation.create = create; }
   assert.equal(await Lead.countDocuments(), 0); assert.equal(await Reservation.countDocuments(), 0);
 });
+// The email mechanics below run with the action's "Send via" set to Email; the WhatsApp-only default is tested separately.
+const sendByEmail = event => EmailPolicy.create({ event, channel: 'email' });
 test('confirmation uses existing mail controls and durable dedupe', async () => {
+  await sendByEmail('offer.reserved');
   await reserve(); await drainReservationConfirmations();
   assert.equal(deliveries, 1);
   assert.equal((await Reservation.findOne()).confirmationStatus, 'sent');
@@ -162,7 +165,7 @@ test('confirmation uses existing mail controls and durable dedupe', async () => 
   assert.equal(await EmailDraft.countDocuments({ event: 'offer.reserved' }), 1);
 });
 test('confirmation off pauses delivery and retries after enabling', async () => {
-  await EmailPolicy.create({ event: 'offer.reserved', mode: 'off' });
+  await EmailPolicy.create({ event: 'offer.reserved', mode: 'off', channel: 'email' });
   await reserve(); await drainReservationConfirmations();
   assert.equal(deliveries, 0); assert.equal((await Reservation.findOne()).confirmationStatus, 'paused');
   await EmailPolicy.updateOne({}, { $set: { mode: 'auto' } });
@@ -263,6 +266,7 @@ test('reservation and confirmation activation switches default closed independen
   assert.equal((await Reservation.findOne()).confirmationStatus, 'pending');
 });
 test('failed confirmation retries the same draft and provider idempotency key', async () => {
+  await sendByEmail('offer.reserved');
   await reserve();
   const normal = global.fetch; const keys = [];
   global.fetch = async (url, options) => {
