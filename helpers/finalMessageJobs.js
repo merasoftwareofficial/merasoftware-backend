@@ -132,6 +132,12 @@ async function followFinalMessages() {
     try { await work(row, time); } catch (error) { console.error('[final message] could not follow a message, will try again:', error.message); }
   };
   try {
+    // Backstop for the change-time check: a cycle whose person has moved on (stage, client status, conversion,
+    // Trash, phone) ends now, not at its deadline, including one that had a send in flight at that moment.
+    const { RUNNING, reconcileCycle } = require('./finalMessageCycle');
+    for (const row of await FinalMessage.find({ $or: [{ status: { $in: RUNNING } }, { status: 'replied', decision: null }] }).select('leadId').lean()) {
+      await attempt(row, item => reconcileCycle(item.leadId));
+    }
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] } }).lean()) {
       await attempt(row, item => require('./stopFinalMessage').processOutbound(item));

@@ -163,18 +163,22 @@ async function markBought(id, actor) {
   return target;
 }
 
-/** A client's general behaviour. Their Won status and every offer's stage stay as they are. */
-async function setBehaviour(leadId, value, actor) {
+/** A client's general behaviour. Their Won status and every offer's stage stay as they are.
+ *  From the follow-up form the admin's note (and file) is the timeline line; otherwise one line records the change. */
+async function setBehaviour(leadId, value, actor, { note, attachment } = {}) {
   if (!CLIENT_BEHAVIOURS.includes(value)) fail('Choose a valid behaviour.');
   const lead = validId(leadId) ? await Lead.findOne({ _id: leadId, deletedAt: null }) : null;
   if (!lead) fail('This lead is no longer available.', 404);
   if (!lead.convertedToUserId) fail('Behaviour is only for clients. Use the stage for a lead.', 409);
   const before = lead.clientBehaviour || DEFAULT_CLIENT_BEHAVIOUR;
   if (before === value) return { clientBehaviour: value };
+  const entry = note
+    ? { ...line(note, value, actor), attachment: attachment || null }
+    : line(`Client current status: ${leadStatusLabel(before)} to ${leadStatusLabel(value)}.`, value, actor);
   const changed = await Lead.updateOne({ _id: lead._id, clientBehaviourRevision: lead.clientBehaviourRevision ? lead.clientBehaviourRevision : { $in: [null, 0] } }, {
     $set: { clientBehaviour: value },
     $inc: { clientBehaviourRevision: 1 },
-    $push: { followUps: line(`Client current status: ${leadStatusLabel(before)} to ${leadStatusLabel(value)}.`, lead.status, actor) },
+    $push: { followUps: entry },
   });
   if (!changed.modifiedCount) fail('This client status changed in another window. Refresh and try again.', 409);
   return { clientBehaviour: value };

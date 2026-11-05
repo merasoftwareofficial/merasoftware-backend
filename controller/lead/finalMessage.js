@@ -7,7 +7,7 @@ const WHY_NOT = {
   unreachable: "This lead has no valid WhatsApp number or email.",
   client: "This number belongs to a client, so the final message is not for them.",
   "client-ineligible": "Client final messages are unavailable, or this client's account, phone or behaviour needs review.",
-  "already-sent": "The final message has already gone to this person.",
+  "already-sent": "A final message is already running for this person. A new one can start after it ends.",
   "in-review": "This lead's final message is already waiting for a decision.",
   unavailable: "The message could not be prepared: check the Final message action in Email Templates.",
 };
@@ -48,7 +48,7 @@ const prepareOneController = async (req, res) => {
       const readiness = await require('../../helpers/clientFinalMessageReadiness').clientStartReadiness(lead);
       if (!readiness.ready) return reply(res, 409, readiness.message, { finalMessageReadiness: readiness });
     }
-    const outcome = await prepareFor(lead, { newEpisode: req.query?.new === '1' });
+    const outcome = await prepareFor(lead);
     return outcome === "prepared" ? reply(res, 200, "Final message prepared") : reply(res, 409, WHY_NOT[outcome]);
   } catch (error) {
     console.error("Error preparing the final message:", error);
@@ -68,4 +68,4 @@ const stopController = async (req, res) => {
     return reply(res, 200, 'Countdown stopped. Current status is unchanged.', data);
   } catch (error) { return reply(res, error.status || 400, error.message); }
 };
-module.exports = { countController, prepareAllController, prepareOneController, stopController };
+module.exports = { countController, prepareAllController, prepareOneController, stopController, WHY_NOT };

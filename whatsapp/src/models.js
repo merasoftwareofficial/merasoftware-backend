@@ -137,7 +137,7 @@ const finalMessageSchema = new mongoose.Schema({
   stoppedAt: Date,
   stopReason: String,
   stoppedBy: mongoose.Schema.Types.ObjectId,
-  stopSource: { type: String, enum: ['admin', 'outgoing'] },
+  stopSource: { type: String, enum: ['admin', 'outgoing', 'status-change'] },
   sendRevision: { type: Number, default: 0 },
   outboundChecks: { type: [{ _id: false, id: String, at: Date, source: { type: String, enum: ['unknown'] } }], default: undefined },
   // Written by the worker (inbound.js), acted on by the backend job (helpers/finalMessageJobs.js).

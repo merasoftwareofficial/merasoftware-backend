@@ -46,6 +46,7 @@ const deleteLeadController = async (req, res) => {
     lead.deletedAt = new Date();
     lead.deletedBy = req.userId;
     await lead.save();
+    await require("../../helpers/finalMessageCycle").reconcileCycle(lead._id, { actor: req.userId });
 
     return res.json({
       message: "Lead moved to Trash",

@@ -2,7 +2,7 @@ const Lead = require('../models/leadModel');
 const crypto = require('node:crypto');
 const mongoose = require('mongoose');
 const userModel = require('../models/userModel');
-const { FinalMessage, Lock, Queue, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
+const { FinalMessage, Lock, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { EmailDraft } = require('../models/emailControlModel');
 const { DEFAULT_IGNORED_REPLIES, MAX_IGNORED_LENGTH, MAX_IGNORED_REPLIES, replyWords } = require('../whatsapp/src/finalMessageReplies.js');
 const { CONTACTED, DEAD, NEGATIVE } = require('./leadStatuses');
@@ -13,6 +13,7 @@ const { normalizePhone } = require('./whatsappQueue');
 const { prepareTemplatedMail } = require('./emailService');
 const { registerReviewDraft, unregisterReviewDraft } = require('./emailController');
 const { clientReadiness } = require('./clientFinalMessageReadiness');
+const { isRunning } = require('./finalMessageCycle');
 
 // The last message to a Negative lead. It goes through the normal review popup and template (action lead.finalMessage),
 // so the admin chooses Send or Don't Send, and the channel. The job (finalMessageJobs.js) follows what happened next.
@@ -40,15 +41,17 @@ async function clientPhones() {
 const isOpenNegative = lead => lead.status === NEGATIVE && !lead.deletedAt && !lead.convertedToUserId && !lead.requestedByUserId;
 const reachable = lead => !!normalizePhone(lead.phone) || isAccountEmail(lead.email);
 
-/** Why this lead can't get the message now, or null. `rows` = every final message row; `clients` = clientPhones(). */
-function blockedReason(lead, rows, clients) {
+/** Why this lead can't get the message now, or null. `rows` = every final message row; `clients` = clientPhones().
+ *  A finished cycle allows a new one for this lead (finalMessageCycle.js); the Leads button keeps to people never messaged. */
+function blockedReason(lead, rows, clients, { allowFinished = false } = {}) {
   if (!isOpenNegative(lead)) return 'not-negative';
   if (!reachable(lead)) return 'unreachable';
   const phone = normalizePhone(lead.phone);
   if (phone && clients.has(phone)) return 'client';
+  const blocks = row => (allowFinished ? isRunning(row) : !CAN_SEND_AGAIN.includes(row.status));
   const own = rows.find(row => String(row.leadId) === String(lead._id));
-  if (own && !CAN_SEND_AGAIN.includes(own.status)) return own.status === 'review' ? 'in-review' : 'already-sent';
-  const samePerson = phone && rows.find(row => row.phone === phone && String(row.leadId) !== String(lead._id) && !CAN_SEND_AGAIN.includes(row.status));
+  if (own && blocks(own)) return own.status === 'review' ? 'in-review' : 'already-sent';
+  const samePerson = phone && rows.find(row => row.phone === phone && String(row.leadId) !== String(lead._id) && blocks(row));
   return samePerson ? 'already-sent' : null;
 }
 
@@ -70,11 +73,23 @@ async function pendingClients() {
   for (const lead of leads) {
     if (!await clientEligible(lead)) continue;
     const own = rows.find(row => String(row.leadId) === String(lead._id));
-    const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && ['review', 'queued', 'waiting', 'replied'].includes(row.status));
+    const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && isRunning(row));
     if (other) continue;
     if (!own || (isClientRow(own) && ['review', 'not-sent'].includes(own.status)) || (!isClientRow(own) && ['dead', 'stopped', 'not-sent', 'email-only'].includes(own.status))) result.push(lead);
   }
   return result;
+}
+
+/** Why a final message can't start for this person now, or null. The lead page shows Start final message only on null. */
+async function startBlocker(lead) {
+  const phone = normalizePhone(lead.phone);
+  const rows = await FinalMessage.find({ $or: [{ leadId: lead._id }, ...(phone ? [{ phone }] : [])] }).lean();
+  if (!lead.convertedToUserId) return blockedReason(lead, rows, await clientPhones(), { allowFinished: true });
+  if (lead.deletedAt || lead.clientBehaviour !== NEGATIVE) return 'not-negative';
+  if (!(await require('./clientFinalMessageReadiness').clientStartReadiness(lead)).ready) return 'client-ineligible';
+  const own = rows.find(row => String(row.leadId) === String(lead._id));
+  if (own?.status === 'review') return 'in-review';
+  return isRunning(own) || rows.some(row => String(row.leadId) !== String(lead._id) && isRunning(row)) ? 'already-sent' : null;
 }
 
 /** Prepares this lead's message in the current request, so the portal opens the popup. Returns 'prepared' or the reason it didn't. */
@@ -97,37 +112,24 @@ async function prepareFor(lead, options = {}) {
   }
 }
 
-async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
-  const [rows, clients] = await Promise.all([FinalMessage.find({ $or: [{ leadId: lead._id }, ...(normalizePhone(lead.phone) ? [{ phone: normalizePhone(lead.phone) }] : [])] }).lean(), clientPhones()]);
+// Same rule for leads and clients: a running cycle blocks a new one, a finished one is kept in episodeHistory.
+async function prepareForUnlocked(lead) {
   const client = Boolean(lead.convertedToUserId);
   if (client && !await clientEligible(lead)) return 'client-ineligible';
+  // A cycle that no longer matches this person (moved, converted, phone changed) ends first, with its reason.
+  if (await require('./finalMessageCycle').reconcileCycle(lead._id) === 'pending') return 'already-sent';
+  const [rows, clients] = await Promise.all([FinalMessage.find({ $or: [{ leadId: lead._id }, ...(normalizePhone(lead.phone) ? [{ phone: normalizePhone(lead.phone) }] : [])] }).lean(), clientPhones()]);
   const own = rows.find(row => String(row.leadId) === String(lead._id));
-  const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && ['review', 'queued', 'waiting', 'replied'].includes(row.status));
-  let oldActive = own && !isClientRow(own) && ['review', 'queued', 'waiting', 'replied'].includes(own.status);
-  if (client && oldActive && newEpisode) {
-    const retired = await mongoose.connection.transaction(async session => {
-      const queued = await Queue.findOne({ emailDraftId: own.draftId }).session(session).lean();
-      const draft = await EmailDraft.findById(own.draftId).session(session).lean();
-      if (queued?.status === 'sending' || draft?.status === 'sending' || (draft?.delivery?.lockUntil > new Date())) return false;
-      await Queue.updateMany({ emailDraftId: own.draftId, status: 'pending' }, { $set: { status: 'cancelled', lastError: 'Replaced by an explicit client final-message cycle.', expiresAt: finishedExpiry(new Date()) } }, { session });
-      await EmailDraft.updateOne({ _id: own.draftId, status: { $in: ['staged', 'pending', 'failed'] } }, { $set: { status: 'skipped' } }, { session });
-      const changed = await FinalMessage.updateOne({ _id: own._id, draftId: own.draftId, status: own.status }, { $set: { status: 'stopped' } }, { session });
-      return Boolean(changed.modifiedCount);
-    });
-    if (!retired) return 'in-review';
-    own.status = 'stopped';
-    oldActive = false;
-  }
-  const resolved = isClientRow(own) && (['dead', 'stopped', 'email-only'].includes(own.status) || (own.status === 'replied' && own.decision));
-  const restartingStopped = newEpisode && own?.status === 'stopped' && own.stopSource;
-  const reason = client ? (other || oldActive ? 'already-sent' : isClientRow(own) && own.status === 'review' ? 'in-review' : isClientRow(own) && !CAN_SEND_AGAIN.includes(own.status) && !(newEpisode && resolved) ? 'already-sent' : null) : blockedReason(lead, restartingStopped ? rows.filter(item => String(item._id) !== String(own._id)) : rows, clients);
+  const other = rows.find(row => String(row.leadId) !== String(lead._id) && row.phone === normalizePhone(lead.phone) && isRunning(row));
+  const reason = client
+    ? (other ? 'already-sent' : own?.status === 'review' ? 'in-review' : isRunning(own) ? 'already-sent' : null)
+    : blockedReason(lead, rows, clients, { allowFinished: true });
   if (reason === 'in-review') {
     // Closed without a decision, or the page was left: the same draft opens again.
-    const own = rows.find(row => String(row.leadId) === String(lead._id));
     const draft = await EmailDraft.findById(own.draftId).lean();
     if (client && (!draft || draft.expiresAt <= new Date() || draft.status === 'skipped')) {
       await FinalMessage.updateOne({ _id: own._id, draftId: own.draftId, status: 'review' }, { $set: { status: 'not-sent' } });
-      return prepareForUnlocked(lead, { newEpisode });
+      return prepareForUnlocked(lead);
     }
     return draft && registerReviewDraft(draft) ? 'prepared' : 'in-review';
   }
@@ -148,7 +150,7 @@ async function prepareForUnlocked(lead, { newEpisode = false } = {}) {
   if (!draftId) return 'unavailable';
   const draft = client ? await EmailDraft.findById(draftId).lean() : null;
   const promisedHours = Number.parseInt(draft?.values?.timeLimit, 10) || hours;
-  const old = own && ((client && (!isClientRow(own) || (newEpisode && resolved))) || restartingStopped) ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
+  const old = own && own.status !== 'not-sent' ? Object.fromEntries(Object.entries(own).filter(([key]) => !['_id', '__v', 'episodeHistory'].includes(key))) : null;
   const update = { $set: { phone: normalizePhone(lead.phone), draftId, cycleStartedAt, hours, status: 'review', expiryEnabled: true, ...(client ? { subjectKind: 'client', clientId: lead.convertedToUserId, behaviourRevision: lead.clientBehaviourRevision || 0, episodeId: crypto.randomUUID() } : {}) }, $unset: { sentAt: 1, deadlineAt: 1, expiryQueuedAt: 1, originalMessage: 1, stoppedAt: 1, stopReason: 1, stoppedBy: 1, stopSource: 1, outboundChecks: 1, lastReplyAt: 1, lastReplyText: 1, replySeenAt: 1, lastIgnoredAt: 1, lastIgnoredText: 1, ignoredNotedAt: 1, decision: 1, decidedAt: 1, decidedBy: 1 }, ...(old ? { $push: { episodeHistory: old } } : {}) };
   if (client) update.$set.hours = promisedHours;
   try {
@@ -228,4 +230,4 @@ async function decideReply(id, choice, userId) {
   return { status: chosen.status };
 }
 
-module.exports = { EVENT, DEFAULT_HOURS, MIN_HOURS, MAX_HOURS, CAN_SEND_AGAIN, readHours, readIgnored, saveIgnored, decideReply, pendingLeads, pendingClients, prepareFor, clientEligible, clientAutomationEnabled, isClientRow };
+module.exports = { EVENT, DEFAULT_HOURS, MIN_HOURS, MAX_HOURS, CAN_SEND_AGAIN, readHours, readIgnored, saveIgnored, decideReply, pendingLeads, pendingClients, prepareFor, startBlocker, clientEligible, clientAutomationEnabled, isClientRow };

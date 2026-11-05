@@ -326,7 +326,7 @@ test('the backfill counts first, creates only missing leads, never links, and ca
 });
 
 
-test('matured converted leads accept notes and files but cannot regress their stage', async () => {
+test('matured converted leads accept notes and files; a client status on the line never regresses Matured', async () => {
   const created = await lead('Won', { convertedToUserId: new mongoose.Types.ObjectId(), followUps: [{ note: 'Before conversion', badge: 'Positive' }] });
   const path = `/admin/leads/${created._id}`;
   assert.equal((await send(path, { action: 'followUp', note: 'Client called', badge: 'Won' }, pdf)).status, 200);
@@ -334,7 +334,10 @@ test('matured converted leads accept notes and files but cannot regress their st
   assert.equal(row.status, 'Won');
   assert.equal(row.followUps[1].badge, 'Won');
   assert.ok(row.followUps[1].attachment.driveFileId);
-  assert.equal((await send(path, { action: 'followUp', note: 'Regress', badge: 'Contacted' })).status, 400);
+  assert.equal((await send(path, { action: 'followUp', note: 'Client status', badge: 'Positive' })).status, 200);
+  assert.equal((await read(created._id)).clientBehaviour, 'Positive');
+  assert.equal((await read(created._id)).status, 'Won');
+  assert.equal((await send(path, { action: 'followUp', note: 'Not a client status', badge: 'Wrong' })).status, 400);
   assert.equal((await send(path, { action: 'followUp', note: ' ', badge: 'Won' })).status, 400);
   const followUpId = String(created.followUps[0]._id);
   assert.equal((await send(path, { action: 'editFollowUp', followUpId, note: 'Corrected history', badge: 'Positive' })).status, 200);

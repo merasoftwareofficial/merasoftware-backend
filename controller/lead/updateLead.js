@@ -5,7 +5,10 @@ const userModel = require("../../models/userModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
 const offerTargetModel = require("../../models/offerTargetModel");
-const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES } = require("../../helpers/leadStatuses");
+const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES, CLIENT_BEHAVIOURS, DEFAULT_CLIENT_BEHAVIOUR } = require("../../helpers/leadStatuses");
+const { changeClientStatus } = require("../../helpers/clientStatus");
+const { reconcileCycle } = require("../../helpers/finalMessageCycle");
+const { clientStartReadiness } = require("../../helpers/clientFinalMessageReadiness");
 const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
 const { findAccountsByPhone, findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
@@ -28,6 +31,10 @@ const offerFinalMessage = async (lead, previousStatus) => {
   try { return await prepareFinalMessage(lead); }
   catch (error) { console.error("Lead saved; its final message is unavailable:", error.message); return "unavailable"; }
 };
+
+// Every outcome other than an opened popup is told to the admin in words.
+const noteFor = (outcome) => (outcome && outcome !== "prepared" ? require("./finalMessage").WHY_NOT[outcome] || "" : "");
+const failed = (res, error) => res.status(error.status || 400).json({ message: error.message, finalMessageReadiness: error.finalMessageReadiness, error: true, success: false });
 
 const NOT_FOR_CLIENT = { message: "A client can't be marked Wrong.", error: true, success: false };
 // A client's own request lead, or a number a client holds: this person has already been filtered in.
@@ -59,8 +66,10 @@ const updateLeadController = async (req, res) => {
     const isMatured = Boolean(lead.convertedToUserId) || lead.status === WON;
     const previousStatus = lead.status;
     if (action === "setBehaviour") {
-      const data = await require('../../helpers/clientStatus').changeClientStatus(leadId, req.body.behaviour, req.userId);
-      return res.json({ message: "Current status updated", data, finalMessage: data.finalMessage, finalMessageReadiness: data.finalMessageReadiness, success: true, error: false });
+      try {
+        const data = await changeClientStatus(leadId, req.body.behaviour, req.userId);
+        return res.json({ message: "Current status updated", data, finalMessage: data.finalMessage, finalMessageNote: noteFor(data.finalMessage), success: true, error: false });
+      } catch (error) { return failed(res, error); }
     }
 
     // A client's lead keeps its follow-ups and its contact details editable (editDetails keeps the account in step).
@@ -84,9 +93,15 @@ const updateLeadController = async (req, res) => {
       if (offerSlug && !target) {
         return res.status(404).json({ message: "This person is not in that offer", error: true, success: false });
       }
+      // A client's line carries their current status, chosen the way a lead's stage is (helpers/clientStatus.js).
+      const clientFollowUp = Boolean(lead.convertedToUserId) && !target;
+      const clientBefore = lead.clientBehaviour || DEFAULT_CLIENT_BEHAVIOUR;
       if (target) {
         const allowed = target.stage === WON ? badge === WON : SELECTABLE_OFFER_STAGES.includes(badge);
         if (!allowed) return res.status(400).json({ message: "Please select a valid stage for this offer", error: true, success: false });
+      } else if (clientFollowUp) {
+        // Won comes from a page opened before this form showed the status: a note that keeps the status.
+        if (badge !== WON && !CLIENT_BEHAVIOURS.includes(badge)) return res.status(400).json({ message: "Please select a valid status", error: true, success: false });
       } else {
         if (isMatured && badge !== WON) {
           return res.status(400).json({ message: "Matured stage cannot be changed", error: true, success: false });
@@ -109,6 +124,12 @@ const updateLeadController = async (req, res) => {
           error: true,
           success: false,
         });
+      }
+
+      // Checked before the file uploads: a client entering Negative must be able to get the final message.
+      if (clientFollowUp && badge === NEGATIVE && clientBefore !== NEGATIVE) {
+        const readiness = await clientStartReadiness({ ...lead.toObject(), clientBehaviour: NEGATIVE });
+        if (!readiness.ready) return res.status(409).json({ message: readiness.message, finalMessageReadiness: readiness, error: true, success: false });
       }
 
       // Optional attachment: upload to Google Drive only when a file is present.
@@ -137,6 +158,13 @@ const updateLeadController = async (req, res) => {
         };
       }
 
+      if (clientFollowUp && badge !== WON && badge !== clientBefore) {
+        try {
+          const result = await changeClientStatus(lead._id, badge, req.userId, { note, attachment });
+          return res.json({ message: "Follow-up added", data: await leadModel.findById(lead._id), finalMessage: result.finalMessage, finalMessageNote: noteFor(result.finalMessage), success: true, error: false });
+        } catch (error) { return failed(res, error); }
+      }
+
       lead.followUps.push({
         note,
         badge,
@@ -149,16 +177,19 @@ const updateLeadController = async (req, res) => {
 
       // Merge: the lead's current pipeline stage follows the latest follow-up badge.
       if (target) target.stage = badge;
-      else lead.status = badge;
+      else if (!clientFollowUp) lead.status = badge;
 
       const savedLead = await lead.save();
       if (target) await target.save();
-      const finalMessage = target ? undefined : await offerFinalMessage(savedLead, previousStatus);
+      // Leaving Negative ends a running final message now, with its reason on the timeline.
+      else await reconcileCycle(lead._id, { actor: req.userId });
+      const finalMessage = target || clientFollowUp ? undefined : await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up added",
         data: savedLead,
         finalMessage,
+        finalMessageNote: noteFor(finalMessage),
         success: true,
         error: false,
       });
@@ -227,12 +258,14 @@ const updateLeadController = async (req, res) => {
 
       const savedLead = await lead.save();
       if (target && isLatest) await target.save();
+      if (!followUp.offerSlug) await reconcileCycle(lead._id, { actor: req.userId });
       const finalMessage = followUp.offerSlug ? undefined : await offerFinalMessage(savedLead, previousStatus);
 
       return res.json({
         message: "Follow-up updated",
         data: savedLead,
         finalMessage,
+        finalMessageNote: noteFor(finalMessage),
         success: true,
         error: false,
       });
@@ -373,6 +406,8 @@ const updateLeadController = async (req, res) => {
       } else {
         savedLead = await lead.save();
       }
+      // A new phone number ends a final message that went to the old one.
+      await reconcileCycle(lead._id, { actor: req.userId });
 
       return res.json({
         message: "Lead details updated",

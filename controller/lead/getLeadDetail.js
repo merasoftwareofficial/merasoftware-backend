@@ -4,6 +4,11 @@ const { FinalMessage, Queue } = require("../../whatsapp/src/models.js");
 const { EmailDraft } = require("../../models/emailControlModel");
 const { LABELS, MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
 const { targetsForLead } = require("../../helpers/offerTargets");
+const { State, STATE_ID } = require("../../whatsapp/src/models.js");
+const { NEGATIVE } = require("../../helpers/leadStatuses");
+const { currentStatus, stopOption } = require("../../helpers/finalMessageCycle");
+const { startBlocker } = require("../../helpers/finalMessage");
+const { workerAlive } = require("../../helpers/whatsappReadiness");
 
 const getLeadDetailController = async (req, res) => {
   try {
@@ -32,7 +37,7 @@ const getLeadDetailController = async (req, res) => {
     }
 
     const [finalMessage, blocked, offerTargets, clientAccount] = await Promise.all([
-      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyText replySeenAt decision subjectKind draftId hours stoppedAt stopReason stopSource").lean(),
+      FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyAt lastReplyText replySeenAt decision subjectKind draftId hours stoppedAt stopReason stopSource expiryEnabled expiryQueuedAt originalMessage.id").lean(),
       blockForLead(lead),
       targetsForLead(lead._id),
       lead.convertedToUserId ? userModel.findOne({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }).select("name email phone").lean() : null,
@@ -51,7 +56,22 @@ const getLeadDetailController = async (req, res) => {
       else if (queued || !draft || draft.status === 'skipped' || draft.expiresAt <= new Date()) finalMessage.status = 'not-sent';
       else if (draft.delivery?.channels && !draft.delivery.channels.includes('whatsapp') && draft.delivery.emailStatus === 'sent') finalMessage.status = 'email-only';
     }
+    // What the page may offer comes from here, so a button shows only while it can do its job.
+    if (finalMessage) {
+      finalMessage.stopLabel = await stopOption(finalMessage);
+      if (finalMessage.status === 'waiting') {
+        const state = await State.findById(STATE_ID).select('heartbeatAt connection').lean();
+        finalMessage.listening = workerAlive(state, new Date()) && state.connection === 'connected';
+      }
+      delete finalMessage.originalMessage;
+    }
     lead.finalMessage = finalMessage;
+    lead.finalMessageCanStart = false;
+    if (currentStatus(lead) === NEGATIVE && finalMessage?.status !== 'review') {
+      // An undecided review whose draft has lapsed reads as not sent here before the minute job records it.
+      const blocker = await startBlocker(lead);
+      lead.finalMessageCanStart = !blocker || (blocker === 'in-review' && finalMessage?.status === 'not-sent');
+    }
     lead.contactBlock = blocked ? { reason: blocked, label: LABELS[blocked], message: MESSAGES[blocked] } : null;
     lead.offerTargets = offerTargets;
     lead.clientAvailable = Boolean(clientAccount);

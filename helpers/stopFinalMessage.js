@@ -26,8 +26,8 @@ async function stopCycle(row, { reason, actor, source = 'admin' }) {
     await Queue.updateMany({ $and: [{ $or: [{ status: 'pending' }, { status: 'sending', sendPhase: 'preparing' }] }, { $or: [{ emailDraftId: row.draftId }, { finalMessageExpiryId: row.draftId }] }] },
       { $set: { status: 'cancelled', lastError: `Countdown stopped: ${reason}`, expiresAt: finishedExpiry(at) } }, { session });
     await EmailDraft.updateOne({ _id: row.draftId, status: { $in: ['staged', 'pending', 'failed'] } }, { $set: { status: 'skipped' } }, { session });
-    const lead = await Lead.findById(row.leadId).select('status').session(session).lean();
-    if (lead) await Lead.updateOne({ _id: row.leadId }, { $push: { followUps: { note: `Final message countdown stopped: ${reason}`, badge: lead.status, date: at, createdAt: at, ...(actor ? { createdBy: actor } : {}) } } }, { session });
+    const lead = await Lead.findById(row.leadId).select('status clientBehaviour convertedToUserId').session(session).lean();
+    if (lead) await Lead.updateOne({ _id: row.leadId }, { $push: { followUps: { note: `Final message countdown stopped: ${reason}`, badge: require('./finalMessageCycle').currentStatus(lead), date: at, createdAt: at, ...(actor ? { createdBy: actor } : {}) } } }, { session });
     return { stopped: true, alreadyStopped: false };
   });
 }
