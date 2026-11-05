@@ -7,7 +7,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { requestMiddleware } = require('../helpers/emailController');
 const { EmailDraft, EmailPolicy } = require('../models/emailControlModel');
 const userModel = require('../models/userModel');
@@ -37,7 +37,8 @@ before(async () => {
   process.env.RESEND_API_KEY = 'not-a-real-provider-key';
   process.env.FROM_EMAIL = 'sender@example.test';
   process.env.ADMIN_DASHBOARD_URL = 'https://portal.example.test';
-  db = await MongoMemoryServer.create({ instance: { launchTimeout: 60000 } });
+  // A replica set: the member's lead is linked in a transaction (helpers/personLead.js).
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(db.getUri(), { dbName: 'plan-request-isolated-test' });
   [member, client] = await userModel.create([
     { name: 'Meera Member', email: 'meera@example.test', phone: '+919811111111', roles: ['member'] },
@@ -115,6 +116,15 @@ test('one open lead per phone: a quick repeat changes nothing, a later request i
   await leadModel.updateOne({ _id: lead._id }, { $set: { status: 'Negative' } });
   await visitor();
   assert.equal(await leadModel.countDocuments(), 2);
+});
+
+test('the open lead is found however its number was typed', async () => {
+  const typed = await leadModel.create({ name: 'Ravi', phone: '98765-43210', status: 'Positive' });
+  await leadModel.collection.updateOne({ _id: typed._id }, { $set: { createdAt: new Date(Date.now() - REPEAT_WINDOW_MS - 1000) } });
+  const sent = await visitor();
+  assert.equal(sent.status, 200);
+  assert.equal(await leadModel.countDocuments(), 1, 'no second lead for the same number');
+  assert.equal((await leadModel.findById(typed._id).lean()).followUps.length, 1);
 });
 
 test('a member request uses the account: its own lead, the offer-reservation lead reused, clients refused', async () => {
@@ -200,4 +210,10 @@ test('both mails are Off until an admin turns them On; then they send to the tea
   await visitor();
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(calls.length, 2);
+});
+
+test('first plan request immediately after signup is recorded and the real repeat is suppressed', async () => {
+  const fresh = await leadModel.create({name:member.name,email:member.email,phone:member.phone,source:'Website signup',reservationUserId:member._id});
+  const first=await asMember();assert.equal(first.data.repeated,false);assert.equal((await leadModel.findById(fresh._id)).followUps.length,1);
+  assert.equal((await asMember()).data.repeated,true);assert.equal((await leadModel.findById(fresh._id)).followUps.length,1);
 });

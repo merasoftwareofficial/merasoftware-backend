@@ -19,7 +19,8 @@ const queueSchema = new mongoose.Schema({
   broadcastRecipientId: mongoose.Schema.Types.ObjectId,
   finalMessageExpiryId: mongoose.Schema.Types.ObjectId, // original draft id: one expiry per cycle
   quotedMessage: { id: String, chat: String, text: String },
-  email: { type: String, lowercase: true, trim: true }, // that email's recipient; one row per recipient
+  email: { type: String, lowercase: true, trim: true }, // that email's recipient; one row per recipient and number
+  alt: Boolean, // the copy to that recipient's alternate number (backend helpers/contactNumbers.js)
   // pending → sending → sent | failed; skipped = no usable phone; expired = waited more than a day.
   status: { type: String, enum: QUEUE_STATUSES, default: 'pending' },
   attempts: { type: Number, default: 0 },
@@ -35,9 +36,11 @@ const queueSchema = new mongoose.Schema({
 }, { timestamps: true, collection: 'whatsapp_queue' });
 queueSchema.index({ status: 1, nextAttemptAt: 1, createdAt: 1 });
 queueSchema.index({ broadcastRecipientId: 1 }, { unique: true, partialFilterExpression: { broadcastRecipientId: { $type: 'objectId' } } });
-queueSchema.index({ finalMessageExpiryId: 1 }, { unique: true, partialFilterExpression: { finalMessageExpiryId: { $type: 'objectId' } } });
-// An email retried or reviewed twice still gives each recipient one WhatsApp.
-queueSchema.index({ emailDraftId: 1, email: 1 }, { unique: true, partialFilterExpression: { emailDraftId: { $exists: true } } });
+// One closure message per cycle and number (a cycle may reach the main and the alternate number).
+queueSchema.index({ finalMessageExpiryId: 1, to: 1 }, { unique: true, partialFilterExpression: { finalMessageExpiryId: { $type: 'objectId' } } });
+// An email retried or reviewed twice still gives each recipient's number one WhatsApp: the main and the alternate
+// number are separate rows. Live databases move to this index with backend scripts/migrateQueueDraftIndex.js.
+queueSchema.index({ emailDraftId: 1, email: 1, to: 1 }, { unique: true, partialFilterExpression: { emailDraftId: { $exists: true } } });
 
 const stateSchema = new mongoose.Schema({
   _id: String,
@@ -124,7 +127,11 @@ const finalMessageSchema = new mongoose.Schema({
   behaviourRevision: Number,
   episodeId: String,
   episodeHistory: { type: [mongoose.Schema.Types.Mixed], default: [] },
-  phone: { type: String, default: null, index: true }, // digits with country code; replies from it are noted below
+  phone: { type: String, default: null, index: true }, // the main number, digits with country code; replies from it are noted below
+  // The alternate number this cycle also goes to (backend helpers/finalMessageCopies.js), chosen when it is prepared.
+  altPhone: { type: String, default: null, index: true },
+  // Every copy of the first message that went: replies from, closure to and echoes of each are matched per number.
+  sends: { type: [{ _id: false, phone: String, id: String, chat: String, text: String, sentAt: Date }], default: undefined },
   draftId: mongoose.Schema.Types.ObjectId, // the reviewed message; its queue row has this as emailDraftId
   hours: Number, // the wait this message promised, whatever the setting becomes later
   status: { type: String, enum: FINAL_MESSAGE_STATUSES, default: 'review' },

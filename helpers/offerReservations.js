@@ -6,7 +6,7 @@ const Transaction = require('../models/transactionModel');
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { calculateBenefit, fail } = require('./salesPackages');
 const { parsePhone } = require('./phoneNumber');
-const { claimInquiryLead } = require('./leadPhone');
+const { linkPersonLead } = require('./personLead');
 const HOUR = 60 * 60 * 1000;
 const safeSlug = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
 // The existing payment state for a submitted project payment awaiting admin approval.
@@ -96,7 +96,9 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
   const periodEndsAt = offer ? new Date(offer.endsAt) : null;
   if (previous && (!periodEndsAt || periodEndsAt <= new Date(previous.periodEndsAt))) return { reservation: reservationView(previous), reused: true, serverNow: new Date() };
   const price = offer ? calculateBenefit(Number(offer.mainPrice), offer).finalPrice : null;
-  return mongoose.connection.transaction(async session => {
+  let relinkedLeadId = null; // a lead whose main phone the link changed: its final message cycle is checked after the commit
+  const result = await mongoose.connection.transaction(async session => {
+    relinkedLeadId = null;
     const user = await activeOwner(userId, session);
     // Serialize concurrent offers for one owner, so two requests cannot create two leads.
     await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
@@ -116,16 +118,19 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     if (!user.roles.includes('customer') && user.roles.includes('member')) {
       lead = await Lead.findOne({ reservationUserId: userId }).session(session);
       if (lead?.deletedAt || lead?.convertedToUserId) fail('The linked lead needs team review before another reservation', 409);
-      if (!lead) lead = await claimInquiryLead(user.phone, { name: user.name || user.email, email: user.email, reservationUserId: userId }, { session });
-      if (!lead) [lead] = await Lead.create([{ name: user.name || user.email, email: user.email, phone: user.phone,
-        source: 'Offer reservation', reservationUserId: userId }], { session });
-      else if (!lead.phone) { lead.phone = user.phone; await lead.save({ session }); }
+      // The member's one lead (helpers/personLead.js): linked, else theirs by phone or email, else a new one.
+      const linked = await linkPersonLead(user, { session, source: 'Offer reservation' });
+      lead = linked.lead;
+      if (linked.phoneChanged) relinkedLeadId = lead._id;
+      if (!lead.phone) { lead.phone = user.phone; await lead.save({ session }); }
     }
     const [row] = await Reservation.create([{ userId, offerSlug, periodEndsAt, offerSnapshot: offer,
       regularPrice: Number(offer.mainPrice), reservedPrice: price, reservedAt: now,
       expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending' }], { session });
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
+  if (relinkedLeadId) await require('./finalMessageCycle').reconcileCycle(relinkedLeadId).catch(error => console.error('[reservation] final message check after relink:', error.message));
+  return result;
 }
 // Called inside the existing project-creation transaction, never as a second commit.
 // reservationId: the customer's saved reservation the admin explicitly selected, if any.

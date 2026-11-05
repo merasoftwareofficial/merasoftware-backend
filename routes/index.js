@@ -32,6 +32,7 @@ const userSignInController = require("../controller/user/userSignIn")
 const userRoleSwitchController = require("../controller/user/userRoleSwitch")
 const userDetailsController = require('../controller/user/userDetails')
 const addRoleToUserController = require('../controller/user/addRoleToUser')
+const adminCreateAccountController = require('../controller/user/adminCreateAccount')
 const authToken = require('../middleware/authToken')
 router.use('/offer-reservations', authToken, require('./offerReservations'));
 // Website plan page "Get this plan" for a non-client: a signed-in member here, a visitor through the
@@ -281,6 +282,7 @@ router.post("/update-partner-customer/:customerId", authToken, updatePartnerCust
 
 // Add role to user
 router.post("/addRole", authToken, addRoleToUserController)
+router.post("/admin/create-account", authToken, adminCreateAccountController)
 router.post("/user-request-update", authToken, upload.any(), submitUpdateRequest)
 router.get('/upload-progress/:uploadId', authToken, require('../controller/user/getUploadProgress'));
 router.get("/get-update-requests", authToken, getUserUpdateRequests)

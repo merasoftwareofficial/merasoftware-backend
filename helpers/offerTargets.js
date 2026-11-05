@@ -6,7 +6,7 @@ const { CLIENT_BEHAVIOURS, CONTACTED, DEFAULT_CLIENT_BEHAVIOUR, SELECTABLE_OFFER
 const { LABELS, MESSAGES, contactBlocks, reasonFor } = require('./leadContactBlock');
 const { phoneKey } = require('./leadPhone');
 const { findLiveWebsiteOffer } = require('./websiteOffers');
-const { ensureWonLead, isClient } = require('./wonLead');
+const { CLIENT_LEAD_ORDER, ensureWonLead, isClient } = require('./wonLead');
 
 // Who is in which offer. One person keeps one lead: this file only adds a row per offer and lines on that lead's
 // timeline. It never sends anything and never changes the lead's own status. Only the admin moves a person.
@@ -26,12 +26,14 @@ async function people(slug) {
   requireSlug(slug);
   const [clients, leads, targets, blocks] = await Promise.all([
     liveClients(),
-    Lead.find({ deletedAt: null, requestedByUserId: null, convertedToUserId: { $ne: null } }).select('convertedToUserId clientBehaviour').lean(),
+    Lead.find({ deletedAt: null, requestedByUserId: null, convertedToUserId: { $ne: null } }).sort(CLIENT_LEAD_ORDER).select('convertedToUserId clientBehaviour').lean(),
     Target.find({ offerSlug: slug }).select('leadId').lean(),
     contactBlocks(),
   ]);
   const inOffer = new Set(targets.map(row => String(row.leadId)));
-  const wonByUser = new Map(leads.map(lead => [String(lead.convertedToUserId), lead]));
+  // Each client's own lead, picked as clientLeadFor picks it (the first in CLIENT_LEAD_ORDER).
+  const wonByUser = new Map();
+  for (const lead of leads) if (!wonByUser.has(String(lead.convertedToUserId))) wonByUser.set(String(lead.convertedToUserId), lead);
   const clientPhones = new Set(clients.map(user => phoneKey(user.phone)).filter(Boolean));
   const clientEmails = new Set(clients.map(user => emailKey(user.email)).filter(Boolean));
   const rows = clients.map((user) => {

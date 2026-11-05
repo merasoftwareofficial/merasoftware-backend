@@ -25,7 +25,7 @@ const updateLead = require('../controller/lead/updateLead');
 const uploadProposal = require('../controller/lead/uploadProposal');
 const sendProposalWhatsapp = require('../controller/lead/sendProposalWhatsapp');
 const addRoleToUser = require('../controller/user/addRoleToUser');
-const { ensureWonLead } = require('../helpers/wonLead');
+const { ensureWonLead, clientLeadFor, findOpenLeadFor } = require('../helpers/wonLead');
 const { backfillWonLeads } = require('../scripts/backfillWonLeads');
 
 const nativeFetch = global.fetch;
@@ -292,6 +292,29 @@ test('a new client gets a Won lead: a new one, or their own open lead', async ()
   assert.equal(await ensureWonLead(member), null);
   const guest = await userModel.create({ name: 'Guest', email: 'guest@example.test', roles: ['customer'], isGuest: true });
   assert.equal(await ensureWonLead(guest), null);
+});
+
+test("a client's lead is picked one way: a live one before a trashed one, the oldest first", async () => {
+  const client = await userModel.create({ name: 'Client', email: 'client@example.test', phone: '9000000004', roles: ['customer'] });
+  const trashed = await lead('Won', { convertedToUserId: client._id, deletedAt: new Date() });
+  const oldest = await lead('Won', { convertedToUserId: client._id });
+  await lead('Won', { convertedToUserId: client._id });
+  assert.equal(String((await clientLeadFor(client._id))._id), String(oldest._id));
+  assert.equal(String((await clientLeadFor(client._id, { includeTrashed: true }))._id), String(oldest._id), 'an older trashed lead does not win');
+  assert.equal(String((await ensureWonLead(client))._id), String(oldest._id), 'messages and offers use the same lead as the page');
+  await leadModel.updateMany({ convertedToUserId: client._id }, { $set: { deletedAt: new Date() } });
+  assert.equal(await clientLeadFor(client._id), null);
+  assert.equal(String((await clientLeadFor(client._id, { includeTrashed: true }))._id), String(trashed._id));
+  assert.equal(await leadModel.countDocuments({ convertedToUserId: client._id }), 3, 'a trashed lead is not replaced by a new one');
+});
+
+test("a person's open lead is found by phone first, by email only when no number matches", async () => {
+  const byEmail = await lead('Positive', { phone: '9111111111', email: 'person@example.test' });
+  const byPhone = await lead('Contacted', { phone: '+91 91111 22222' });
+  await leadModel.updateOne({ _id: byEmail._id }, { $set: { notes: 'touched last' } });
+  assert.equal(String((await findOpenLeadFor({ email: 'person@example.test', phone: '9111122222' }))._id), String(byPhone._id));
+  assert.equal(String((await findOpenLeadFor({ email: 'Person@Example.test', phone: '9222222222' }))._id), String(byEmail._id));
+  assert.equal(await findOpenLeadFor({ email: 'nobody@example.test' }), null);
 });
 
 test('granting the customer role adds the Won lead; other roles do not', async () => {

@@ -51,7 +51,7 @@ const draftSchema = new Schema({
   delivery: {
     channels: { type: [String], default: undefined },
     subject: String, text: String,
-    recipients: [{ _id: false, email: String, phone: String }],
+    recipients: [{ _id: false, email: String, phone: String, alt: Boolean }], // alt: that recipient's alternate number
     emailStatus: String, whatsappStatus: String, failure: String,
     lockOwner: String, lockUntil: Date, lockedAt: Date,
   },

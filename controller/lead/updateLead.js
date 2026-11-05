@@ -13,6 +13,7 @@ const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
 const { findAccountsByPhone, findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
 const { hasConfirmedName } = require("../../helpers/leadName");
+const { memberOnPhone } = require("../../helpers/personLead");
 
 // Path to the Google Drive credentials file (same resolution as uploadProposal.js).
 let KEY_FILE_PATH;
@@ -380,6 +381,13 @@ const updateLeadController = async (req, res) => {
             success: false,
           });
         }
+      }
+
+      // One main phone = one person: a new number that is a website member's makes this their lead (never another's).
+      if (!clientId && !lead.reservationUserId && phoneChanged) {
+        const { member, conflict } = await memberOnPhone(cleanPhone, { exceptLeadId: lead._id });
+        if (conflict) return res.status(409).json({ message: conflict, error: true, success: false });
+        if (member) lead.reservationUserId = member._id;
       }
 
       // Owner rule: an Inquiry becomes a real lead the moment it gets a name.

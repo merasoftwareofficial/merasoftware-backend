@@ -284,7 +284,12 @@ router.post('/lead-preview', handle(async (req, res) => {
   const draft = { to: req.body.email ? [String(req.body.email)] : [], whatsappTo: require('../helpers/whatsappQueue').normalizePhone(req.body.phone), subject: mail.subject, text: mail.text,
     event: 'lead.created', sourceTemplateId: mail.sourceTemplateId, values: { name }, blocks: {} };
   const channels = await availability(draft);
-  res.json({ success: true, data: { ...draft, ...reviewWithDoc(draft.event, mail.text, draft.values, {}),
+  // The unsaved lead's alternate number gets the copy too once it is saved (helpers/contactNumbers.js), so the popup shows it.
+  const { altSendingEnabled, usableAlt } = require('../helpers/contactNumbers');
+  const alt = draft.whatsappTo && altSendingEnabled() ? usableAlt(req.body.altPhone, draft.whatsappTo) : null;
+  const { contactBlocks, numberBlock } = require('../helpers/leadContactBlock');
+  const whatsappNumbers = draft.whatsappTo ? [{ phone: draft.whatsappTo, alt: false }, ...(alt && !numberBlock(alt, await contactBlocks()) ? [{ phone: alt, alt: true }] : [])] : [];
+  res.json({ success: true, data: { ...draft, whatsappNumbers, ...reviewWithDoc(draft.event, mail.text, draft.values, {}),
     ...await editableReview(draft), templateOptions: await templateOptions(draft.event), channelOptions: channels.choices, defaultChannel: channels.defaultChannel } });
 }));
 // Unsaved Add Lead and the existing phone-only proposal popup share original-template selection.

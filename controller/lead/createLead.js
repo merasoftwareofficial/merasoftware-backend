@@ -4,6 +4,7 @@ const AdminSettings = require("../../models/adminSettingsModel");
 const { creditWalletInstant } = require("../../helpers/transactionService");
 const { findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
 const { isAccountEmail } = require("../../helpers/emailValidator");
+const { memberOnPhone } = require("../../helpers/personLead");
 
 const createLeadController = async (req, res) => {
   try {
@@ -89,7 +90,12 @@ const createLeadController = async (req, res) => {
       }
     }
 
+    // One main phone = one person: a website member on this number gets this lead as their one lead.
+    const { member, conflict } = await memberOnPhone(cleanPhone);
+    if (conflict) return res.status(409).json({ message: conflict, error: true, success: false });
+
     const lead = new leadModel({
+      ...(member ? { reservationUserId: member._id } : {}),
       name: cleanName,
       businessName: cleanBusinessName,
       phone: cleanPhone,
@@ -149,7 +155,7 @@ const createLeadController = async (req, res) => {
         const original = req.body.emailReview.templateId && req.body.emailReview.templateId !== 'current' ? await resolveTemplate('lead.created', req.body.emailReview.templateId) : null;
         req.body.emailReview = { ...req.body.emailReview, text, subject };
         await queueMail('lead.created', {
-          to: cleanEmail ? [cleanEmail] : [], phone: cleanPhone, subject, text, reviewed: true, sourceTemplateId: original?._id,
+          to: cleanEmail ? [cleanEmail] : [], phone: cleanPhone, leadId: savedLead._id, subject, text, reviewed: true, sourceTemplateId: original?._id,
         }, { name: cleanName });
       } catch (mailError) {
         console.error('Lead saved; email draft unavailable:', mailError.message);

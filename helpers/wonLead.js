@@ -1,6 +1,6 @@
 const leadModel = require("../models/leadModel");
 const { WON, behaviourFromStatus } = require("./leadStatuses");
-const { normalizePhone } = require("./whatsappQueue");
+const { findLeadsByPhone } = require("./leadPhone");
 const { hasConfirmedName } = require("./leadName");
 
 // Every client has a Won lead, so a campaign to Won leads reaches all of them.
@@ -9,14 +9,31 @@ const SOURCE = "Client account";
 
 const isClient = (user) => Boolean(user) && !user.isGuest && !user.deletedAt && (user.roles || []).includes("customer");
 
-/** The open lead that is this person, matched by email or phone. A client's own project requests are not. */
+/**
+ * The open lead that is this person: the lead their website account already owns, else by phone first (the phone
+ * is the person), else by email. A client's own project requests are not, nor a lead another account owns.
+ */
 async function findOpenLeadFor(user) {
+  const open = { deletedAt: null, convertedToUserId: null, requestedByUserId: null };
+  if (user._id) {
+    const linked = await leadModel.findOne({ ...open, reservationUserId: user._id });
+    if (linked) return linked;
+    open.reservationUserId = { $in: [null, user._id] };
+  }
+  const [byPhone] = await findLeadsByPhone(user.phone, open);
+  if (byPhone) return byPhone;
   const email = String(user.email || "").trim().toLowerCase();
-  const phone = normalizePhone(user.phone);
-  const leads = await leadModel
-    .find({ deletedAt: null, convertedToUserId: null, requestedByUserId: null })
-    .sort({ updatedAt: -1 });
-  return leads.find((lead) => (email && lead.email === email) || (phone && normalizePhone(lead.phone) === phone)) || null;
+  return email ? leadModel.findOne({ ...open, email }).sort({ updatedAt: -1 }) : null;
+}
+
+// A client's lead is the oldest one converted to them, a live one before a trashed one.
+// Every reader picks it this way, so the page, the messages and the offers all use the same lead.
+const CLIENT_LEAD_ORDER = { deletedAt: 1, createdAt: 1, _id: 1 };
+
+/** This client's lead (a query: add .lean() where a plain object is enough). Trashed ones only when asked. */
+function clientLeadFor(userId, { includeTrashed = false, select } = {}) {
+  const query = leadModel.findOne({ convertedToUserId: userId, ...(includeTrashed ? {} : { deletedAt: null }) }).sort(CLIENT_LEAD_ORDER);
+  return select ? query.select(select) : query;
 }
 
 const createWonLead = (user, createdBy) => leadModel.create({
@@ -32,7 +49,8 @@ const createWonLead = (user, createdBy) => leadModel.create({
 /** Makes sure this client has a Won lead: the existing one, their open lead, or a new one. */
 async function ensureWonLead(user, createdBy) {
   if (!isClient(user)) return null;
-  const existing = await leadModel.findOne({ convertedToUserId: user._id });
+  // A trashed one counts too: the client already has a lead, it only needs restoring.
+  const existing = await clientLeadFor(user._id, { includeTrashed: true });
   if (existing) return existing;
   const open = await findOpenLeadFor(user);
   if (!open) return createWonLead(user, createdBy);
@@ -59,11 +77,11 @@ async function syncClientLeads(user, { session } = {}) {
   await leadModel.updateMany({ convertedToUserId: user._id }, { $set: changes }, { session });
 }
 
-/** Business name and alternate number for these clients, from each one's lead (the oldest, as the Client Workspace picks it). */
+/** Business name and alternate number for these clients, from each one's lead (picked as clientLeadFor picks it). */
 async function clientLeadExtras(userIds) {
   const leads = await leadModel
     .find({ convertedToUserId: { $in: userIds }, deletedAt: null })
-    .sort({ createdAt: 1, _id: 1 })
+    .sort(CLIENT_LEAD_ORDER)
     .select("convertedToUserId businessName altPhone")
     .lean();
   const extras = new Map();
@@ -74,4 +92,4 @@ async function clientLeadExtras(userIds) {
   return extras;
 }
 
-module.exports = { SOURCE, isClient, findOpenLeadFor, createWonLead, ensureWonLead, syncClientLeads, clientLeadExtras };
+module.exports = { SOURCE, CLIENT_LEAD_ORDER, isClient, findOpenLeadFor, clientLeadFor, createWonLead, ensureWonLead, syncClientLeads, clientLeadExtras };

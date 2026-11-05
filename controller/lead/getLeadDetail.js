@@ -44,16 +44,18 @@ const getLeadDetailController = async (req, res) => {
     ]);
     // Present the latest delivery result without waiting for the minute job or changing tracking.
     if (finalMessage && ['review', 'queued'].includes(finalMessage.status)) {
-      const [queued, draft] = await Promise.all([
-        Queue.findOne({ emailDraftId: finalMessage.draftId }).select('status sentAt').lean(),
+      // Every copy (main and alternate number) counts, as the minute job follows them (helpers/finalMessageCopies.js).
+      const [copies, draft] = await Promise.all([
+        require("../../helpers/finalMessageCopies").originalCopies(finalMessage.draftId),
         EmailDraft.findById(finalMessage.draftId).select('status expiresAt delivery.channels delivery.emailStatus').lean(),
       ]);
-      if (queued?.status === 'sent' && queued.sentAt) {
+      const state = require("../../helpers/finalMessageCopies").copiesState(copies);
+      if (state?.status === 'waiting' && state.first.sentAt) {
         finalMessage.status = 'waiting';
-        finalMessage.sentAt = queued.sentAt;
-        finalMessage.deadlineAt = new Date(queued.sentAt.getTime() + finalMessage.hours * 3600000);
-      } else if (['pending', 'sending'].includes(queued?.status)) finalMessage.status = 'queued';
-      else if (queued || !draft || draft.status === 'skipped' || draft.expiresAt <= new Date()) finalMessage.status = 'not-sent';
+        finalMessage.sentAt = state.first.sentAt;
+        finalMessage.deadlineAt = new Date(state.first.sentAt.getTime() + finalMessage.hours * 3600000);
+      } else if (state?.status === 'queued') finalMessage.status = 'queued';
+      else if (state || !draft || draft.status === 'skipped' || draft.expiresAt <= new Date()) finalMessage.status = 'not-sent';
       else if (draft.delivery?.channels && !draft.delivery.channels.includes('whatsapp') && draft.delivery.emailStatus === 'sent') finalMessage.status = 'email-only';
     }
     // What the page may offer comes from here, so a button shows only while it can do its job.

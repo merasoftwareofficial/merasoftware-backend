@@ -1,4 +1,4 @@
-const leadModel = require("../../models/leadModel");
+const { clientLeadFor } = require("../../helpers/wonLead");
 const mongoose = require("mongoose");
 const userModel = require("../../models/userModel");
 const orderModel = require("../../models/orderProductModel");
@@ -53,7 +53,7 @@ const getAdminUserWorkspace = async (req, res) => {
       });
     }
 
-    const linkedLead = await leadModel.findOne({ convertedToUserId: customerObjectId, deletedAt: null }).sort({ createdAt: 1, _id: 1 }).select("_id clientBehaviour businessName altPhone").lean();
+    const linkedLead = await clientLeadFor(customerObjectId, { select: "_id clientBehaviour businessName altPhone" }).lean();
     customer.leadId = linkedLead?._id || null;
     customer.businessName = linkedLead?.businessName || "";
     customer.altPhone = linkedLead?.altPhone || "";

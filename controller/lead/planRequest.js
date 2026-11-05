@@ -7,7 +7,8 @@ const { requireIntegration } = require("../../helpers/integrationAuth");
 const { parsePhone } = require("../../helpers/phoneNumber");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
 const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
-const { claimInquiryLead, leadForNewRequest } = require("../../helpers/leadPhone");
+const { claimInquiryLead, findLeadsByPhone, leadForNewRequest } = require("../../helpers/leadPhone");
+const { linkPersonLead } = require("../../helpers/personLead");
 
 // Website plan page (merasoftware/src/app/plans/[plan]) → "Get this plan" by someone who is not a
 // portal client. Clients buy in the portal; everyone else asks, and the team calls them back.
@@ -68,9 +69,10 @@ const noteFor = ({ plan, quote, contact, account }) => {
   ].join("\n");
 };
 
-// Last time this lead got a plan request (its creation, or a plan-request follow-up).
+// Last time this lead got a plan request: its creation when a plan request made it, or a plan-request follow-up.
+// A lead made another way (a signup a minute ago) has had no request yet, so its first one is never a repeat.
 const lastRequestAt = (lead) => Math.max(
-  new Date(lead.createdAt).getTime(),
+  lead.source === SOURCE ? new Date(lead.createdAt).getTime() : 0,
   ...(lead.followUps || []).filter((item) => String(item.note || "").startsWith(NOTE_TITLE)).map((item) => new Date(item.createdAt).getTime()),
 );
 
@@ -134,29 +136,11 @@ const memberPlanRequest = respond(async (req) => {
   const contact = { name: user.name || user.email, email: user.email, phone: user.phone };
   const note = noteFor({ plan, quote, contact, account: `${user.email} (${user._id})` });
 
-  let lead = await leadModel.findOne({ reservationUserId: user._id });
-  if (lead?.deletedAt || lead?.convertedToUserId) fail("Your earlier request is with our team. Please contact us directly.", 409);
-  let created = false;
-  const returning = await addToReturning({ contact, note, createdBy: user._id });
-  if (returning) {
-    await notify({ lead: returning, plan, quote, contact });
-    return { created: false, repeated: false };
-  }
-  if (!lead) {
-    const inquiry = await addToInquiry({ contact, note, createdBy: user._id, reservationUserId: user._id });
-    if (inquiry) {
-      await notify({ lead: inquiry, plan, quote, contact });
-      return { created: false, repeated: false };
-    }
-    try {
-      lead = await leadModel.create({ name: contact.name, email: contact.email, phone: contact.phone, source: SOURCE, notes: note, reservationUserId: user._id, createdBy: user._id });
-      created = true;
-    } catch (error) {
-      // Two requests at once: the unique reservationUserId index lets one create win.
-      if (error.code !== 11000) throw error;
-      lead = await leadModel.findOne({ reservationUserId: user._id });
-    }
-  }
+  const linked = await leadModel.findOne({ reservationUserId: user._id });
+  if (linked?.deletedAt || linked?.convertedToUserId) fail("Your earlier request is with our team. Please contact us directly.", 409);
+  // The member's one lead (helpers/personLead.js): their linked lead, else their lead by phone or email, else a new one.
+  // It also brings a Dead or Inquiry lead back to Contacted, as a new request should.
+  const { lead, created } = await linkPersonLead(user, { source: SOURCE, fields: { notes: note, createdBy: user._id } });
   const repeated = created ? false : await addToLead(lead, note, user._id);
   if (!repeated) await notify({ lead, plan, quote, contact });
   return { created, repeated };
@@ -187,9 +171,7 @@ const integrationPlanRequest = respond(async (req) => {
     await notify({ lead: returning, plan, quote, contact });
     return { created: false, repeated: false };
   }
-  const open = await leadModel
-    .findOne({ phone, deletedAt: null, convertedToUserId: null, status: { $in: OPEN_LEAD_STATUSES } })
-    .sort({ updatedAt: -1 });
+  const [open] = await findLeadsByPhone(phone, { deletedAt: null, convertedToUserId: null, status: { $in: OPEN_LEAD_STATUSES } });
   if (open) {
     const repeated = await addToLead(open, note);
     if (!repeated) await notify({ lead: open, plan, quote, contact });

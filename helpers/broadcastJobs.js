@@ -95,7 +95,8 @@ async function dispatch({ now = new Date() } = {}) {
     // Store exactly what this recipient will get before enqueue, so a crash uses the same text.
     await Recipient.updateOne({ _id: recipient._id, state: { $in: ['waiting', 'releasing'] } }, { $set: { state: 'releasing', queueText: text } });
     try {
-      await enqueueWhatsApp({ _id: recipient._id, broadcastRecipientId: recipient._id, to: recipient.phone, text, event: 'broadcast.manual', application: 'website' });
+      await enqueueWhatsApp({ _id: recipient._id, broadcastRecipientId: recipient._id, to: recipient.phone, text, event: 'broadcast.manual', application: 'website',
+        ...(require('./whatsappQueue').normalizePhone(lead.phone) !== recipient.phone ? { alt: true } : {}) });
     } catch (error) { if (error.code !== 11000) throw error; }
     // Recover the actual outcome if the worker claimed it immediately.
     const queued = await Queue.findById(recipient._id).lean();

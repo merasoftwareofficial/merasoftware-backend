@@ -756,3 +756,13 @@ test('Broadcast: a person who leaves the Inquiry group gets nothing more', async
   assert.equal((await Queue.findOne().lean()).status, 'cancelled');
   delete process.env.BROADCAST_JOBS_ENABLED;
 });
+
+test('an alt-number ad message reuses the client lead and clears Dead without changing Won', async () => {
+  await setSwitches();
+  const user=await userModel.create({name:'Alt Client',email:'alt-client@example.test',phone:'9876543210',roles:['customer']});
+  const lead=await Lead.create({name:'Alt Client',phone:'9876543210',altPhone:'9811111111',status:'Won',clientBehaviour:'Dead',convertedToUserId:user._id});
+  await Inbox.create(row({phone:'919811111111'}));await processInbox();
+  const saved=await Lead.findById(lead._id);assert.equal(saved.status,'Won');assert.equal(saved.clientBehaviour,undefined);assert.equal(saved.followUps.length,2);
+  assert.equal(await Lead.countDocuments(),1);assert.equal(String((await Inbox.findOne()).matchedLeadId),String(lead._id));
+  await userModel.deleteOne({_id:user._id});
+});

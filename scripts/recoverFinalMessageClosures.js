@@ -18,6 +18,8 @@ async function evaluate(row, cutoff, session) {
     const ready = await require('../helpers/clientFinalMessageReadiness').clientReadiness({ ...lead, clientBehaviour: lead.clientBehaviour === 'Dead' ? 'Negative' : lead.clientBehaviour }, row);
     if (lead.clientBehaviour !== 'Dead' || !ready.ready) return { reason: ready.code || 'client-state' };
   } else if (lead.status !== 'Dead' || lead.convertedToUserId || lead.requestedByUserId) return { reason: 'lead-state' };
+  // This manifest tool only recovers legacy single-number cycles; dual-number cycles use the normal dispatcher.
+  if (row.altPhone || row.sends?.length) return { reason: 'original-send-unproven' };
   const original = await read(Queue.findOne({ emailDraftId: row.draftId, status: 'sent' }), session);
   if (!original?.messageId || original.to !== row.phone || !original.sentAt || +original.sentAt !== +row.sentAt || (row.originalMessage?.id && row.originalMessage.id !== original.messageId)) return { reason: 'original-send-unproven' };
   const quote = { id: original.messageId, chat: original.messageChat || `${row.phone}@s.whatsapp.net`, text: original.text };
@@ -45,7 +47,9 @@ async function preview(cutoff = new Date()) {
 async function enroll(plan) {
   if (plan.version !== 1 || plan.database !== mongoose.connection.name || plan.host !== mongoose.connection.host) throw new Error('Manifest database mismatch');
   const indexes = await Queue.collection.indexes();
-  if (!indexes.some(i => i.unique && i.key.finalMessageExpiryId === 1 && Object.keys(i.key).length === 1 && i.partialFilterExpression?.finalMessageExpiryId?.$type === 'objectId')) throw new Error('Required unique closure-cycle index is missing');
+  if (!indexes.some(i => i.unique && i.key.finalMessageExpiryId === 1
+    && (Object.keys(i.key).length === 1 || (Object.keys(i.key).length === 2 && i.key.to === 1))
+    && i.partialFilterExpression?.finalMessageExpiryId?.$type === 'objectId')) throw new Error('Required unique closure-cycle index is missing');
   const results = [];
   for (const entry of plan.entries.filter(e => e.reason === 'eligible')) {
     const outcome = await mongoose.connection.transaction(async session => {

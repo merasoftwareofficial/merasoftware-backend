@@ -60,15 +60,26 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
   }
   const text = messageText(draft);
   const source = draft.leadId ? 'manual' : 'automated';
-  const targets = recipients || (draft.to || []).map(email => ({ email }));
+  let targets = recipients;
+  if (!targets) {
+    // An automatic send: each recipient's saved number, then their alternate number (helpers/contactNumbers.js).
+    const main = await Promise.all((draft.to || []).map(async email => {
+      const saved = await savedPhoneFor(email);
+      return { email, phone: normalizePhone(saved), saved };
+    }));
+    targets = await require('./contactNumbers').withAltNumbers(draft, main);
+  }
   const failures = [];
   for (const target of targets) {
     const { email } = target;
     try {
-      const saved = recipients ? target.phone : await savedPhoneFor(email);
+      const saved = recipients ? target.phone : target.alt ? target.phone : target.saved;
+      // A retry may meet a changed saved number: this recipient's main (or alternate) copy is queued once.
+      const sameCopy = { emailDraftId: draft._id, email: email ? String(email).trim().toLowerCase() : null, alt: target.alt ? true : { $ne: true } };
+      if (await Queue.exists(sameCopy)) continue;
       await enqueueWhatsApp({ to: normalizePhone(saved), skipReason: saved ? BAD_PHONE : NO_PHONE,
         emailDraftId: draft._id, email, event: draft.event, application: draft.application, text,
-        source });
+        source, ...(target.alt ? { alt: true } : {}) });
     } catch (error) {
       // 11000: this recipient is already queued. Any other error loses only this recipient's copy.
       if (error.code !== 11000) {

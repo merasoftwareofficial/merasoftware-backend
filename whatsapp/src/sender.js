@@ -6,6 +6,7 @@ import { effectiveSettings, inQuietHours, typingTime } from './settings.js';
 import expiry from '../../helpers/finalMessageExpiry.js';
 import stopFinalMessage from '../../helpers/stopFinalMessage.js';
 import whatsappQueue from '../../helpers/whatsappQueue.js';
+import contacts from '../../helpers/contactNumbers.js';
 
 const INTERRUPTED = 'The service restarted while sending this message, so it may or may not have arrived. Not sent again automatically, to avoid a duplicate.';
 const NOT_ON_WHATSAPP = 'This number is not on WhatsApp.';
@@ -87,7 +88,7 @@ export function createSender({
       await OutgoingAttempt.create({ _id: item.attemptMessageId, queueId: item._id, to: item.to, source,
         cycleDraftId: item.finalMessageExpiryId || (item.event === 'lead.finalMessage' ? item.emailDraftId : undefined), phase: 'preparing' });
       await Queue.updateOne({ _id: item._id, status: 'sending', attemptMessageId: item.attemptMessageId }, { $set: { source } });
-      if (!await expiry.canSend(item)) {
+      if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item)) {
         await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: expiry.CANCELLED, expiresAt: finishedExpiry(now()) } });
         await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'cancelled' } });
         await releaseSlot();
@@ -102,7 +103,7 @@ export function createSender({
           messageId: item.attemptMessageId,
           ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
           beforeSend: async () => {
-            if (!await expiry.canSend(item) || !await stopFinalMessage.claimHandoff(item)) return false;
+            if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await stopFinalMessage.claimHandoff(item)) return false;
             handedOff = true;
             await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'handoff', handedOffAt: now() } });
             return true;

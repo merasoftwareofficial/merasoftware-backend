@@ -1420,3 +1420,73 @@ test('the minute job ends a cycle whose person moved without the change-time che
   assert.equal((await row(id)).status, 'stopped');
   assert.equal((await row(id)).stopReason, 'Status changed to Active');
 }));
+const ALT = '919811111111';
+async function dualWaiting() {
+  process.env.ALT_PHONE_SENDING_ENABLED = 'true';
+  return sentAndWaiting({ altPhone: ALT });
+}
+test('dual final copies share one countdown and closure quotes each original chat', async () => {
+  try {
+    const { id, transport } = await dualWaiting();
+    let saved = await row(id); const deadline = +saved.deadlineAt;
+    assert.equal(saved.phone, PHONE); assert.equal(saved.altPhone, ALT); assert.equal(saved.sends.length, 1);
+    assert.equal(await Queue.countDocuments({emailDraftId:saved.draftId}),2);
+    await sendQueue(transport); await followFinalMessages(); saved=await row(id);
+    assert.equal(saved.sends.length,2); assert.equal(+saved.deadlineAt,deadline); assert.equal(saved.phone,PHONE);
+    await pastDeadline(id);await followFinalMessages();
+    const closures=await Queue.find({finalMessageExpiryId:saved.draftId}).lean();assert.equal(closures.length,2);
+    for(const closure of closures){const original=saved.sends.find(s=>s.phone===closure.to);assert.equal(closure.quotedMessage.id,original.id);assert.equal(closure.quotedMessage.chat,original.chat);}
+  } finally {delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+for(const altSent of [false,true]) test(`reply from alt counts ${altSent?'after':'before'} its final copy sends`,async()=>{
+  try{const {id,transport}=await dualWaiting();if(altSent){await sendQueue(transport);await followFinalMessages();}
+    await incoming({conversation:'Please call me'},new Date(Date.now()+5000),ALT);await followFinalMessages();
+    assert.equal((await row(id)).status,'replied');await pastDeadline(id);await followFinalMessages();assert.equal(await stage(id),'Negative');
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+test('manual message on alt stops the cycle; automatic broadcast on alt does not',async()=>{
+  try{const {id}=await dualWaiting();const {noteOutgoing}=require('../helpers/stopFinalMessage');
+    const automatic=await Queue.create({to:ALT,status:'sent',source:'automated',event:'broadcast.manual',text:'News',messageId:'auto-alt',sentAt:new Date()});
+    await noteOutgoing(ALT,automatic.messageId,new Date());assert.equal((await row(id)).status,'waiting');
+    await noteOutgoing(ALT,'manual-alt',new Date());assert.equal((await row(id)).status,'stopped');
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+test('Stop is refused while the alternate copy is in handoff',async()=>{
+  try{const {id}=await dualWaiting();const saved=await row(id);await Queue.updateOne({emailDraftId:saved.draftId,to:ALT},{$set:{status:'sending',sendPhase:'handoff'}});
+    await assert.rejects(require('../helpers/stopFinalMessage').stopCycle(saved,{reason:'Stop'}),/already being sent/);assert.equal((await row(id)).status,'waiting');
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+for(const failAlt of [false,true]) test(`one delivered copy starts the timer when ${failAlt?'alt':'main'} fails`,async()=>{
+  process.env.ALT_PHONE_SENDING_ENABLED='true';
+  try{const item=await lead({status:'Negative',altPhone:ALT});const prepared=await call(`/admin/leads/${item._id}/final-message`);await decide(prepared.emailDraftIds[0],'send','whatsapp');
+    const saved=await row(item._id);await Queue.updateOne({emailDraftId:saved.draftId,to:failAlt?ALT:PHONE},{$set:{status:'failed'}});await sendQueue(phone());await followFinalMessages();
+    const waiting=await row(item._id);assert.equal(waiting.status,'waiting');assert.equal(waiting.phone,PHONE);assert.equal(waiting.sends[0].phone,failAlt?PHONE:ALT);
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+test('changing alt replaces an unsent copy without resetting countdown; old sent alt remains a reply contact',async()=>{
+  try{const {id,transport}=await dualWaiting();const original=await row(id);const newAlt='919822222222';
+    await Lead.updateOne({_id:id},{$set:{altPhone:newAlt}});await require('../helpers/finalMessageCycle').reconcileCycle(id);
+    const copies=await Queue.find({emailDraftId:original.draftId,status:'pending'}).lean();assert.deepEqual(copies.map(c=>c.to),[newAlt]);
+    await sendQueue(transport);await followFinalMessages();const changed=await row(id);assert.equal(+changed.deadlineAt,+original.deadlineAt);assert.ok(changed.sends.some(s=>s.phone===newAlt));
+    await Lead.updateOne({_id:id},{$set:{altPhone:'919833333333'}});await require('../helpers/finalMessageCycle').reconcileCycle(id);
+    await incoming({conversation:'Call please'},new Date(Date.now()+5000),newAlt);await followFinalMessages();assert.equal((await row(id)).status,'replied');
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+
+test('alt change during typing cancels the old claim before enqueuing its replacement',async()=>{
+  try{const {id}=await dualWaiting();const saved=await row(id);const old=await Queue.findOneAndUpdate({emailDraftId:saved.draftId,to:ALT},{$set:{status:'sending',sendPhase:'preparing',attemptMessageId:'typing-alt'}},{new:true}).lean();
+    await Lead.updateOne({_id:id},{$set:{altPhone:'919822222222'}});await require('../helpers/finalMessageCycle').reconcileCycle(id);
+    assert.equal((await Queue.findById(old._id)).status,'cancelled');assert.equal(await require('../helpers/stopFinalMessage').claimHandoff(old),false);
+    assert.ok(await Queue.exists({emailDraftId:saved.draftId,to:'919822222222',status:'pending'}));
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;}
+});
+
+test('client dual copies keep Won and one timer; alt reply waits for the admin decision',async()=>{
+  process.env.ALT_PHONE_SENDING_ENABLED='true';process.env.CLIENT_FINAL_MESSAGE_ENABLED='true';
+  try{const user=await User.create({name:'Client',email:'client@example.test',phone:'9876543210',roles:['customer']});const item=await lead({status:'Won',convertedToUserId:user._id,altPhone:ALT});
+    const marked=await call(`/admin/leads/${item._id}`,'POST',{action:'setBehaviour',behaviour:'Negative'});await decide(marked.emailDraftIds[0],'send','whatsapp');const transport=phone();
+    await sendQueue(transport);await followFinalMessages();const first=await row(item._id);await sendQueue(transport);await followFinalMessages();const second=await row(item._id);
+    assert.equal(second.sends.length,2);assert.equal(+first.deadlineAt,+second.deadlineAt);assert.equal(await stage(item._id),'Won');
+    await incoming({conversation:'Please call'},new Date(Date.now()+5000),ALT);await followFinalMessages();assert.equal((await row(item._id)).status,'replied');assert.equal((await Lead.findById(item._id)).clientBehaviour,'Negative');
+  }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;delete process.env.CLIENT_FINAL_MESSAGE_ENABLED;}
+});

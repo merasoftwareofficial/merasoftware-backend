@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Lead = require('../models/leadModel');
 const { FinalMessage } = require('../whatsapp/src/models.js');
 const { normalizePhone, enqueueWhatsApp } = require('./whatsappQueue');
+const { laterCopyMayGo } = require('./finalMessageCopies');
 
 const EVENT = 'lead.finalMessageExpired';
 const CANCELLED = 'Not sent: the final message cycle, recipient or reply status changed.';
@@ -25,14 +26,16 @@ async function canSend(item) {
     if (item.event !== 'lead.finalMessage' || !item.emailDraftId) return true;
     const original = await FinalMessage.findOne({ draftId: item.emailDraftId }).lean();
     if (!original) return true; // an ordinary, untracked message using this template
-    if (!['review', 'queued'].includes(original.status)) return false;
+    // The copy to the other number may still go while the countdown runs (helpers/finalMessageCopies.js).
+    if (!['review', 'queued'].includes(original.status) && !laterCopyMayGo(original, item)) return false;
     if (await require('./stopFinalMessage').processOutbound(original) !== 'clear') return false;
     if (original.subjectKind !== 'client') return true;
     const lead = await Lead.findById(original.leadId).lean();
     return (await require('./clientFinalMessageReadiness').clientReadiness(lead, original)).ready;
   }
   const row = await FinalMessage.findOne({ draftId: item.finalMessageExpiryId }).lean();
-  if (!row || row.phone !== item.to || !await eligible(row)) return false;
+  const reached = (row?.sends || []).filter(send => send.id && send.phone);
+  if (!row || !(reached.length ? reached.some(send => send.phone === item.to) : row.phone === item.to) || !await eligible(row)) return false;
   const { EmailPolicy } = require('../models/emailControlModel');
   return (await EmailPolicy.findOne({ event: EVENT }).lean())?.mode !== 'off';
 }
@@ -49,8 +52,13 @@ async function dispatch() {
       const claimed = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: 'dead', expiryQueuedAt: null, 'outboundChecks.0': { $exists: false },
         $or: [{ lastReplyAt: null }, { lastReplyAt: { $lt: row.sentAt } }] }, { $set: { expiryQueuedAt: new Date() } }, { session });
       if (!claimed.modifiedCount) return;
-      await enqueueWhatsApp({ to: row.phone, text: mail.plain, event: EVENT, application: 'portal',
-        finalMessageExpiryId: row.draftId, quotedMessage: row.originalMessage }, { session });
+      // One closure message per number the final message reached, each quoting the copy in its own chat.
+      const reached = (row.sends || []).filter(send => send.id && send.phone);
+      const targets = reached.length ? reached : [{ phone: row.phone, ...row.originalMessage }];
+      for (const target of targets) {
+        await enqueueWhatsApp({ to: target.phone, text: mail.plain, event: EVENT, application: 'portal',
+          finalMessageExpiryId: row.draftId, ...(target.phone !== row.phone ? { alt: true } : {}), quotedMessage: { id: target.id, chat: target.chat, text: target.text } }, { session });
+      }
     });
   }
 }

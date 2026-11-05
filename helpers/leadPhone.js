@@ -17,11 +17,27 @@ async function findLeadsByPhone(phone, filter = {}, { session } = {}) {
   return leads.filter((lead) => phoneKey(lead.phone) === wanted);
 }
 
-/** A number the business already knows: any lead, even one in Trash, or any account. */
+/** Every number this lead can be reached on, as keys: the main phone first, then the alternate. Contact only, never identity. */
+const leadPhoneKeys = (lead) => [...new Set([lead?.phone, lead?.altPhone].map((value) => (value ? phoneKey(value) : "")).filter(Boolean))];
+
+/**
+ * The leads reachable on this number: main-phone matches first, then alternate-number matches, each newest first.
+ * For contact (recognising a message, do-not-disturb). Identity (signup, linking, duplicates) uses findLeadsByPhone.
+ */
+async function findLeadsByContactNumber(phone, filter = {}, { session } = {}) {
+  const wanted = phoneKey(phone);
+  if (!wanted) return [];
+  const withNumber = { $or: [{ phone: { $nin: ["", null] } }, { altPhone: { $nin: ["", null] } }] };
+  const leads = await leadModel.find({ $and: [withNumber, filter] }).sort({ updatedAt: -1 }).session(session || null);
+  const main = leads.filter((lead) => lead.phone && phoneKey(lead.phone) === wanted);
+  return [...main, ...leads.filter((lead) => !main.includes(lead) && lead.altPhone && phoneKey(lead.altPhone) === wanted)];
+}
+
+/** A number the business already knows: any lead (main or alternate number), even one in Trash, or any account. */
 async function isKnownPerson(phone) {
   const wanted = phoneKey(phone);
   if (!wanted) return false;
-  if ((await findLeadsByPhone(phone)).length) return true;
+  if ((await findLeadsByContactNumber(phone)).length) return true;
   const users = await userModel.find({ phone: { $nin: ["", null] } }).select("phone").lean();
   return users.some((user) => phoneKey(user.phone) === wanted);
 }
@@ -46,9 +62,24 @@ async function claimInquiryLead(phone, { name, email, ...fields }, { session } =
 }
 
 /** A lead that came back ends its final message: no Dead later, and no decision waiting on the old reply. A message still in the queue is cancelled by finalMessageJobs.js. */
-async function endFinalMessage(leadId) {
-  await FinalMessage.updateMany({ leadId, status: { $in: ["waiting", "dead"] } }, { $set: { status: "stopped" } });
-  await FinalMessage.updateMany({ leadId, status: "replied", decision: null }, { $set: { decision: "interested", decidedAt: new Date() } });
+async function endFinalMessage(leadId, { session } = {}) {
+  await FinalMessage.updateMany({ leadId, status: { $in: ["waiting", "dead"] } }, { $set: { status: "stopped" } }, { session });
+  await FinalMessage.updateMany({ leadId, status: "replied", decision: null }, { $set: { decision: "interested", decidedAt: new Date() } }, { session });
+}
+
+/** True when this lead is Dead, or Negative with its final message running or its reply waiting: a new request brings it back. */
+async function isReturning(lead, { session } = {}) {
+  if (lead.status === DEAD) return true;
+  if (lead.status !== NEGATIVE) return false;
+  return Boolean(await FinalMessage.exists({ leadId: lead._id, $or: [{ status: { $in: ["review", "queued", "waiting"] } }, { status: "replied", decision: null }] }).session(session || null));
+}
+
+/** Brings one returning lead back to Contacted (see leadForNewRequest). The caller saves it. */
+async function revive(lead, { name, email }, { session } = {}) {
+  await endFinalMessage(lead._id, { session });
+  // A name the person gives replaces one guessed from their WhatsApp profile.
+  const keepName = hasConfirmedName(lead) || !name;
+  lead.set({ status: CONTACTED, name: keepName ? lead.name : name, nameFromWhatsapp: keepName ? lead.nameFromWhatsapp : false, email: lead.email || email || "" });
 }
 
 /**
@@ -62,10 +93,7 @@ async function leadForNewRequest(phone, { name, email }) {
   const waiting = new Set((await FinalMessage.find({ leadId: { $in: leads.map((lead) => lead._id) }, $or: [{ status: { $in: ["review", "queued", "waiting"] } }, { status: "replied", decision: null }] }).select("leadId").lean()).map((row) => String(row.leadId)));
   const returning = leads.filter((lead) => lead.status === DEAD || waiting.has(String(lead._id)));
   for (const lead of returning) {
-    await endFinalMessage(lead._id);
-    // A name the person gives replaces one guessed from their WhatsApp profile.
-    const keepName = hasConfirmedName(lead) || !name;
-    lead.set({ status: CONTACTED, name: keepName ? lead.name : name, nameFromWhatsapp: keepName ? lead.nameFromWhatsapp : false, email: lead.email || email || "" });
+    await revive(lead, { name, email });
     await lead.save();
   }
   return returning[0] || leads.find((lead) => lead.status === WRONG) || null;
@@ -87,4 +115,4 @@ async function clearClientDead(filter, { preserveFinalReply = false } = {}) {
   await FinalMessage.updateMany({ leadId: { $in: eligibleIds }, subjectKind: 'client', status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
 }
 
-module.exports = { phoneKey, findLeadsByPhone, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, leadForNewRequest, clearClientDead };
+module.exports = { phoneKey, leadPhoneKeys, findLeadsByPhone, findLeadsByContactNumber, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, isReturning, revive, leadForNewRequest, clearClientDead };

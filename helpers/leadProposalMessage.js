@@ -19,16 +19,23 @@ const proposalValues = (lead, proposal) => ({
   link: proposal.downloadLink,
 });
 
+/** The lead's numbers for this message: the main one, and the alternate one when it may go there (helpers/contactNumbers.js). */
+async function proposalNumbers(lead, to) {
+  const alt = await require("./contactNumbers").altNumberFor({ event: EVENT, leadId: lead._id }, { mainPhone: to });
+  return alt ? [to, alt] : [to];
+}
+
 /** What the popup shows for a phone-only lead; null when the action is Off or WhatsApp can't reach them. */
 async function whatsappPreview(lead, proposal) {
   const to = normalizePhone(lead.phone);
   if (!to || process.env.ENABLE_WHATSAPP !== "true") return null;
+  const numbers = await proposalNumbers(lead, to);
   const values = proposalValues(lead, proposal);
   const mail = await applyDefault(EVENT, { requiredLinks: [proposal.downloadLink] }, values);
   if (!mail) return null;
   const draft = { to: [], whatsappTo: to, subject: mail.subject, text: mail.text, event: EVENT, values, sourceTemplateId: mail.sourceTemplateId };
   const channels = await require('./reviewDelivery').availability(draft);
-  return { ...draft, channel: "whatsapp", to: [to], ...reviewWithDoc(EVENT, mail.text, values, {}), ...await editableReview(draft),
+  return { ...draft, channel: "whatsapp", to: [to], whatsappNumbers: numbers.map((phone, index) => ({ phone, alt: index > 0 })), ...reviewWithDoc(EVENT, mail.text, values, {}), ...await editableReview(draft),
     templateOptions: await templateOptions(EVENT), channelOptions: channels.choices, defaultChannel: 'whatsapp' };
 }
 
@@ -43,9 +50,15 @@ async function queueProposalWhatsApp(lead, proposal, body) {
   const subject = reviewSubjectFromEditor(EVENT, body, values);
   validateContent(subject, text);
   const plain = compose(render(text, values, {}), {}).text;
-  const id = new (require('mongoose').Types.ObjectId)(require('node:crypto').createHash('sha256').update(`lead-proposal:${lead._id}:${proposal.version}`).digest('hex').slice(0, 24));
-  try { return await enqueueWhatsApp({ _id: id, to, text: messageText({ subject, plain }), event: EVENT, application: "portal" }); }
-  catch (error) { if (error.code !== 11000) throw error; return require('../whatsapp/src/models.js').Queue.findById(id); }
+  // One fixed queue id per number and proposal version: a retry after a partial failure never sends a number twice.
+  const idFor = (alt) => new (require('mongoose').Types.ObjectId)(require('node:crypto').createHash('sha256').update(`lead-proposal:${lead._id}:${proposal.version}${alt ? ':alt' : ''}`).digest('hex').slice(0, 24));
+  const rows = [];
+  for (const [index, number] of (await proposalNumbers(lead, to)).entries()) {
+    const id = idFor(index > 0);
+    try { rows.push(await enqueueWhatsApp({ _id: id, to: number, text: messageText({ subject, plain }), event: EVENT, application: "portal", ...(index > 0 ? { alt: true } : {}) })); }
+    catch (error) { if (error.code !== 11000) throw error; rows.push(await require('../whatsapp/src/models.js').Queue.findById(id)); }
+  }
+  return rows[0];
 }
 
 module.exports = { EVENT, hasEmail, proposalValues, whatsappPreview, queueProposalWhatsApp };

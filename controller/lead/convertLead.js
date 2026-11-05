@@ -12,6 +12,7 @@ const { executeGuestCascadeDelete } = require("../../helpers/guestCascadeDelete"
 const { sendClientAccountCreatedEmail } = require("../../helpers/emailService");
 const { NO_MARKETING_STATUSES, behaviourFromStatus } = require("../../helpers/leadStatuses");
 const { hasConfirmedName } = require("../../helpers/leadName");
+const { findAccountsByPhone } = require("../../helpers/leadPhone");
 
 const convertLeadController = async (req, res) => {
   try {
@@ -136,6 +137,36 @@ const convertLeadController = async (req, res) => {
       }
     }
 
+    // One main phone = one person (merasoftware/src/docs/signup.md §3): an account already on this lead's number
+    // is this person's account. A website member found by phone is upgraded, like one found by email; any other
+    // account on the number is a conflict, never a reason to make a second account. The lead's own guest doesn't count.
+    let matchedByPhone = false;
+    const phoneOwners = (await findAccountsByPhone(cleanPhone)).filter((user) => !user.isGuest
+      && String(user._id) !== String(lead.guestUserId || "") && String(user._id) !== String(existingUser?._id || "")
+      && String(user._id) !== String(lead.reservationUserId || ""));
+    if (phoneOwners.length) {
+      const [owner] = phoneOwners;
+      if (phoneOwners.length > 1 || existingUser || lead.reservationUserId || !isUpgradeableMember(owner)) {
+        return res.status(409).json({
+          message: `This phone number already belongs to another account (${owner.email}). Correct the lead's phone or email before converting.`,
+          error: true,
+          success: false,
+        });
+      }
+      if (!upgradeExisting) {
+        return res.status(409).json({
+          message: `This phone number already has a website account (${owner.email}). Confirm to turn that account into the client account.`,
+          code: "EXISTING_MEMBER",
+          matchedBy: "phone",
+          accountEmail: owner.email,
+          error: true,
+          success: false,
+        });
+      }
+      memberToUpgrade = await userModel.findById(owner._id);
+      matchedByPhone = true;
+    }
+
     // The lead's guest account goes away on convert, whether or not its email
     // still matches the lead's (the lead's email may have been edited since).
     if (lead.guestUserId) {
@@ -168,6 +199,29 @@ const convertLeadController = async (req, res) => {
         await current.save({ session });
         return upgraded;
       });
+    } else if (matchedByPhone) {
+      // A phone-matched upgrade and its lead must commit together, with identity rechecked after confirmation.
+      clientUser = await require('mongoose').connection.transaction(async session => {
+        const current = await leadModel.findById(leadId).session(session);
+        const account = await userModel.findById(memberToUpgrade._id).session(session);
+        const actor = await userModel.findById(req.userId).session(session);
+        const { phoneKey } = require('../../helpers/leadPhone');
+        if (!actor?.roles?.includes('admin') || actor.deletedAt || actor.isActive === false
+          || !current || current.deletedAt || current.convertedToUserId || current.reservationUserId
+          || !isUpgradeableMember(account) || account.isActive === false
+          || phoneKey(account.phone) !== phoneKey(current.phone) || current.phone !== lead.phone || current.email !== lead.email) {
+          throw new Error('Lead or matched account changed. Refresh before converting.');
+        }
+        const own = await leadModel.findOne({ reservationUserId: account._id, _id: { $ne: current._id } }).session(session);
+        if (own) throw new Error('This website account already has a lead. Open that lead instead.');
+        const upgraded = await upgradeMemberToClient(account, { phone: cleanPhone, session });
+        current.clientBehaviour = behaviourFromStatus(current.status);
+        current.convertedToUserId = upgraded._id; current.status = 'Won';
+        if (current.email !== upgraded.email) current.followUps.push({ note: `Converted into the website account ${upgraded.email} (same phone). Earlier email: ${current.email}`, badge: 'Won', date: new Date(), createdAt: new Date(), createdBy: req.userId });
+        current.email = upgraded.email;
+        await current.save({ session });
+        return upgraded;
+      });
     } else {
       clientUser = memberToUpgrade
         ? await upgradeMemberToClient(memberToUpgrade, { phone: cleanPhone })
@@ -175,6 +229,11 @@ const convertLeadController = async (req, res) => {
       lead.clientBehaviour = behaviourFromStatus(lead.status);
       lead.convertedToUserId = clientUser._id;
       lead.status = "Won";
+      // Found by phone: the account's email is the client's login, so the lead takes it and keeps the old one in a note.
+      if (matchedByPhone && clientUser.email !== cleanEmail) {
+        lead.followUps.push({ note: `Converted into the website account ${clientUser.email} (same phone). Earlier email: ${lead.email}`, badge: "Won", date: new Date(), createdAt: new Date(), createdBy: req.userId });
+        lead.email = clientUser.email;
+      }
       await lead.save();
     }
 

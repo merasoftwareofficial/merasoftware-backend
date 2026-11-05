@@ -3,7 +3,7 @@ const userModel = require('../models/userModel');
 const { EmailDraft } = require('../models/emailControlModel');
 const { FinalMessage, Queue } = require('../whatsapp/src/models.js');
 const { DEAD, NEGATIVE, NO_MARKETING_STATUSES, WRONG } = require('./leadStatuses');
-const { phoneKey } = require('./leadPhone');
+const { phoneKey, leadPhoneKeys } = require('./leadPhone');
 
 // The one answer to "may we market to this person?". It goes by phone number, so a second lead with the same
 // number can't get round it. Broadcast, offer targets, Send message and the proposal message ask here. Service
@@ -38,30 +38,32 @@ async function reviewsSent(rows) {
   return { pressed, unlinked: Boolean(unlinked) };
 }
 
-/** Every blocked number: phone key → reason. A client's number is decided by the client's behaviour alone. */
+/**
+ * Every blocked number: phone key → reason. A client's number is decided by the client's behaviour alone.
+ * A blocked lead blocks its alternate number too, so a Dead or Wrong person can't be reached there instead.
+ */
 async function contactBlocks() {
   const blocks = new Map();
   const [clients, deadClients, closed, rows] = await Promise.all([
     userModel.find({ roles: 'customer', deletedAt: null, isGuest: { $ne: true }, phone: { $nin: ['', null] } }).select('phone').lean(),
-    Lead.find({ clientBehaviour: DEAD, convertedToUserId: { $ne: null }, deletedAt: null }).select('phone convertedToUserId').lean(),
+    Lead.find({ clientBehaviour: DEAD, convertedToUserId: { $ne: null }, deletedAt: null }).select('phone altPhone convertedToUserId').lean(),
     // Trashed ones count too. A client's own project request lead doesn't speak for the client.
-    Lead.find({ status: { $in: NO_MARKETING_STATUSES }, requestedByUserId: null, phone: { $nin: ['', null] } }).select('phone status').lean(),
+    Lead.find({ status: { $in: NO_MARKETING_STATUSES }, requestedByUserId: null, $or: [{ phone: { $nin: ['', null] } }, { altPhone: { $nin: ['', null] } }] }).select('phone altPhone status').lean(),
     FinalMessage.find({ $or: [{ status: { $in: ['review', 'queued', 'waiting'] } }, { status: 'replied', decision: null }] }).lean(),
   ]);
   const clientKeys = new Set(clients.map(user => phoneKey(user.phone)).filter(Boolean));
 
   const deadIds = new Set(deadClients.map(lead => String(lead.convertedToUserId)));
-  for (const lead of deadClients) { const key = phoneKey(lead.phone); if (key) blocks.set(key, 'client-dead'); }
+  for (const lead of deadClients) for (const key of leadPhoneKeys(lead)) blocks.set(key, 'client-dead');
   for (const user of clients) if (deadIds.has(String(user._id))) blocks.set(phoneKey(user.phone), 'client-dead');
 
   for (const lead of closed) {
-    const key = phoneKey(lead.phone);
-    if (key && !clientKeys.has(key)) blocks.set(key, lead.status === WRONG ? 'wrong' : 'dead');
+    for (const key of leadPhoneKeys(lead)) if (!clientKeys.has(key)) blocks.set(key, lead.status === WRONG ? 'wrong' : 'dead');
   }
 
   if (!rows.length) return blocks;
   const [leads, sent] = await Promise.all([
-    Lead.find({ _id: { $in: rows.map(row => row.leadId) }, $or: [{ status: NEGATIVE }, { status: 'Won', clientBehaviour: NEGATIVE, convertedToUserId: { $ne: null } }], deletedAt: null }).select('phone status clientBehaviour clientBehaviourRevision convertedToUserId').lean(),
+    Lead.find({ _id: { $in: rows.map(row => row.leadId) }, $or: [{ status: NEGATIVE }, { status: 'Won', clientBehaviour: NEGATIVE, convertedToUserId: { $ne: null } }], deletedAt: null }).select('phone altPhone status clientBehaviour clientBehaviourRevision convertedToUserId').lean(),
     reviewsSent(rows),
   ]);
   const phoneOf = new Map(leads.map(lead => [String(lead._id), lead]));
@@ -71,10 +73,14 @@ async function contactBlocks() {
     const client = row.subjectKind === 'client';
     if (client && (process.env.CLIENT_FINAL_MESSAGE_ENABLED !== 'true' || lead.status !== 'Won' || String(lead.convertedToUserId) !== String(row.clientId) || (lead.clientBehaviourRevision || 0) !== (row.behaviourRevision || 0))) continue;
     if (!client && lead.status !== NEGATIVE) continue;
-    const key = phoneKey(row.phone || lead.phone);
-    if (!key || (!client && clientKeys.has(key)) || blocks.has(key)) continue;
     if (row.status === 'review' && !(row.draftId ? sent.pressed.has(String(row.draftId)) : sent.unlinked)) continue;
-    blocks.set(key, row.status === 'replied' ? 'needs-decision' : 'final-message');
+    // Every number of the cycle (its main, its alternate, any a copy went to) and the lead's own alternate.
+    const numbers = [row.phone || lead.phone, ...require('./finalMessageCopies').cycleNumbers(row), lead.altPhone];
+    const keys = new Set(numbers.map(value => (value ? phoneKey(value) : '')).filter(Boolean));
+    for (const key of keys) {
+      if ((!client && clientKeys.has(key)) || blocks.has(key)) continue;
+      blocks.set(key, row.status === 'replied' ? 'needs-decision' : 'final-message');
+    }
   }
   return blocks;
 }
@@ -88,6 +94,8 @@ function reasonFor(lead, blocks) {
   return lead.status === WRONG ? 'wrong' : 'dead';
 }
 const blockForLead = async lead => reasonFor(lead, await contactBlocks());
+/** One number's reason, or null. A lead's other number is checked on its own: a blocked alternate gets nothing, the main still may. */
+const numberBlock = (phone, blocks) => (phone && blocks.get(phoneKey(phone))) || null;
 
 /** Fails with the reason when this lead may not be messaged. */
 async function assertMayContact(lead) {
@@ -115,4 +123,4 @@ async function assertDraftMayGo(draftId) {
   await assertMayContact({ status: lead?.status, requestedByUserId: lead?.requestedByUserId, phone: draft.whatsappTo || lead?.phone });
 }
 
-module.exports = { MESSAGES, LABELS, contactBlocks, reasonFor, blockForLead, assertMayContact, assertDraftMayGo };
+module.exports = { MESSAGES, LABELS, contactBlocks, reasonFor, numberBlock, blockForLead, assertMayContact, assertDraftMayGo };

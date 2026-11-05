@@ -7,6 +7,7 @@ const { DEAD, NEGATIVE } = require('./leadStatuses');
 const { findLeadsByPhone } = require('./leadPhone');
 const { workerAlive } = require('./whatsappReadiness');
 const { clientEligible, clientAutomationEnabled, isClientRow } = require('./finalMessage');
+const { copiesState, originalCopies, sendOf } = require('./finalMessageCopies');
 
 // Every minute (index.js): follows the reviewed first message, replies and deadlines, then drains
 // the expiry-reply outbox. A lead becomes Dead only here, or by the admin's hand.
@@ -29,27 +30,40 @@ async function endRow(row, status) { await FinalMessage.updateOne(rowGuard(row),
 /** What the admin decided and how far the message got. */
 async function followMessage(row, time) {
   if (row.outboundChecks?.length && await require('./stopFinalMessage').processOutbound(row) !== 'clear') return;
-  const queued = await Queue.findOne({ emailDraftId: row.draftId }).select('status to sentAt messageId messageChat text').lean();
+  // One queue row per number (main, and alternate when the cycle has one): they are followed together.
+  const copies = await originalCopies(row.draftId);
+  const main = copies.find(copy => !copy.alt);
+  const pending = copies.filter(copy => copy.status === 'pending');
+  const cancelPending = async () => {
+    let cancelled = 0;
+    for (const copy of pending) cancelled += (await Queue.updateOne({ _id: copy._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } })).modifiedCount;
+    return cancelled;
+  };
   if (isClientRow(row) && !await clientEligible(await Lead.findById(row.leadId).lean(), row)) {
-    if (queued?.status === 'pending') await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
-    if (queued?.status !== 'sending') await endRow(row, 'stopped');
+    await cancelPending();
+    if (!copies.some(copy => copy.status === 'sending')) await endRow(row, 'stopped');
     return;
   }
-  if (queued) {
-    if (queued.status === 'sent') {
-      const sentAt = queued.sentAt || time;
-      const changed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'waiting', phone: queued.to, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000),
-        originalMessage: { id: queued.messageId, chat: queued.messageChat || `${queued.to}@s.whatsapp.net`, text: queued.text } } });
-      if (changed.modifiedCount) await addNote(row.leadId, `Final message sent. Waiting ${row.hours} hours for a reply.`);
-    } else if (['pending', 'sending'].includes(queued.status)) {
-      if (row.status !== 'queued') await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'queued', phone: queued.to } });
+  const state = copiesState(copies);
+  if (state) {
+    // The cycle's number stays the main one; an alternate copy never replaces it.
+    const phone = main?.to || row.phone;
+    if (state.status === 'waiting') {
+      const { first } = state;
+      const sentAt = first.sentAt || time;
+      const changed = await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'waiting', phone, sentAt, deadlineAt: new Date(sentAt.getTime() + row.hours * 3_600_000),
+        originalMessage: { id: first.messageId, chat: first.messageChat || `${first.to}@s.whatsapp.net`, text: first.text },
+        sends: state.sent.map(copy => sendOf({ ...copy, sentAt: copy.sentAt || time })) } });
+      if (changed.modifiedCount) await addNote(row.leadId, `Final message sent${state.sent.length > 1 ? ` to ${state.sent.length} numbers` : ''}. Waiting ${row.hours} hours for a reply.`);
+    } else if (state.status === 'queued') {
+      if (row.status !== 'queued') await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'queued', phone } });
       const lead = await Lead.findById(row.leadId).select('status deletedAt').lean();
-      if (!isClientRow(row) && queued.status === 'pending' && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
-        const { modifiedCount } = await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: STAGE_MOVED, expiresAt: finishedExpiry(time) } });
-        if (modifiedCount) await FinalMessage.updateOne({ ...rowGuard(row), status: { $in: ['review', 'queued'] } }, { $set: { status: 'not-sent' } });
+      if (!isClientRow(row) && pending.length && (!lead || lead.deletedAt || lead.status !== NEGATIVE)) {
+        const cancelled = await cancelPending();
+        if (cancelled && !copies.some(copy => copy.status === 'sending')) await FinalMessage.updateOne({ ...rowGuard(row), status: { $in: ['review', 'queued'] } }, { $set: { status: 'not-sent' } });
       }
     } else {
-      await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'not-sent', phone: queued.to } }); // failed, expired, cancelled or skipped: no timer, and it may go again
+      await FinalMessage.updateOne(rowGuard(row), { $set: { status: 'not-sent', phone } }); // failed, expired, cancelled or skipped: no timer, and it may go again
     }
     return;
   }
@@ -121,6 +135,16 @@ async function closeRow(row) {
   });
 }
 
+/** A copy to the other number went after the countdown started: it is recorded, so its replies and closure follow it. */
+async function recordLaterSends(row) {
+  if (!row.altPhone) return;
+  const known = new Set((row.sends || []).map(send => send.phone));
+  const later = (await originalCopies(row.draftId)).filter(copy => copy.status === 'sent' && !known.has(copy.to));
+  if (!later.length) return;
+  const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: { $in: ['waiting', 'dead', 'replied'] } }, { $push: { sends: { $each: later.map(sendOf) } } });
+  if (modifiedCount) await addNote(row.leadId, `Final message also sent to the alternate number.`);
+}
+
 async function followFinalMessages() {
   if (process.env.ENABLE_WHATSAPP !== 'true') return { reason: 'disabled' };
   const owner = crypto.randomUUID();
@@ -139,6 +163,7 @@ async function followFinalMessages() {
       await attempt(row, item => reconcileCycle(item.leadId));
     }
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
+    for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead', 'replied'] }, altPhone: { $nin: [null, ''] } }).lean()) await attempt(row, recordLaterSends);
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] } }).lean()) {
       await attempt(row, item => require('./stopFinalMessage').processOutbound(item));
     }

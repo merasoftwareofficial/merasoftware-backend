@@ -11,7 +11,10 @@ async function buildReview(draft, isAdmin) {
     isAdmin && draft.leadId ? messageTypes(draft.leadId) : undefined,
   ]);
   const channelEditable = (draft.status === 'pending' && !draft.attemptCount) || draft.delivery?.channels?.length;
-  return { ...draft, ...reviewWithDoc(draft.event, draft.text, draft.values, draft.blocks),
+  // Every number the WhatsApp copy goes to: frozen at the first send attempt, else as resolved now.
+  const frozen = draft.delivery?.recipients?.length ? draft.delivery.recipients : channels.recipients;
+  const whatsappNumbers = (frozen || []).filter(row => row.phone).map(row => ({ phone: row.phone, alt: !!row.alt }));
+  return { ...draft, whatsappNumbers, ...reviewWithDoc(draft.event, draft.text, draft.values, draft.blocks),
     ...(channelEditable ? { channelOptions: channels.choices, defaultChannel: channels.defaultChannel } : {}),
     ...(isAdmin ? { templateOptions: options, ...editable, ...(types ? { messageTypes: types } : {}) } : {}) };
 }

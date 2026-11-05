@@ -96,7 +96,8 @@ export function createInbound({ Inbox, Queue, Rule, State, FinalMessage = FinalM
     const phone = await senderPhone(message.key, socket).catch(() => null);
     if (!phone) return;
     // Only while a reply is being waited for: once it came, or the message didn't go, this person's chat is left alone.
-    const waited = { phone, status: { $in: ['review', 'queued', 'waiting', 'dead'] } };
+    // Any number of the cycle: its main, its alternate, or one a copy went to (backend helpers/finalMessageCopies.js).
+    const waited = { $or: [{ phone }, { altPhone: phone }, { 'sends.phone': phone }], status: { $in: ['review', 'queued', 'waiting', 'dead'] } };
     if (!await FinalMessage.exists(waited)) return;
     const at = messageTime(message) || now();
     const text = incomingText(message);
@@ -104,7 +105,7 @@ export function createInbound({ Inbox, Queue, Rule, State, FinalMessage = FinalM
     const ignored = !!normalizeMessageContent(message.message)?.reactionMessage || (!!text && isIgnoredReply(text, state?.finalMessage?.ignoredReplies ?? DEFAULT_IGNORED_REPLIES));
     // Kept apart: an "ok" after a real reply must not hide it. The newest of each wins, so an old message arriving after a restart can't hide a newer one, and the job compares its time with the send.
     const [time, label] = ignored ? ['lastIgnoredAt', 'lastIgnoredText'] : ['lastReplyAt', 'lastReplyText'];
-    await FinalMessage.updateMany({ ...waited, $or: [{ [time]: null }, { [time]: { $lt: at } }] },
+    await FinalMessage.updateMany({ $and: [waited, { $or: [{ [time]: null }, { [time]: { $lt: at } }] }] },
       { $set: { [time]: at, [label]: replyLabel(message).slice(0, MAX_SAVED_TEXT) } });
   }
 

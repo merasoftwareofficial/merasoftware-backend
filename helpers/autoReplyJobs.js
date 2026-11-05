@@ -3,7 +3,7 @@ const Lead = require('../models/leadModel');
 const { AUTO_REPLY_EVENT, FinalMessage, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
 const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
-const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByPhone, isKnownPerson } = require('./leadPhone');
+const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByContactNumber, isKnownPerson, phoneKey } = require('./leadPhone');
 const { replyText } = require('./autoReplyContent');
 const { enqueueWhatsApp } = require('./whatsappQueue');
 const { ensureWonLead, isClient } = require('./wonLead');
@@ -79,20 +79,18 @@ async function recordKnownPerson(row, accounts) {
   }
   const member = accounts.find(user => !user.deletedAt && !user.isGuest && user.roles?.includes('member'));
   const linked = member ? await Lead.findOne({ reservationUserId: member._id }) : null;
-  const byPhone = await findLeadsByPhone(row.phone);
+  // Main-number leads first, then a lead that has this number as its alternate: the same person writing from their other phone.
+  const byPhone = await findLeadsByContactNumber(row.phone);
   const leads = linked && !byPhone.some(lead => String(lead._id) === String(linked._id)) ? [linked, ...byPhone] : byPhone;
   const live = leads.filter(lead => !lead.deletedAt);
   const active = live.find(lead => ![NEGATIVE, DEAD].includes(lead.status));
-  if (active) {
-    await addRemark(active, row);
-    return 'updated';
-  }
-  if (live.length) {
-    await reopen(live[0], row, live[0].status);
-    return 'updated';
-  }
-  if (leads.length) {
-    await reopen(leads[0], row, 'Trash');
+  const chosen = active || live[0] || leads[0];
+  if (active) await addRemark(active, row);
+  else if (live.length) await reopen(live[0], row, live[0].status);
+  else if (leads.length) await reopen(leads[0], row, 'Trash');
+  if (chosen) {
+    // A client writing from their alternate number: their account was not found by it, so their Dead behaviour ends here.
+    if (chosen.convertedToUserId && phoneKey(chosen.phone) !== phoneKey(row.phone)) await clearClientDead({ convertedToUserId: chosen.convertedToUserId }, { preserveFinalReply: true });
     return 'updated';
   }
   if (member) {

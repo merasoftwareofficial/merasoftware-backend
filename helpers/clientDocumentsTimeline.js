@@ -1,5 +1,5 @@
 const userModel = require("../models/userModel");
-const leadModel = require("../models/leadModel");
+const { clientLeadFor } = require("./wonLead");
 
 // Shared source of truth for a client's admin-sent documents timeline.
 // Two real owners, one merged newest-first view (never merged in the DB):
@@ -29,10 +29,7 @@ const buildClientDocumentsTimeline = async (userId) => {
   }));
 
   // 2. Lead-stage files from the lead this client was converted from (if any).
-  const lead = await leadModel
-    .findOne({ convertedToUserId: userId })
-    .select("proposals followUps")
-    .lean();
+  const lead = await clientLeadFor(userId, { includeTrashed: true, select: "proposals followUps" }).lean();
 
   const proposalDocs = ((lead && lead.proposals) || []).map((p) => ({
     id: `proposal-${p.version}`,

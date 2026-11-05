@@ -10,6 +10,8 @@ async function availability(draft) {
   const recipients = emails.length
     ? await Promise.all(emails.map(async address => ({ email: address, phone: normalizePhone(emails.length === 1 && draft.whatsappTo ? draft.whatsappTo : await savedPhoneFor(address)) })))
     : [{ phone: normalizePhone(draft.whatsappTo) }];
+  // Each recipient's alternate number too, as its own row (helpers/contactNumbers.js); never for security messages.
+  const all = recipients.every(row => row.phone) ? await require('./contactNumbers').withAltNumbers(draft, recipients) : recipients;
   const whatsapp = !draft.event?.startsWith('website.subscription.') && process.env.ENABLE_WHATSAPP === 'true' && recipients.length > 0 && recipients.every(row => row.phone);
   const phoneReason = process.env.ENABLE_WHATSAPP !== 'true' ? 'WhatsApp is off on the server.' : 'A valid saved phone number is missing.';
   return {
@@ -20,7 +22,7 @@ async function availability(draft) {
     ],
     // The review opens on the action's own "Send via"; the reviewer may change it for this message.
     defaultChannel: draft.event ? await actionChannel(draft.event) : email && whatsapp ? 'both' : email ? 'email' : 'whatsapp',
-    recipients,
+    recipients: all,
   };
 }
 // The action's "Send via" (emailCatalog.js channelFor): every send without an explicit choice uses it.
