@@ -15,6 +15,7 @@ const { getOrderDisplayName } = require("./orderPresentation");
 //     elsewhere: totals, what came in, what is outstanding, and the payments behind it.
 //   invoice (project / plan_renewal / anything else) — one amount actually being collected:
 //     line items and the balance on this invoice alone.
+// complimentary_upgrade has its own small layout below: ₹0, nothing due, no payment terms.
 
 const STATEMENT_TYPES = new Set(["project_final", "service_statement"]);
 
@@ -173,6 +174,37 @@ const renderInvoice = (doc, { invoice, order, customer }) => {
   }
 };
 
+const isComplimentaryInvoice = (invoice) => invoice?.invoiceType === "complimentary_upgrade";
+
+// Complimentary layout — a ₹0 record of free work (helpers/complimentaryUpgrade.js). Nothing was
+// ever due, so it has no due date, no paid/balance lines and none of the project's payment terms.
+const renderComplimentary = (doc, { invoice, order, customer }) => {
+  doc.fontSize(22).fillColor("#111827").text("COMPLIMENTARY INVOICE", { align: "center" });
+  doc.moveDown(1.4);
+  doc.fontSize(10).fillColor("#374151");
+  doc.text(`Invoice number: ${invoice.invoiceNumber}`);
+  doc.text(`Issued: ${date(invoice.invoiceDate)}`);
+  doc.text("Payment: No payment due");
+  doc.moveDown();
+  doc.fontSize(12).fillColor("#111827").text("Issued To");
+  doc.fontSize(10).fillColor("#374151").text(customer?.name || "Customer");
+  if (customer?.email) doc.text(customer.email);
+  doc.moveDown();
+  doc.fontSize(12).fillColor("#111827").text(getOrderDisplayName(order, "Project"));
+  doc.moveDown(0.5);
+  doc.fontSize(10).fillColor("#374151");
+  (invoice.lineItems || []).forEach((item) => {
+    doc.text(String(item.name || "Complimentary upgrade"), 48, doc.y, { continued: true });
+    doc.text(money(item.price), { align: "right" });
+  });
+  doc.moveDown();
+  doc.fontSize(11).fillColor("#111827").text(`Total: ${money(invoice.amount)} (FREE)`, { align: "right" });
+  if (invoice.notes) {
+    doc.moveDown();
+    doc.fontSize(9).fillColor("#4b5563").text(invoice.notes);
+  }
+};
+
 const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [] }) =>
   new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 48, size: "A4" });
@@ -181,6 +213,11 @@ const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
+    if (isComplimentaryInvoice(invoice)) {
+      renderComplimentary(doc, { invoice, order, customer });
+      doc.end();
+      return;
+    }
     if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions });
     else renderInvoice(doc, { invoice, order, customer });
 
@@ -195,4 +232,4 @@ const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [
     doc.end();
   });
 
-module.exports = { generateInvoiceDocumentPdf, isStatementInvoice };
+module.exports = { generateInvoiceDocumentPdf, isStatementInvoice, isComplimentaryInvoice };

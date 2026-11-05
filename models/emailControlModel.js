@@ -59,6 +59,8 @@ const draftSchema = new Schema({
   reminderInvoice: Schema.Types.ObjectId,
   // Set only by Send message on a lead's page (helpers/leadMessage.js).
   leadId: Schema.Types.ObjectId,
+  // Set only by Send Upgrade on a project's page (helpers/complimentaryUpgrade.js).
+  orderId: Schema.Types.ObjectId,
   // No worker drains drafts. Expired mail can never become sendable again.
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
 }, { timestamps: true });

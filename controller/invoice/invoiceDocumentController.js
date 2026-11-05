@@ -1,7 +1,7 @@
 const invoiceModel = require("../../models/invoiceModel");
 const monthlyInvoiceModel = require("../../models/monthlyInvoiceModel");
 const transactionModel = require("../../models/transactionModel");
-const { generateInvoiceDocumentPdf, isStatementInvoice } = require("../../helpers/generateInvoiceDocumentPdf");
+const { generateInvoiceDocumentPdf, isStatementInvoice, isComplimentaryInvoice } = require("../../helpers/generateInvoiceDocumentPdf");
 
 // SINGLE load path for any invoice document — the one place that answers "may this person see
 // this invoice, and what goes into its PDF." Both the customer's own download and the admin's
@@ -51,7 +51,8 @@ const sendInvoiceDocument = (disposition) => async (req, res) => {
     const { invoice, transactions } = await loadInvoiceDocument(req.params.invoiceId, req);
     const pdf = await generateInvoiceDocumentPdf({ invoice, order: invoice.orderId, customer: invoice.userId, transactions });
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `${disposition}; filename=Invoice-${invoice.invoiceNumber || invoice._id}.pdf`);
+    const fileName = `${isComplimentaryInvoice(invoice) ? "Complimentary-Invoice" : "Invoice"}-${invoice.invoiceNumber || invoice._id}`;
+    res.setHeader("Content-Disposition", `${disposition}; filename=${fileName}.pdf`);
     return res.send(pdf);
   } catch (error) {
     return res.status(error.statusCode || 500).json({ message: error.message || "Unable to prepare invoice document", success: false, error: true });

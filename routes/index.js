@@ -223,6 +223,8 @@ router.post("/admin/projects/:orderId/approval", authToken, approveProjectOrderC
 // need a reference id before anything is written.
 router.get("/admin/projects/:orderId/cancel-preview", authToken, getProjectCancellationPreview);
 router.post("/admin/projects/:orderId/cancel", authToken, cancelProjectOrder);
+// Send Upgrade on a completed project: prepares one of the three upgrade messages for the review popup.
+router.post("/admin/projects/:orderId/complimentary-upgrade", authToken, require('../controller/order/complimentaryUpgrade'));
 router.post("/admin/clients/:customerId/recharge-wallet", authToken, adminRechargeWallet);
 router.get("/admin/category-base-prices", authToken, getCategoryBasePricesController);
 router.post("/admin/category-base-prices", authToken, updateCategoryBasePriceController);

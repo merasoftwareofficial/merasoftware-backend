@@ -32,6 +32,10 @@ const events = [
   ['sendCallbackRequestNotification', 'Website', 'Callback request (admin)', 'Callback request'],
   ['sendProjectUpdateEmail', 'Projects', 'Project progress update'],
   ['sendProjectMessageEmail', 'Projects', 'Project message'],
+  // Send Upgrade on a completed project's page (helpers/complimentaryUpgrade.js).
+  ['project.upgrade.offer', 'Projects', 'Complimentary upgrade offer', 'Complimentary upgrade'],
+  ['project.upgrade.started', 'Projects', 'Complimentary upgrade started', 'Complimentary upgrade'],
+  ['project.upgrade.completed', 'Projects', 'Complimentary upgrade completed', 'Complimentary upgrade'],
   ['sendMonthlyInvoiceEmail', 'Invoices', 'Monthly invoice'],
   ['sendAdminAutoRenewalNotification', 'Renewals', 'Auto renewal (admin)'],
   ['sendPlanClosureEmailToCustomer', 'Plans', 'Plan closure (customer)', 'Plan closure'],

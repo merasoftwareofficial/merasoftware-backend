@@ -54,6 +54,13 @@ const PRODUCT = detail('Product or project name', 'Business Website');
 const DEVELOPER = detail('Developer name', 'Aman Singh');
 const PROJECT = detail('Project name', 'Business Website');
 const INVOICE_NUMBER = detail('Invoice number', 'INV-1001');
+// The customer's own project page, the same address the project update mail links to.
+const projectPage = order => link(process.env.FORNTEND_URL, `/project-details/${order?._id}`);
+const UPGRADE_LINK = detail('Project page link', 'https://app.merasoftware.com/project-details/123', 'The customer’s own project page');
+function upgradeMail(user, order) {
+  if (!user?.email && !user?.phone) return null;
+  return { to: user.email ? [user.email] : [], phone: user.phone, values: { name: text(user.name), project: getOrderDisplayName(order, 'project'), link: projectPage(order) } };
+}
 
 const definitions = {
   // --- Leads ------------------------------------------------------------------------------
@@ -746,6 +753,47 @@ const definitions = {
         progress: messageData.projectProgress === undefined ? '' : `${messageData.projectProgress}%`, developer: text(messageData.developerName),
       } };
     },
+  },
+  // --- Complimentary upgrade: Send Upgrade on a completed project (helpers/complimentaryUpgrade.js).
+  // Worded for any product (website, app, software): the project's own name, never "website".
+  'project.upgrade.offer': {
+    subject: 'A complimentary upgrade for {{project}}',
+    text: lines(
+      'Hello {{name}},', '',
+      'We would like to give your **{{project}}** a complimentary upgrade, free of cost.', '',
+      'Reply to this message if you would like us to go ahead.', '',
+      '**Your project:** {{link}}', '',
+      ...SIGN_OFF,
+    ),
+    variables: { name: NAME, project: PROJECT, link: UPGRADE_LINK },
+    blocks: {},
+    build: upgradeMail,
+  },
+  'project.upgrade.started': {
+    subject: 'Your complimentary upgrade has started: {{project}}',
+    text: lines(
+      'Hello {{name}},', '',
+      'We have started the complimentary upgrade of your **{{project}}**. There is no charge for this work.', '',
+      'We will let you know as soon as it is complete.', '',
+      '**Your project:** {{link}}', '',
+      ...SIGN_OFF,
+    ),
+    variables: { name: NAME, project: PROJECT, link: UPGRADE_LINK },
+    blocks: {},
+    build: upgradeMail,
+  },
+  'project.upgrade.completed': {
+    subject: 'Complimentary upgrade completed: {{project}}',
+    text: lines(
+      'Hello {{name}},', '',
+      'The complimentary upgrade of your **{{project}}** is complete. Please take a look at the new changes.', '',
+      'Your complimentary invoice (₹0, no payment due) is on your project page:',
+      '{{link}}', '',
+      ...SIGN_OFF,
+    ),
+    variables: { name: NAME, project: PROJECT, link: UPGRADE_LINK },
+    blocks: {},
+    build: upgradeMail,
   },
 
   // --- Invoices and renewals ----------------------------------------------------------------

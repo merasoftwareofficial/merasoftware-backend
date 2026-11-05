@@ -26,8 +26,10 @@ const invoiceSchema = new mongoose.Schema({
     type: String,
     // `project_final` is the one cumulative statement for a project. It is not a
     // new payment request; the normal `project` records remain the individual
-    // installment/payment invoices.
-    enum: ["project", "project_final", "plan_renewal", "service_statement"],
+    // installment/payment invoices. `complimentary_upgrade` is a ₹0 record of free
+    // work on a completed project (helpers/complimentaryUpgrade.js): nothing is due
+    // and no money code reads it, as every one of them selects its own types.
+    enum: ["project", "project_final", "plan_renewal", "service_statement", "complimentary_upgrade"],
     required: true,
   },
   amount: {
@@ -93,6 +95,11 @@ const invoiceSchema = new mongoose.Schema({
     ref: "user",
     default: null,
   },
+  // The Upgrade completed message that made a complimentary_upgrade invoice: one message, one invoice.
+  emailDraftId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: undefined,
+  },
   // Written by deleteOrder.js right before the order it belongs to is hard-deleted, so this
   // invoice can still name/date/type itself in the admin "Deleted Projects" tab afterward —
   // orderId will resolve to nothing once the order is gone.
@@ -139,6 +146,10 @@ invoiceSchema.index(
 invoiceSchema.index(
   { invoiceType: 1, orderId: 1 },
   { name: "one_service_statement_per_order", unique: true, partialFilterExpression: { invoiceType: "service_statement" } }
+);
+invoiceSchema.index(
+  { emailDraftId: 1 },
+  { name: "one_invoice_per_upgrade_message", unique: true, partialFilterExpression: { emailDraftId: { $type: "objectId" } } }
 );
 
 const invoiceModel = mongoose.model("invoice", invoiceSchema);

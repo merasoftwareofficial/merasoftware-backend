@@ -7,6 +7,7 @@ const { uploadAllowanceNow } = require("../../helpers/serviceAllowance");
 const { buildLifecycleTimeline, getCurrentStateSince } = require("../../helpers/orderLifecycleLog");
 const { getPaymentAccess } = require("../../helpers/offerPaymentPolicy");
 const { countNewUploads } = require("../../helpers/orderUploadHistory");
+const { listFor: listComplimentaryUpgrades } = require("../../helpers/complimentaryUpgrade");
 
 const toPlainObject = (doc) => {
     if (!doc) return null;
@@ -162,9 +163,13 @@ const getOrderDetails = async (req, res) => {
             ? linkedServicesRead.then((services) => countNewUploads([order._id, ...services.map((service) => service._id)], ownerId))
             : null;
 
+        // The project page's Complimentary upgrades line, for admin and customer alike: the ₹0
+        // invoices Upgrade completed left on this project (helpers/complimentaryUpgrade.js).
+        const complimentaryUpgradesRead = !order.isServicePlan ? listComplimentaryUpgrades({ orderId: order._id }) : [];
+
         // These reads do not depend on each other, so they run together: one round to the
         // database instead of one per read. The filters above read order fields before populate.
-        const [, earliestUnpaidInvoice, serviceInvoices, linkedServices, pendingPaymentTransaction, paymentAccess, newUploadsCount] = await Promise.all([
+        const [, earliestUnpaidInvoice, serviceInvoices, linkedServices, pendingPaymentTransaction, paymentAccess, newUploadsCount, complimentaryUpgrades] = await Promise.all([
             order.populate([
                 { path: 'userId', select: 'name email address' },
                 { path: 'productId', select: 'serviceName category totalPages validityPeriod updateCount isWebsiteUpdate price sellingPrice isMonthlyLimitedPlan isMonthlyRenewablePlan monthlyUpdateLimit yearlyPlanDuration monthlyRenewalPrice monthlyRenewalCost isServicePlan servicePlan formattedDescriptions' },
@@ -176,6 +181,7 @@ const getOrderDetails = async (req, res) => {
             pendingPaymentTransactionRead,
             order.paymentPolicy ? getPaymentAccess(order) : null,
             newUploadsCountRead,
+            complimentaryUpgradesRead,
         ]);
 
         // Send the complete order details
@@ -224,6 +230,7 @@ const getOrderDetails = async (req, res) => {
             pendingPayment: pendingPaymentTransaction || null,
             serviceInvoices,
             linkedServices,
+            complimentaryUpgrades,
             // "Allowed right now" for a plan (helpers/serviceAllowance.js); null for a project.
             uploadAllowance: order.isServicePlan ? uploadAllowanceNow(orderData) : null,
         };

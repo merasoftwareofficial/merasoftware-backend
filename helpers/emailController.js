@@ -125,6 +125,7 @@ async function prepareMail(event, mail, extraValues) {
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
     leadId: mail.leadId,
+    orderId: mail.orderId,
     expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000),
   }); } catch (error) {
     if (error.code !== 11000 || !mail.dedupeKey) throw error;
@@ -308,6 +309,8 @@ async function decide(id, actor, decision, access = {}) {
   // Send message on a lead's page leaves a line on its timeline. It can never change the send's result.
   if (decision.choice === 'send' && ['sent', 'queued'].includes(result.status)) {
     await require('./leadMessage').recordOnTimeline(id).catch(error => console.error('[email] Sent; could not add the lead timeline line:', error.message));
+    // Upgrade completed on a project's page leaves its ₹0 complimentary invoice. Same rule: never changes the send's result.
+    await require('./complimentaryUpgrade').recordCompleted(id).catch(error => console.error('[email] Sent; could not record the complimentary invoice:', error.message));
   }
   return result;
 }
