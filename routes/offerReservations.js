@@ -35,6 +35,14 @@ router.post('/:id/extend', wrap(async req => {
   sameSiteJson(req); await adminOnly(req);
   return extendReservation({ reservationId: req.params.id, actorId: req.userId, until: req.body?.until, reason: req.body?.reason });
 }));
+// "Start my project": the owner of the reservation (member or client) asks the team to set up the project.
+router.post('/:id/start', wrap(async req => {
+  sameSiteJson(req);
+  const start = require('../helpers/reservationStart');
+  const result = await start.requestProjectStart({ reservationId: req.params.id, userId: req.userId });
+  if (result.requested) setImmediate(() => start.deliverStartNotices({ reservationId: req.params.id }).catch(error => console.error('[reservation start notices]', error.message)));
+  return result;
+}));
 router.post('/:id/force-apply/preview', wrap(async req => {
   sameSiteJson(req); await adminOnly(req);
   return require('../helpers/reservationRepricing').forceApplyPreview({ reservationId: req.params.id, orderId: req.body?.orderId, actorId: req.userId });

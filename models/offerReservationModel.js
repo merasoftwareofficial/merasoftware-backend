@@ -50,10 +50,25 @@ const schema = new mongoose.Schema({
   closureNextAttemptAt: { type: Date, default: null },
   closureLockedUntil: { type: Date, default: null },
   closureFailure: { type: String, default: '' },
+  // Reminders before the deadline (helpers/reservationReminders.js): 24 hours and 1 hour left. Only
+  // reservations made after they shipped get remindersEnabled. Each sent one is kept as "<stage>:<deadline ISO>",
+  // so an extension (a new deadline) gets its own reminders and one deadline never gets the same one twice.
+  remindersEnabled: { type: Boolean, default: false },
+  remindersSent: { type: [String], default: [] },
+  // "Start my project" (helpers/reservationStart.js). While startRequestedAt is set and no project is
+  // attached, the clock is paused: no reminder, no closing message, and the deadline is not in force.
+  // pausedRemainingMs is the time that was left. A project created on it, or the admin's "Extend deadline",
+  // resumes the clock and clears the pause. Every request stays in startRequests as history.
+  startRequestedAt: { type: Date, default: null },
+  pausedRemainingMs: { type: Number, default: 0 },
+  startRequests: [{ _id: false, at: Date, remainingMs: Number,
+    noticesAt: { type: Date, default: null }, noticeNextAttemptAt: { type: Date, default: null }, noticeFailure: { type: String, default: '' },
+    alerts: { type: Number, default: 0 }, endedAt: { type: Date, default: null }, ended: { type: String, enum: ['project', 'resumed', null], default: null } }],
 }, { timestamps: true });
 schema.index({ userId: 1, offerSlug: 1, periodEndsAt: 1 }, { unique: true });
 schema.index({ confirmationStatus: 1, confirmationNextAttemptAt: 1 });
 schema.index({ projectId: 1, confirmedAt: 1, 'resolution.status': 1 });
 schema.index({ pricingNextCheckAt: 1, expiresAt: 1, _id: 1 });
 schema.index({ closureStatus: 1, closureNextAttemptAt: 1 }, { partialFilterExpression: { closureStatus: { $in: ['pending', 'failed'] } } });
+schema.index({ startRequestedAt: 1 }, { partialFilterExpression: { startRequestedAt: { $type: 'date' } } });
 module.exports = mongoose.model('offerReservation', schema);

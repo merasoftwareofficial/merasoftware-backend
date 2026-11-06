@@ -155,7 +155,8 @@ test('deadline passed with no project: one closing message with the offers page'
   await Reservation.updateOne({}, { $set: { closureStatus: 'pending' } });
   await closeDueReservations();
   assert.equal((await queued('offer.reservation.expired')).length, 1, 'once only');
-  assert.equal(emails, 0);
+  // Owner decision 7 Nov 2026: the closing message goes by Email + WhatsApp (the confirmation stays WhatsApp only).
+  assert.equal(emails, 1);
 });
 test('a project on the reservation means used: no closing message, even if released later', async () => {
   await reserve(customer);
@@ -222,9 +223,11 @@ test('the Reservation box counts running, used and expired reservations', async 
 // --- Send via -----------------------------------------------------------------------------------------
 test('every action has one route: customer WhatsApp, team Both, subscription Email', () => {
   const team = events.filter(row => row.audience === 'team').map(row => row.key);
-  assert.equal(team.length, 11);
+  assert.equal(team.length, 12);
+  // Owner decision 7 Nov 2026: the reservation countdown and start-request messages to the customer go by Both.
+  const customerBoth = ['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired'];
   for (const row of events) {
-    const expected = row.key.startsWith('website.subscription.') ? 'email' : row.audience === 'team' ? 'both' : 'whatsapp';
+    const expected = row.key.startsWith('website.subscription.') ? 'email' : row.audience === 'team' || customerBoth.includes(row.key) ? 'both' : 'whatsapp';
     assert.equal(channelFor(row.key, null), expected, row.key);
   }
   assert.equal(channelFor('offer.reserved', { channel: 'both' }), 'both');

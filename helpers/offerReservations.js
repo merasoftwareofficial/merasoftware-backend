@@ -14,6 +14,12 @@ const PENDING_PAYMENT = { type: 'payment', status: 'pending', paymentStatus: 'pe
 
 // The deadline in force: an admin extension, otherwise the original reservation hours.
 const deadlineOf = row => new Date(row.extendedUntil || row.expiresAt);
+// "Start my project" pauses the clock (helpers/reservationStart.js): while paused the deadline is not in
+// force, so nothing may expire, remind, close or reprice it. Only a project on it or the admin's extension resumes it.
+const isPaused = row => Boolean(row?.startRequestedAt) && !row.projectId && !row.confirmedAt;
+// When a project is created on a paused reservation, the customer gets the time that was left for the
+// first payment, never less than this.
+const RESUME_MIN_MS = 24 * HOUR;
 // How many hours a new reservation of this offer lasts. Each offer sets it on the website
 // (src/lib/offers.ts reservationHoldHours, 1–720; owner decision 5 Nov 2026,
 // merasoftware/src/docs/reservation-countdown.md). Offers without it keep 72. It is read once, at
@@ -29,7 +35,8 @@ function reservationView(row, now = Date.now(), underReview = false) {
     reservedPrice: row.reservedPrice, regularPrice: row.regularPrice,
     terms: row.offerSnapshot.resolvedTerms || [], reservedAt: row.reservedAt, expiresAt: row.expiresAt, periodEndsAt: row.periodEndsAt,
     deadline, extendedUntil: row.extendedUntil || null,
-    status: row.confirmedAt ? 'confirmed' : underReview ? 'under_review' : deadline.getTime() <= now ? 'expired' : 'reserved',
+    status: row.confirmedAt ? 'confirmed' : underReview ? 'under_review' : isPaused(row) ? 'start_requested' : deadline.getTime() <= now ? 'expired' : 'reserved',
+    startRequestedAt: row.startRequestedAt || null, pausedRemainingMs: isPaused(row) ? row.pausedRemainingMs : 0,
     resolution: row.resolution?.status || null,
     walletCredit: Number(row.resolution?.walletCredit || 0),
     projectId: row.projectId ? String(row.projectId) : null, confirmationStatus: row.confirmationStatus };
@@ -81,7 +88,7 @@ function reservationRefusal(offer, now) {
 }
 // An expired, unpaid, unattached reservation may be followed by one new reservation in a later
 // offer period (owner decision 11). Anything else is returned unchanged on a repeat request.
-const renewable = (row, now) => !row.confirmedAt && !row.projectId && deadlineOf(row).getTime() <= now;
+const renewable = (row, now) => !row.confirmedAt && !row.projectId && !isPaused(row) && deadlineOf(row).getTime() <= now;
 
 async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone }) {
   if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);
@@ -126,7 +133,7 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     }
     const [row] = await Reservation.create([{ userId, offerSlug, periodEndsAt, offerSnapshot: offer,
       regularPrice: Number(offer.mainPrice), reservedPrice: price, reservedAt: now,
-      expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending' }], { session });
+      expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending', remindersEnabled: true }], { session });
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
   if (relinkedLeadId) await require('./finalMessageCycle').reconcileCycle(relinkedLeadId).catch(error => console.error('[reservation] final message check after relink:', error.message));
@@ -144,8 +151,16 @@ async function attachProjectReservation({ order, offer, reservationId = null, se
   if (reservationId && !row) fail('This customer reservation is unavailable', 409);
   if (row) {
     if (row.projectId && String(row.projectId) !== String(order._id)) fail('This reservation is already attached to a project', 409);
-    if (deadlineOf(row) <= now && !row.confirmedAt) fail('This reservation expired. Historical application requires the admin force protocol.', 409);
+    if (deadlineOf(row) <= now && !row.confirmedAt && !isPaused(row)) fail('This reservation expired. Historical application requires the admin force protocol.', 409);
     if (row.offerSnapshot.quoteKey !== offer.quoteKey) fail('Select the saved reservation to keep its original price and terms', 409);
+    // The customer asked to start: the clock resumes now, with the time that was left for the first payment.
+    if (isPaused(row)) {
+      const resumed = new Date(now.getTime() + Math.max(row.pausedRemainingMs || 0, RESUME_MIN_MS));
+      row.extensions.push({ from: deadlineOf(row), to: resumed, reason: 'Project created on the start request. The countdown resumed for the first payment.', actorId: order.createdBy || null, at: now });
+      row.extendedUntil = resumed;
+      endStartRequest(row, 'project', now);
+      await require('./reservationStart').noteLead(row, `Project created on the start request for ${row.offerSnapshot.title}. First payment due by ${indiaTime(resumed)} to keep the reserved price.`, session);
+    }
   } else {
     if (offer.status !== 'published' || Date.parse(offer.endsAt) <= now.getTime()) fail('Offer expired before the project was saved', 409);
     // The reservation keeps this project's own scope price (a package quote differs from the offer's main price).
@@ -176,6 +191,13 @@ async function confirmReservationPayment({ order, invoice, session }) {
   row.confirmedAt = submittedAt;
   await row.save({ session });
 }
+// Clears the pause; the request stays in startRequests with how it ended.
+function endStartRequest(row, ended, at) {
+  const last = row.startRequests?.[row.startRequests.length - 1];
+  if (last && !last.ended) { last.ended = ended; last.endedAt = at; }
+  row.startRequestedAt = null;
+  row.pausedRemainingMs = 0;
+}
 // Server-side role check for reservation admin commands; UI visibility is never authorization.
 async function currentAdmin(actorId, session = null) {
   const actor = await User.findById(actorId).session(session);
@@ -199,10 +221,17 @@ async function extendReservation({ reservationId, actorId, until, reason }) {
     if (fresh.resolution?.closedAt) fail('The first bill of this project is already settled or closed', 409);
     if (fresh.resolution && fresh.resolution.status !== 'unchanged') fail('The price was already revised. Use force-apply to restore the reserved price.', 409);
     const current = deadlineOf(fresh);
-    if (deadline <= current) fail('The new deadline must be later than the current deadline', 409);
+    // A paused reservation (start requested) resumes from any future time the admin picks, shorter too:
+    // e.g. 1 hour when the customer declined, so the closing message follows.
+    const paused = isPaused(fresh);
+    if (deadline <= current && !paused) fail('The new deadline must be later than the current deadline', 409);
     fresh.extensions.push({ from: current, to: deadline, reason: note, actorId, at: new Date() });
     fresh.extendedUntil = deadline;
     fresh.resolution = null;
+    if (paused) {
+      endStartRequest(fresh, 'resumed', new Date());
+      await require('./reservationStart').noteLead(fresh, `Start request countdown resumed by the team. New deadline: ${indiaTime(deadline)}. Reason: ${note}`, session);
+    }
     await fresh.save({ session });
     await require('../models/reservationNoticeModel').create([{ reservationId: fresh._id, version: fresh.extensions.length, deadline }], { session });
     return fresh;
@@ -216,4 +245,5 @@ async function extendReservation({ reservationId, actorId, until, reason }) {
   return { reservation: reservationView(row), notice };
 }
 module.exports = { reserveOffer, listReservations, reservationView, attachProjectReservation, confirmReservationPayment,
-  extendReservation, currentAdmin, deadlineOf, reviewedReservationIds, activeOwner, reservationRefusal, reserveWindowHours, holdHours, PENDING_PAYMENT };
+  extendReservation, currentAdmin, deadlineOf, isPaused, reviewedReservationIds, activeOwner, reservationRefusal, reserveWindowHours, holdHours, indiaTime,
+  RESUME_MIN_MS, PENDING_PAYMENT };

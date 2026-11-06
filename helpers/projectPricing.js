@@ -11,7 +11,9 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     if (process.env.OFFER_RESERVATIONS_ENABLED !== 'true') fail('Offer reservations are not enabled yet', 503);
     if (!require('mongoose').isValidObjectId(body.offerReservationId) || !userId || body.packageId) fail('Select a reserved offer for this customer without a package');
     reserved = await require('../models/offerReservationModel').findOne({ _id: body.offerReservationId, userId }).lean();
-    if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || require('./offerReservations').deadlineOf(reserved) <= new Date()) fail('This customer reservation is unavailable or expired', 409);
+    const { deadlineOf, isPaused } = require('./offerReservations');
+    // A paused reservation (the customer asked to start) is still open whatever its old deadline says.
+    if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || (!isPaused(reserved) && deadlineOf(reserved) <= new Date())) fail('This customer reservation is unavailable or expired', 409);
   }
   const { offers } = reserved ? { offers: [reserved.offerSnapshot] } : await fetchWebsiteCatalogue();
   const extrasTotal = money(features.reduce((sum, item) => sum + item.price, 0));

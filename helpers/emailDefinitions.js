@@ -1133,6 +1133,82 @@ definitions['offer.reservation.extended'] = {
     } };
   },
 };
+// --- Reminders and "Start my project" (helpers/reservationReminders.js, helpers/reservationStart.js;
+// merasoftware/src/docs/reservation-countdown.md). Owner decision 7 Nov 2026: the time left is shown in
+// words next to the exact deadline, which stays the authority if a message arrives late.
+// Every link opens the offer page, where the customer presses "Start my project". An archived offer's
+// page sends a signed-in customer to My offers instead (website app/offer/[slug]/page.tsx).
+const offerPageLink = reservation => link(process.env.PORTFOLIO_WEBSITE_URL, `/offer/${encodeURIComponent(reservation.offerSlug)}`);
+const leftWords = ms => require('./reservationStart').timeLeftWords(ms);
+const reminderDefinition = (subject, opening, action, sampleLeft) => ({
+  subject,
+  text: lines('Hello {{name}},', '', opening, '**Reserved price:** {{price}}', '', action, '{{link}}', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'), price: detail('Reserved price', '₹5,000'),
+    timeLeft: detail('Time left', sampleLeft, 'The time left when the message is sent, in words'),
+    deadline: detail('Reservation ends', '8 Nov 2026, 10:00 am IST', 'The exact deadline in force'),
+    link: detail('Offer page', 'https://www.merasoftware.com/offer/website-offer', 'The offer page with the Start my project button') },
+  blocks: {},
+  build(reservation, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
+    const href = offerPageLink(reservation);
+    const deadline = new Date(reservation.extendedUntil || reservation.expiresAt);
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
+      timeLeft: leftWords(deadline - new Date(reservation.reminderNow || Date.now())), deadline: moment(deadline), link: href,
+    } };
+  },
+});
+definitions['offer.reservation.reminder'] = reminderDefinition('Your offer reservation ends soon',
+  'Your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.',
+  'Start your project before then to keep this price. Open your offer and press Start my project:', 'about 24 hours');
+definitions['offer.reservation.lastHour'] = reminderDefinition('Last hour: your offer reservation is ending',
+  'This is the last hour: your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.',
+  'Press Start my project on your offer now, or this offer expires for you:', 'about 1 hour');
+// To the team, once per request, and again after each full day nobody acted (at most 3 times).
+definitions['offer.start.request.admin'] = {
+  subject: 'Start project request - {{offerTitle}}',
+  text: lines('A customer wants to start their project on a reserved offer. Their reservation is paused until the team acts:',
+    'create the project on it, or use Extend deadline on their Reserved offers to resume the countdown.', '',
+    '{{waiting}}', '',
+    '**Customer:** {{customerName}}', '**Phone:** {{phone}}', '**Email:** {{customerEmail}}', '**Account:** {{account}}', '',
+    '**Offer:** {{offerTitle}}', '**Reserved price:** {{price}}', '**Requested on:** {{requestedAt}}', '**Time left when paused:** {{timeLeft}}', '',
+    '**Open the lead:** {{leadLink}}', '', ...SYSTEM_SIGN_OFF),
+  variables: { customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, phone: detail('Phone', '+919876543210'),
+    account: detail('Account', 'Client', 'Client, or Member (needs a client account before the project)'),
+    offerTitle: detail('Offer', 'Website offer'), price: detail('Reserved price', '₹5,000'),
+    requestedAt: detail('Requested on', '7 Nov 2026, 10:19 am IST'), timeLeft: detail('Time left when paused', 'about 23 hours'),
+    leadLink: detail('Lead link', 'https://portal.example.com/admin-panel/leads/123', "The person's lead in the admin Leads list") },
+  blocks: { waiting: { label: 'Still waiting', hint: 'Only in the daily reminder: how long the request has waited.',
+    sample: () => noteBlock('This request has been waiting 1 day.') } },
+  build(reservation, user) {
+    const request = reservation.startRequest;
+    if (!user || !request) return null;
+    const days = reservation.waitingDays;
+    return { to: ADMIN_EMAILS, values: {
+      customerName: text(user.name), customerEmail: text(user.email), phone: text(user.phone),
+      account: reservation.isClient ? 'Client' : 'Member (needs a client account before the project)',
+      offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice),
+      requestedAt: moment(request.at), timeLeft: leftWords(request.remainingMs),
+      leadLink: adminLink(reservation.leadId ? `/admin-panel/leads/${reservation.leadId}` : '/admin-panel/leads'),
+    }, blocks: { waiting: days ? noteBlock(`This request has been waiting ${days} day${days === 1 ? '' : 's'}.`) : { html: '', text: '' } } };
+  },
+};
+definitions['offer.start.request.received'] = {
+  subject: 'We have received your request to start your project',
+  text: lines('Hello {{name}},', '', 'We have received your request to start your project on {{offerTitle}}.', '',
+    'Our team will contact you shortly to set up your project. Your reservation is paused, so this offer will not expire while we prepare it.', '',
+    '**Reserved price:** {{price}}', '', '**Your offer:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'), price: detail('Reserved price', '₹5,000'),
+    link: detail('Offer page', 'https://www.merasoftware.com/offer/website-offer', 'The offer page') },
+  blocks: {},
+  build(reservation, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
+    const href = offerPageLink(reservation);
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), offerTitle: text(reservation.offerSnapshot.title), price: money(reservation.reservedPrice), link: href,
+    } };
+  },
+};
 
 // --- Plans: every step of a service plan (merasoftware/src/docs/plan.md §4 "Plan communication").
 // Sent by helpers/servicePlanNotifications.js as system mail (WhatsApp mirrors every sent mail).

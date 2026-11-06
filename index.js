@@ -41,6 +41,9 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
     await require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message));
     await require('./helpers/reservationRepricing').reconcileDueReservations().catch(error => console.error('[reservation repricing]', error.message));
     await require('./helpers/reservationClosure').closeDueReservations().catch(error => console.error('[reservation closure]', error.message));
+    await require('./helpers/reservationReminders').sendDueReminders().catch(error => console.error('[reservation reminders]', error.message));
+    await require('./helpers/reservationStart').deliverStartNotices().catch(error => console.error('[reservation start notices]', error.message));
+    await require('./helpers/reservationStart').alertPendingStarts().catch(error => console.error('[reservation start alerts]', error.message));
   });
   console.log('Offer reservation jobs initialized');
 }
