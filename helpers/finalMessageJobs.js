@@ -170,12 +170,17 @@ async function followFinalMessages() {
     if (!clientAutomationEnabled()) {
       for (const row of await FinalMessage.find({ subjectKind: 'client', status: 'waiting' }).lean()) await attempt(row, item => endRow(item, 'stopped'));
     }
+    // After the closure message, before the replies below: any message from then on brings the person back as an
+    // Inquiry instead (helpers/finalMessageComeback.js). This also keeps when the closure went, before the queue forgets it.
+    const { closureSentAt, comeBackIfWrote } = require('./finalMessageComeback');
+    for (const row of await FinalMessage.find({ status: 'dead', expiryQueuedAt: { $ne: null } }).lean()) await attempt(row, comeBackIfWrote);
     // Replies before deadlines: a reply and an expired deadline in the same minute is a reply.
+    // Never after the closure: that one is left for the step above to retry.
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] }, lastReplyAt: { $ne: null } }).lean()) {
-      if (repliedAfterSend(row)) await attempt(row, settleReply);
+      if (repliedAfterSend(row)) await attempt(row, async (item, time) => (item.status === 'dead' && await closureSentAt(item) ? undefined : settleReply(item, time)));
     }
     for (const row of await FinalMessage.find({ lastIgnoredAt: { $ne: null }, status: { $in: ['waiting', 'dead', 'replied'] } }).lean()) {
-      if (ignoredToNote(row)) await attempt(row, noteIgnored);
+      if (ignoredToNote(row)) await attempt(row, async item => (item.status === 'dead' && await closureSentAt(item) ? undefined : noteIgnored(item)));
     }
     // A worker that isn't listening can't have seen a reply, so nothing goes Dead until it is back.
     const state = await State.findById(STATE_ID).select('heartbeatAt connection').lean();

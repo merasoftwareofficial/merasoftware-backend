@@ -74,16 +74,20 @@ router.post('/reply', handle(async req => {
 
 // The Final Message box. Only the wait and the results live here: the message is an Email Templates action and is sent from the portal's popup.
 router.get('/final-message', handle(async () => {
-  const [hours, ignoredReplies, counts, replied] = await Promise.all([
+  const cameBack = { $cond: [{ $ifNull: ['$$this.cameBackAt', false] }, 1, 0] };
+  const [hours, ignoredReplies, counts, [cameBackTotal], replied] = await Promise.all([
     readHours(),
     readIgnored(),
     FinalMessage.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
+    // Everyone who wrote after a closure message and came back (helpers/finalMessageComeback.js), earlier cycles included.
+    FinalMessage.aggregate([{ $project: { n: { $reduce: { input: { $concatArrays: [[{ cameBackAt: '$cameBackAt' }], { $ifNull: ['$episodeHistory', []] }] }, initialValue: 0, in: { $add: ['$$value', cameBack] } } } } },
+      { $group: { _id: null, count: { $sum: '$n' } } }]),
     FinalMessage.find({ status: 'replied', decision: null }).sort({ replySeenAt: -1 }).select('leadId phone lastReplyAt lastReplyText subjectKind clientId behaviourRevision').lean(),
   ]);
   const leads = await Lead.find({ _id: { $in: replied.map(row => row.leadId) }, deletedAt: null }).select('name status clientBehaviour clientBehaviourRevision convertedToUserId').lean();
   return {
     hours, minHours: MIN_HOURS, maxHours: MAX_HOURS, ignoredReplies,
-    counts: Object.fromEntries(counts.map(row => [row._id, row.count])),
+    counts: { ...Object.fromEntries(counts.map(row => [row._id, row.count])), 'came-back': cameBackTotal?.count || 0 },
     // A lead the admin has already moved by hand needs no decision here.
     needsDecision: replied.flatMap(row => {
       const lead = leads.find(item => String(item._id) === String(row.leadId));

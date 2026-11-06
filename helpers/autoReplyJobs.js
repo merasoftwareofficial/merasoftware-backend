@@ -5,6 +5,7 @@ const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
 const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByContactNumber, isKnownPerson, phoneKey } = require('./leadPhone');
 const { replyText } = require('./autoReplyContent');
+const { comeBackByPhone } = require('./finalMessageComeback');
 const { enqueueWhatsApp } = require('./whatsappQueue');
 const { ensureWonLead, isClient } = require('./wonLead');
 const { hasConfirmedName } = require('./leadName');
@@ -71,6 +72,9 @@ async function makeMemberLead(user, row) {
 
 /** Records the message on this person's one lead. Returns 'created' when a new lead was made, else 'updated'. */
 async function recordKnownPerson(row, accounts) {
+  // Dead for good after a closure message: they come back as an Inquiry first, as from any other message, so the
+  // Final Message job and this one agree whichever runs first. The remark below then goes on that Inquiry.
+  await comeBackByPhone(row.phone);
   const client = accounts.find(isClient);
   if (client) {
     await addRemark(await ensureWonLead(client), row);

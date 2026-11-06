@@ -118,7 +118,8 @@ inboxSchema.index({ phone: 1, createdAt: 1 });
 
 // Final Message: one row per lead, kept for good so the message never goes twice.
 // review → queued → waiting → replied | dead (a late reply: dead → replied). The rest end it:
-// not-sent = Don't Send, expired or failed, may be sent again; email-only = no WhatsApp reply to wait for; stopped = the admin moved the lead.
+// not-sent = Don't Send, expired or failed, may be sent again; email-only = no WhatsApp reply to wait for; stopped = the admin moved the lead,
+// or the person wrote after the closure message and came back (stopSource 'came-back').
 export const FINAL_MESSAGE_STATUSES = ['review', 'queued', 'waiting', 'replied', 'dead', 'not-sent', 'email-only', 'stopped'];
 const finalMessageSchema = new mongoose.Schema({
   leadId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
@@ -140,11 +141,16 @@ const finalMessageSchema = new mongoose.Schema({
   cycleStartedAt: Date,
   expiryEnabled: Boolean, // opt in at preparation; never send for historical cycles
   expiryQueuedAt: Date, // permanent marker, even after queue retention deletes the copy
+  // When the first closure copy went, copied from the queue (backend helpers/finalMessageComeback.js), which forgets it after 30 days.
+  // From then on the person is Dead for good, and any message they send brings them back as an Inquiry.
+  expirySentAt: Date,
+  cameBackAt: Date, // the message after the closure that brought them back; stopSource is then 'came-back'
+  cameBackText: String,
   originalMessage: { id: String, chat: String, text: String },
   stoppedAt: Date,
   stopReason: String,
   stoppedBy: mongoose.Schema.Types.ObjectId,
-  stopSource: { type: String, enum: ['admin', 'outgoing', 'status-change'] },
+  stopSource: { type: String, enum: ['admin', 'outgoing', 'status-change', 'came-back'] },
   sendRevision: { type: Number, default: 0 },
   outboundChecks: { type: [{ _id: false, id: String, at: Date, source: { type: String, enum: ['unknown'] } }], default: undefined },
   // Written by the worker (inbound.js), acted on by the backend job (helpers/finalMessageJobs.js).

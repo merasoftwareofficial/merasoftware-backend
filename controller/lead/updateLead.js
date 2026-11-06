@@ -102,7 +102,8 @@ const updateLeadController = async (req, res) => {
         if (!allowed) return res.status(400).json({ message: "Please select a valid stage for this offer", error: true, success: false });
       } else if (clientFollowUp) {
         // Won comes from a page opened before this form showed the status: a note that keeps the status.
-        if (badge !== WON && !CLIENT_BEHAVIOURS.includes(badge)) return res.status(400).json({ message: "Please select a valid status", error: true, success: false });
+        // So does the current one, which may be Inquiry: only the system sets that, but a note may keep it.
+        if (badge !== WON && badge !== clientBefore && !CLIENT_BEHAVIOURS.includes(badge)) return res.status(400).json({ message: "Please select a valid status", error: true, success: false });
       } else {
         if (isMatured && badge !== WON) {
           return res.status(400).json({ message: "Matured stage cannot be changed", error: true, success: false });

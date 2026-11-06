@@ -1490,3 +1490,140 @@ test('client dual copies keep Won and one timer; alt reply waits for the admin d
     await incoming({conversation:'Please call'},new Date(Date.now()+5000),ALT);await followFinalMessages();assert.equal((await row(item._id)).status,'replied');assert.equal((await Lead.findById(item._id)).clientBehaviour,'Negative');
   }finally{delete process.env.ALT_PHONE_SENDING_ENABLED;delete process.env.CLIENT_FINAL_MESSAGE_ENABLED;}
 });
+
+// Dead for good after the closure message: any message from then on brings the person back as an Inquiry (helpers/finalMessageComeback.js).
+const later = seconds => new Date(Date.now() + seconds * 1000);
+async function closedAndSent(fields) {
+  const { id } = await sentAndWaiting(fields);
+  await pastDeadline(id);
+  await followFinalMessages(); // Dead, closure queued
+  await sendQueue(phone()); // closure sent
+  await followFinalMessages(); // closure's time kept on the cycle
+  return id;
+}
+
+test('after the closure message any message, even an emoji, brings a Dead lead back as an Inquiry', async () => {
+  for (const message of [{ conversation: 'Please call me' }, { conversation: 'ok' }, { conversation: '👍🙏' }, { reactionMessage: { text: '👍', key: { id: 'x' } } }, { imageMessage: {} }]) {
+    await Promise.all([Queue.deleteMany({}), FinalMessage.deleteMany({}), Lead.deleteMany({})]);
+    const id = await closedAndSent();
+    assert.equal(await stage(id), 'Dead');
+    assert.ok((await row(id)).expirySentAt, 'closure time kept');
+    await incoming(message, later(5));
+    await followFinalMessages();
+    assert.equal(await stage(id), 'Inquiry', JSON.stringify(message));
+    const cycle = await row(id);
+    assert.equal(cycle.status, 'stopped');
+    assert.equal(cycle.stopSource, 'came-back');
+    assert.ok(cycle.cameBackAt);
+    const saved = await Lead.findById(id).lean();
+    assert.match(saved.followUps.at(-1).note, /after the closure message[\s\S]*Came back from Dead to Inquiry/);
+    assert.equal(saved.followUps.at(-1).badge, 'Inquiry');
+    assert.equal((await audience('Inquiry')).count, 1, 'no longer blocked as Dead');
+  }
+  const box = await call('/auto-reply/final-message', 'GET');
+  assert.equal(box.data.counts['came-back'], 1);
+});
+
+test('before the closure message goes, the old rules stay: a real reply is Negative, a listed word keeps it Dead', async () => {
+  const id = await sentAndWaiting().then(result => result.id);
+  await pastDeadline(id);
+  await followFinalMessages();
+  assert.equal(await Queue.countDocuments({ event: 'lead.finalMessageExpired', status: 'pending' }), 1, 'closure waiting, not sent');
+  await incoming({ conversation: 'ok' }, later(2));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Dead');
+  await incoming({ conversation: 'Please tell me more' }, later(4));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Negative');
+  assert.equal((await row(id)).status, 'replied');
+});
+
+test('a message from before the closure, arriving late, does not bring the lead back', async () => {
+  const id = await closedAndSent();
+  await incoming({ conversation: 'old message' }, new Date(Date.now() - 50 * HOUR));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Dead');
+  assert.equal((await row(id)).status, 'dead');
+});
+
+test('a month later, after the queue forgot the closure, our own message stops nothing and their message still counts', async () => {
+  const id = await closedAndSent();
+  await Queue.deleteMany({ event: 'lead.finalMessageExpired' }); // queue retention
+  const own = { key: { id: 'own-later', remoteJid: `${PHONE}@s.whatsapp.net`, fromMe: true }, message: { conversation: 'Hello again from our phone' }, messageTimestamp: Math.floor(later(2).getTime() / 1000) };
+  await inbound.handle({ type: 'notify', messages: [own] });
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'dead', 'our own message after the closure must not stop the cycle');
+  assert.equal((await call(`/admin/leads/${id}/final-message/stop`, 'POST', { reason: 'check', draftId: String((await row(id)).draftId) })).status, 409, 'nothing to stop after the closure');
+  await incoming({ conversation: 'hi' }, later(30 * 24 * 3600));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Inquiry');
+});
+
+test('a Dead client who writes after the closure gets current status Inquiry and stays Matured', async () => {
+  process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
+  try {
+    const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+    const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+    const marked = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
+    await decide(marked.emailDraftIds[0], 'send', 'whatsapp'); await sendQueue(phone()); await followFinalMessages();
+    await pastDeadline(clientLead._id); await followFinalMessages();
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Dead');
+    await sendQueue(phone()); await followFinalMessages();
+    assert.ok((await row(clientLead._id)).expirySentAt);
+    await incoming({ reactionMessage: { text: '❤️', key: { id: 'y' } } }, later(5));
+    await followFinalMessages();
+    const saved = await Lead.findById(clientLead._id).lean();
+    assert.equal(saved.status, 'Won');
+    assert.equal(saved.clientBehaviour, 'Inquiry');
+    assert.equal((await row(clientLead._id)).stopSource, 'came-back');
+    // A note keeps Inquiry; the admin can't choose it.
+    const form = new FormData(); form.append('action', 'followUp'); form.append('badge', 'Inquiry'); form.append('note', 'Called back');
+    const noted = await nativeFetch(`${base}/admin/leads/${clientLead._id}`, { method: 'POST', headers: { Cookie: cookie() }, body: form });
+    assert.equal(noted.status, 200);
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Inquiry');
+    const chosen = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Inquiry' });
+    assert.notEqual(chosen.status, 200);
+    assert.equal((await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Positive' })).status, 200, 'the admin moves it on as usual');
+  } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
+});
+
+test('a lead the admin moved after the closure stays where the admin put it', async () => {
+  const id = await closedAndSent();
+  await Lead.updateOne({ _id: id }, { $set: { status: 'Positive' } });
+  await incoming({ conversation: 'hello' }, later(5));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Positive');
+  assert.equal((await row(id)).stopSource, 'status-change');
+});
+
+test('Negative again after coming back starts a fresh cycle; the came-back count keeps the earlier one', async () => {
+  const id = await closedAndSent();
+  await incoming({ conversation: 'hi' }, later(5));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Inquiry');
+  await Lead.updateOne({ _id: id }, { $set: { status: 'Contacted' } });
+  await markNegative(id);
+  const fresh = await row(id);
+  assert.equal(fresh.status, 'review');
+  assert.equal(fresh.expirySentAt, undefined);
+  assert.equal(fresh.cameBackAt, undefined);
+  assert.equal((await call('/auto-reply/final-message', 'GET')).data.counts['came-back'], 1);
+});
+
+test('an ad reply after the closure brings even a named lead back as an Inquiry, whichever job runs first', async () => {
+  const { DEFAULT_AD_MESSAGE } = require('../whatsapp/src/autoReplyRules.js');
+  const { processInbox } = require('../helpers/autoReplyJobs');
+  for (const first of ['auto-reply', 'final-message']) {
+    await Promise.all([Queue.deleteMany({}), FinalMessage.deleteMany({}), Lead.deleteMany({}), Inbox.deleteMany({})]);
+    const id = await closedAndSent();
+    const at = later(5);
+    await incoming({ conversation: DEFAULT_AD_MESSAGE }, at);
+    await State.updateOne({ _id: STATE_ID }, { $set: { autoReply: { recognise: true, sendReplies: false, addLeads: true } } });
+    await Inbox.create({ messageId: `ad-${first}`, phone: PHONE, text: DEFAULT_AD_MESSAGE, status: 'new', profileName: 'Ravi', sentAt: at });
+    if (first === 'auto-reply') { await processInbox(); await followFinalMessages(); } else { await followFinalMessages(); await processInbox(); }
+    assert.equal(await stage(id), 'Inquiry', first);
+    assert.equal((await row(id)).stopSource, 'came-back', first);
+    const saved = await Lead.findById(id).lean();
+    assert.ok(saved.followUps.some(entry => /New WhatsApp ad message/.test(entry.note)), 'the ad remark is still recorded');
+  }
+});

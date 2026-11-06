@@ -17,7 +17,8 @@ async function stopCycle(row, { reason, actor, source = 'admin' }) {
     const expiries = await Queue.find({ finalMessageExpiryId: row.draftId }).session(session).lean();
     const originals = await Queue.find({ emailDraftId: row.draftId }).session(session).lean();
     const draft = await EmailDraft.findById(row.draftId).session(session).lean();
-    if (expiries.some(expiry => expiry.status === 'sent')) fail('The closure message has already been sent and cannot be recalled.');
+    // expirySentAt keeps it once the queue has forgotten the copy (helpers/finalMessageComeback.js).
+    if (current.expirySentAt || expiries.some(expiry => expiry.status === 'sent')) fail('The closure message has already been sent and cannot be recalled.');
     if (expiries.some(inFlight) || originals.some(inFlight) || draft?.status === 'sending' || draft?.delivery?.lockUntil > new Date()) fail('A message is already being sent. Refresh after it finishes; an in-progress send cannot be recalled.');
     const at = new Date();
     const changed = await FinalMessage.updateOne({ _id: current._id, draftId: row.draftId, status: current.status }, { $set: {
@@ -81,7 +82,8 @@ async function processOutbound(row) {
       return 'pending';
     }
     if (source === 'manual') {
-      if (await Queue.exists({ finalMessageExpiryId: row.draftId, status: 'sent' })) {
+      // After the closure our own message changes nothing, even once the queue has forgotten it (row.expirySentAt).
+      if (row.expirySentAt || await Queue.exists({ finalMessageExpiryId: row.draftId, status: 'sent' })) {
         await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId }, { $pull: { outboundChecks: { id: item.id } } });
         continue;
       }

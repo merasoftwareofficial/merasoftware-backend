@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, NAME_OPTIONAL_STATUSES, CLIENT_BEHAVIOURS } = require("../helpers/leadStatuses");
+const { LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, NAME_OPTIONAL_STATUSES, STORED_CLIENT_BEHAVIOURS } = require("../helpers/leadStatuses");
 
 // Attachment for a follow-up (optional). Reuses the same shape/Drive fields as
 // proposalSchema below so file handling stays a single pattern across the model.
@@ -181,10 +181,10 @@ const leadSchema = new mongoose.Schema({
     enum: LEAD_STATUSES,
     default: DEFAULT_LEAD_STATUS,
   },
-  // A client's general behaviour, kept on the client's Won lead. Unset counts as Neutral.
+  // A client's general behaviour, kept on the client's Won lead. Unset counts as Neutral. Inquiry is set only by the system.
   clientBehaviour: {
     type: String,
-    enum: CLIENT_BEHAVIOURS,
+    enum: STORED_CLIENT_BEHAVIOURS,
   },
   // Incremented whenever an administrator changes client behaviour. Tracked
   // messages use this to reject an old countdown after a later change.
