@@ -9,7 +9,9 @@ const { getOrderDisplayName, getOrderCategory } = require('./orderPresentation')
 const { tableBlock, listBlock, escapeHtml } = require('./emailMarkup');
 const { hasConfirmedName } = require('./leadName');
 
-const ADMIN_EMAILS = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
+// Only the fallback: mail to the admins goes where they saved it in Admin → Settings (helpers/teamContacts.js;
+// emailController.js prepareMail sets the recipients of every admin action).
+const ADMIN_EMAILS = require('./teamContacts').TEAM_FALLBACK_EMAILS;
 const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const text = value => (value === undefined || value === null ? '' : String(value));
 const day = (value, options) => (value ? formatIndiaDate(value, options) : '');
@@ -873,7 +875,7 @@ const definitions = {
     },
     blocks: {},
     build(user, order, invoice = {}) {
-      return { to: [process.env.ADMIN_EMAIL || 'vacomputers.com@gmail.com'], values: {
+      return { to: ADMIN_EMAILS, values: {
         customerName: text(user?.name), customerEmail: text(user?.email), customerId: text(user?._id),
         invoiceNumber: text(invoice.invoiceNumber), plan: getOrderDisplayName(order, 'Website Update Plan'), period: `${day(invoice.renewalPeriodStart)} - ${day(invoice.renewalPeriodEnd)}`,
         renewalMonth: text(invoice.renewalMonth), amount: money(invoice.amount), dueDate: day(invoice.dueDate),
@@ -1378,7 +1380,6 @@ definitions['plan.payment.rejected'] = {
     } };
   },
 };
-// Admin recipients are ADMIN_EMAILS until the admin settings page exists (plan.md 4.3).
 definitions['plan.purchase.admin'] = {
   subject: 'New plan purchase - {{customerName}} - {{plan}}',
   text: lines('{{customerName}} ({{customerEmail}}) bought **{{plan}}**.', '',

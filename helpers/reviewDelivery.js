@@ -1,18 +1,29 @@
 const { randomUUID } = require('node:crypto');
 const { EmailDraft, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
-const { normalizePhone, savedPhoneFor, enqueueWhatsAppForEmail } = require('./whatsappQueue');
-const { channelFor } = require('./emailCatalog');
+const { normalizePhone, savedPhoneFor, teamPhoneRows, enqueueWhatsAppForEmail } = require('./whatsappQueue');
+const { channelFor, isAdminRecipientEvent } = require('./emailCatalog');
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
 
 async function availability(draft) {
   const emails = draft.to || [];
   const email = emails.length > 0 && emails.every(value => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value));
+  // Team mail to the admins: the numbers saved in Admin → Settings, and WhatsApp goes to every admin that has one
+  // (an admin without a number still gets the email). Everyone else: each recipient must have a number.
+  const team = isAdminRecipientEvent(draft.event);
+  if (team && emails.length) {
+    const rows = (await Promise.all(emails.map(async address => await teamPhoneRows(draft, address)
+      || [{ email: address, phone: normalizePhone(await savedPhoneFor(address)) }]))).flat();
+    return choicesFor(draft, { email, whatsapp: rows.some(row => row.phone), recipients: rows });
+  }
   const recipients = emails.length
     ? await Promise.all(emails.map(async address => ({ email: address, phone: normalizePhone(emails.length === 1 && draft.whatsappTo ? draft.whatsappTo : await savedPhoneFor(address)) })))
     : [{ phone: normalizePhone(draft.whatsappTo) }];
   // Each recipient's alternate number too, as its own row (helpers/contactNumbers.js); never for security messages.
   const all = recipients.every(row => row.phone) ? await require('./contactNumbers').withAltNumbers(draft, recipients) : recipients;
-  const whatsapp = !draft.event?.startsWith('website.subscription.') && process.env.ENABLE_WHATSAPP === 'true' && recipients.length > 0 && recipients.every(row => row.phone);
+  return choicesFor(draft, { email, whatsapp: recipients.length > 0 && recipients.every(row => row.phone), recipients: all });
+}
+async function choicesFor(draft, { email, whatsapp: reachable, recipients: all }) {
+  const whatsapp = !draft.event?.startsWith('website.subscription.') && process.env.ENABLE_WHATSAPP === 'true' && reachable;
   const phoneReason = process.env.ENABLE_WHATSAPP !== 'true' ? 'WhatsApp is off on the server.' : 'A valid saved phone number is missing.';
   return {
     choices: [

@@ -1,6 +1,6 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { EmailDraft, EmailTemplate, EmailPolicy, EmailHistory } = require('../models/emailControlModel');
-const { byKey, eventKeys, isCustomerTriggered, customerEventKeys } = require('./emailCatalog');
+const { byKey, eventKeys, isCustomerTriggered, isAdminRecipientEvent, customerEventKeys } = require('./emailCatalog');
 const userModel = require('../models/userModel');
 const { render, compose, withRequiredLinks } = require('./emailMarkup');
 const { resolveTemplate, systemTemplate, composeTemplate, REVIEWED_NAME } = require('./emailTemplates');
@@ -100,7 +100,9 @@ async function prepareMail(event, mail, extraValues) {
   const values = { ...(mail.values || {}), ...(extraValues || {}) };
   const content = await applyDefault(event, mail, values);
   if (!content) return suppressed();
-  const to = (Array.isArray(content.to) ? content.to : [content.to]).filter(Boolean);
+  // Mail to the admins goes where they saved it in Admin → Settings (helpers/teamContacts.js), not to the builder's address.
+  const to = isAdminRecipientEvent(event) ? await require('./teamContacts').teamRecipients()
+    : (Array.isArray(content.to) ? content.to : [content.to]).filter(Boolean);
   if ((!to.length && !(require('./whatsappQueue').normalizePhone(mail.phone) && process.env.ENABLE_WHATSAPP === 'true')) || to.some(address => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return suppressed();
   validateContent(content.subject, content.text);
   if (mail.dedupeKey) {

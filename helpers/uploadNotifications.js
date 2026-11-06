@@ -2,7 +2,8 @@ const Request = require('../models/updateRequestModel');
 const { sendUpdateRequestNotification, sendUploadDeliveryStuck, sendUserConfirmation } = require('./emailService');
 const { createUpdateRequestNotification } = require('./notificationService');
 const { measureUpload } = require('./uploadTiming');
-const ADMIN_EMAILS = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
+// The admins' saved settings decide the real recipients (helpers/teamContacts.js); this is the fallback the builder needs.
+const { TEAM_FALLBACK_EMAILS: ADMIN_EMAILS } = require('./teamContacts');
 const findRecord = requestId => Request.findById(requestId)
   .populate('userId', 'name email').populate({ path: 'updatePlanId', populate: { path: 'productId', select: 'serviceName validityPeriod updateCount' } });
 

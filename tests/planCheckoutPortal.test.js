@@ -114,7 +114,8 @@ test('wallet only: active at once and uploads open; the purchase mails stay Off 
   await turnOn('plan.purchase.admin', 'plan.payment.submitted');
   await buy(plan, { key: crypto.randomUUID() });
   const [adminMail] = await mailsFor('plan.purchase.admin');
-  assert.deepEqual(adminMail.to, ['vacomputers.com@gmail.com', 'syncvap@gmail.com']);
+  // No admin saved settings here: the owner's fallback (helpers/teamContacts.js).
+  assert.deepEqual(adminMail.to, ['syncvap@gmail.com']);
   assert.match(adminMail.text, /Paid in full from the wallet\. The plan is active\./);
   assert.equal(await EmailDraft.countDocuments({ event: 'plan.payment.submitted' }), 0, 'wallet-only buyer gets "plan started", not "submitted"');
 });

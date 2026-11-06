@@ -285,7 +285,8 @@ const submitCore = asyncHandler(async (req, res) => {
           }
         }));
       // Admin emails
-      const adminEmails = ['vacomputers.com@gmail.com', 'syncvap@gmail.com'];
+      // The admins' saved settings decide the real recipients (helpers/teamContacts.js).
+      const adminEmails = require('../../helpers/teamContacts').TEAM_FALLBACK_EMAILS;
 
       await measureUpload(timing, 'admin_email_prepare', () => sendUpdateRequestNotification(populatedRequest, adminEmails));
       console.log(`Admin notification emails sent to ${adminEmails.length} admins`);

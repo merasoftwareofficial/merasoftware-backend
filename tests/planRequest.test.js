@@ -200,7 +200,8 @@ test('both mails are Off until an admin turns them On; then they send to the tea
   await waitFor(async () => calls.length === 2);
   const admin = calls.find((mail) => mail.subject.startsWith('New plan request'));
   const received = calls.find((mail) => mail.subject.startsWith('We have received your request'));
-  assert.deepEqual(admin.to, ['vacomputers.com@gmail.com', 'syncvap@gmail.com']);
+  // No admin saved settings here: the owner's fallback (helpers/teamContacts.js).
+  assert.deepEqual(admin.to, ['syncvap@gmail.com']);
   const lead = await leadModel.findOne().lean();
   assert.ok(admin.text.includes(`https://portal.example.test/admin-panel/leads/${lead._id}`));
   assert.ok(admin.text.includes('+919876543210'));

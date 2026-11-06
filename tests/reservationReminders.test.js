@@ -129,7 +129,7 @@ test('start request: clock paused, team and customer told once, lead follow-up, 
   await deliverStartNotices(); await deliverStartNotices();
   const [team] = await history('offer.start.request.admin');
   assert.equal((await history('offer.start.request.admin')).length, 1);
-  assert.deepEqual(team.to, ['vacomputers.com@gmail.com', 'syncvap@gmail.com']);
+  assert.deepEqual(team.to, ['syncvap@gmail.com'], 'no admin saved settings here: the fallback');
   const [told] = await queued('offer.start.request.received');
   assert.match(told.text, /We have received your request/); assert.match(told.text, /\/offer\/test-offer/);
   assert.equal((await history('offer.start.request.received')).length, 1);

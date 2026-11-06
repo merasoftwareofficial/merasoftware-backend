@@ -564,7 +564,8 @@ test('a customer update request on a client project (no catalogue product) still
   const result = await api('/builder/sendUpdateRequestNotification', customer, { args: [{ userId: sampleUser, updatePlanId: { projectSnapshot: { displayName: 'Shop Website' } }, files: [{}, {}], instructions: [] }, ['a1@example.test', 'a2@example.test']] });
   assert.equal(result.emailDraftIds, undefined);
   await waitFor(() => calls.length === 1);
-  assert.deepEqual(calls[0].payload.to, ['a1@example.test', 'a2@example.test']);
+  // Admin mail goes where the admins saved it (helpers/teamContacts.js), not to the caller's list; none saved here: the fallback.
+  assert.deepEqual(calls[0].payload.to, ['syncvap@gmail.com']);
   assert.match(calls[0].payload.text, /Plan: Shop Website/); assert.match(calls[0].payload.text, /2 file\(s\) uploaded/);
   assert.match(calls[0].payload.text, /No instructions provided/);
 });

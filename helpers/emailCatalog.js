@@ -81,6 +81,10 @@ const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliver
 const TEAM = new Set(['plan.request.admin', 'sendUpdateRequestNotification', 'sendUploadDeliveryStuck', 'sendDeveloperAssignmentEmail',
   'sendAdminPurchaseConfirmationEmail', 'sendAdminUPIPendingNotification', 'sendContactRequestNotification', 'sendCallbackRequestNotification',
   'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin', 'offer.start.request.admin']);
+// Team mail addressed to the admins (not the developer): its recipients and WhatsApp numbers come from the
+// admins' own settings (helpers/teamContacts.js), whatever address its builder names.
+const ADMIN_RECIPIENT = new Set([...TEAM].filter(key => key !== 'sendDeveloperAssignmentEmail'));
+const isAdminRecipientEvent = key => ADMIN_RECIPIENT.has(key);
 // Subscription confirmation needs the email link; reviewDelivery.js refuses WhatsApp for it.
 const EMAIL_ONLY = new Set(['website.subscription.confirm', 'website.subscription.manage']);
 const CHANNELS = ['whatsapp', 'email', 'both'];
@@ -103,4 +107,4 @@ const isAutomaticEvent = key => isCustomerTriggered(key) || byKey.get(key)?.trig
 const customerEventKeys = catalog.filter(event => event.trigger === 'customer').map(event => event.key);
 // The action's route: its saved policy, else its default. The one rule every send follows.
 const channelFor = (key, policy) => EMAIL_ONLY.has(key) ? 'email' : CHANNELS.includes(policy?.channel) ? policy.channel : defaultChannel(key);
-module.exports = { events: catalog, byKey, eventKeys, isCustomerTriggered, isAutomaticEvent, customerEventKeys, channelFor, CHANNELS };
+module.exports = { events: catalog, byKey, eventKeys, isCustomerTriggered, isAutomaticEvent, isAdminRecipientEvent, customerEventKeys, channelFor, CHANNELS };

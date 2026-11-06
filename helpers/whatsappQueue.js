@@ -31,6 +31,17 @@ async function savedPhoneFor(email) {
   return lead?.phone || null;
 }
 
+/**
+ * The WhatsApp rows of an admin address on team mail (emailCatalog.js isAdminRecipientEvent): the numbers saved in
+ * Admin → Settings (helpers/teamContacts.js), the second as an extra row (alt), as an alternate number is.
+ * null when that admin saved no number: the address then keeps its account phone (savedPhoneFor).
+ */
+async function teamPhoneRows(draft, email) {
+  if (!require('./emailCatalog').isAdminRecipientEvent(draft.event)) return null;
+  const numbers = await require('./teamContacts').teamNumbersFor(email);
+  return numbers && numbers.map((number, index) => ({ email, phone: normalizePhone(number), saved: number, ...(index ? { alt: true } : {}) }));
+}
+
 /** The email as WhatsApp text: its subject in bold on the first line, then the email's own plain text. */
 function messageText(draft) {
   const subject = String(draft.subject || '').replace(/\*/g, '').trim();
@@ -63,11 +74,15 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
   let targets = recipients;
   if (!targets) {
     // An automatic send: each recipient's saved number, then their alternate number (helpers/contactNumbers.js).
-    const main = await Promise.all((draft.to || []).map(async email => {
+    // An admin on team mail gets the numbers saved in Admin → Settings instead.
+    const team = [];
+    const main = (await Promise.all((draft.to || []).map(async email => {
+      const rows = await teamPhoneRows(draft, email);
+      if (rows) { team.push(...rows); return null; }
       const saved = await savedPhoneFor(email);
       return { email, phone: normalizePhone(saved), saved };
-    }));
-    targets = await require('./contactNumbers').withAltNumbers(draft, main);
+    }))).filter(Boolean);
+    targets = [...team, ...await require('./contactNumbers').withAltNumbers(draft, main)];
   }
   const failures = [];
   for (const target of targets) {
@@ -104,4 +119,4 @@ async function queueSource(item) {
   }
   return item.event && !item.event.startsWith('lead.') ? 'automated' : 'unknown';
 }
-module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, messageText, queueSource };
+module.exports = { enqueueWhatsApp, enqueueWhatsAppForEmail, normalizePhone, savedPhoneFor, teamPhoneRows, messageText, queueSource };
