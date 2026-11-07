@@ -9,6 +9,9 @@ const { hasConfirmedName } = require("./leadName");
 // A number normalizePhone can't read still has its digits, so it stays the same person every time.
 const phoneKey = (phone) => normalizePhone(phone) || String(phone || "").replace(/\D/g, "");
 
+/** Live leads before trashed ones, each keeping its order. */
+const liveFirst = (leads) => [...leads.filter((lead) => !lead.deletedAt), ...leads.filter((lead) => lead.deletedAt)];
+
 /** The leads holding this number, newest first. Trashed ones too unless the filter says otherwise. */
 async function findLeadsByPhone(phone, filter = {}, { session } = {}) {
   const wanted = phoneKey(phone);
@@ -99,6 +102,45 @@ async function leadForNewRequest(phone, { name, email }) {
   return returning[0] || leads.find((lead) => lead.status === WRONG) || null;
 }
 
+/**
+ * The lead that already is this person, whatever its status, Trash and clients included: by main phone, else by
+ * email, else a lead with this number as its alternate. A client's own project requests are not (they stay apart,
+ * customerProjectRequest.js). Returns { lead, matchedBy } or null when the person is new: only then may a lead be made.
+ */
+async function findPersonLead({ phone, email }) {
+  const notRequest = { requestedByUserId: null };
+  const [byPhone] = liveFirst(await findLeadsByPhone(phone, notRequest));
+  if (byPhone) return { lead: byPhone, matchedBy: "phone" };
+  const mail = String(email || "").trim().toLowerCase();
+  const [byEmail] = mail ? liveFirst(await leadModel.find({ email: mail, ...notRequest }).sort({ updatedAt: -1 })) : [];
+  if (byEmail) return { lead: byEmail, matchedBy: "email" };
+  const [byAlternate] = liveFirst(await findLeadsByContactNumber(phone, notRequest));
+  return byAlternate ? { lead: byAlternate, matchedBy: "alternate" } : null;
+}
+
+/**
+ * A new request goes on the person's existing lead (findPersonLead): back from Trash, Inquiry/Negative/Dead → Neutral,
+ * Wrong stays Wrong, a client's lead stays Won. A missing name or email is filled; a new number found by email becomes
+ * the alternate. Returns notes for what could not be kept on the lead. The caller adds its remark and saves.
+ */
+async function takeRequest(lead, { name, email, phone }, matchedBy) {
+  const notes = [];
+  if (lead.deletedAt) lead.set({ deletedAt: null, deletedBy: null });
+  if (!lead.convertedToUserId) {
+    if (lead.status === INQUIRY) lead.set({ status: CONTACTED });
+    else if ([NEGATIVE, DEAD].includes(lead.status)) await revive(lead, { name, email });
+  }
+  if (!hasConfirmedName(lead) && name) lead.set({ name, nameFromWhatsapp: false });
+  const mail = String(email || "").trim().toLowerCase();
+  if (mail && !lead.email) lead.set({ email: mail });
+  else if (mail && lead.email !== mail) notes.push(`A request came with another email: ${mail}`);
+  if (phone && matchedBy === "email" && !leadPhoneKeys(lead).includes(phoneKey(phone))) {
+    if (!String(lead.altPhone || "").trim()) lead.set({ altPhone: phone });
+    else notes.push(`A request came from another number: ${phone}`);
+  }
+  return notes;
+}
+
 /** The client wrote to us: a Dead behaviour ends. Nothing else about them changes. */
 async function clearClientDead(filter, { preserveFinalReply = false } = {}) {
   const now = new Date();
@@ -115,4 +157,4 @@ async function clearClientDead(filter, { preserveFinalReply = false } = {}) {
   await FinalMessage.updateMany({ leadId: { $in: eligibleIds }, subjectKind: 'client', status: { $in: ['waiting', 'dead'] } }, { $set: { status: 'stopped' } });
 }
 
-module.exports = { phoneKey, leadPhoneKeys, findLeadsByPhone, findLeadsByContactNumber, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, isReturning, revive, leadForNewRequest, clearClientDead };
+module.exports = { phoneKey, leadPhoneKeys, liveFirst, findLeadsByPhone, findLeadsByContactNumber, findAccountsByPhone, isKnownPerson, claimInquiryLead, endFinalMessage, isReturning, revive, leadForNewRequest, findPersonLead, takeRequest, clearClientDead };

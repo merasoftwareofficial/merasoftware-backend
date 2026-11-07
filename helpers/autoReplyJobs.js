@@ -3,7 +3,8 @@ const Lead = require('../models/leadModel');
 const { AUTO_REPLY_EVENT, FinalMessage, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
 const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
-const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByContactNumber, isKnownPerson, phoneKey } = require('./leadPhone');
+const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByContactNumber, isKnownPerson, liveFirst, phoneKey } = require('./leadPhone');
+const { linkPersonLead } = require('./personLead');
 const { replyText } = require('./autoReplyContent');
 const { comeBackByPhone } = require('./finalMessageComeback');
 const { enqueueWhatsApp } = require('./whatsappQueue');
@@ -57,19 +58,6 @@ async function reopen(lead, row, cameBackFrom) {
   await addRemark(lead, row, { status, cameBackFrom });
 }
 
-/** A website member with no lead yet: the account's lead, as an offer reservation or plan request makes it. */
-async function makeMemberLead(user, row) {
-  try {
-    return await Lead.create({
-      name: user.name || user.email, email: user.email, phone: user.phone, source: SOURCE, reservationUserId: user._id,
-      inquiry: inquiryDetails(row),
-    });
-  } catch (error) {
-    if (error.code !== 11000) throw error;
-    return Lead.findOne({ reservationUserId: user._id });
-  }
-}
-
 /** Records the message on this person's one lead. Returns 'created' when a new lead was made, else 'updated'. */
 async function recordKnownPerson(row, accounts) {
   // Dead for good after a closure message: they come back as an Inquiry first, as from any other message, so the
@@ -85,7 +73,17 @@ async function recordKnownPerson(row, accounts) {
   const linked = member ? await Lead.findOne({ reservationUserId: member._id }) : null;
   // Main-number leads first, then a lead that has this number as its alternate: the same person writing from their other phone.
   const byPhone = await findLeadsByContactNumber(row.phone);
-  const leads = linked && !byPhone.some(lead => String(lead._id) === String(linked._id)) ? [linked, ...byPhone] : byPhone;
+  let leads = linked && !byPhone.some(lead => String(lead._id) === String(linked._id)) ? [linked, ...byPhone] : byPhone;
+  if (!leads.length && member) {
+    // The member's one lead, found by the account's email when not by this number, as signup and reservations find it.
+    const { lead, created } = await linkPersonLead(member, { source: SOURCE, fields: { inquiry: inquiryDetails(row) } });
+    await addRemark(lead, row);
+    if (created) await Inbox.updateOne({ _id: row._id }, { $set: { leadId: lead._id }, $unset: { matchedLeadId: 1 } });
+    return created ? 'created' : 'updated';
+  }
+  // Only a trashed client or a guest holds this number: a lead with one of their emails is still them.
+  const emails = accounts.map(user => String(user.email || '').trim().toLowerCase()).filter(Boolean);
+  if (!leads.length && emails.length) leads = liveFirst(await Lead.find({ email: { $in: emails }, requestedByUserId: null }).sort({ updatedAt: -1 }));
   const live = leads.filter(lead => !lead.deletedAt);
   const active = live.find(lead => ![NEGATIVE, DEAD].includes(lead.status));
   const chosen = active || live[0] || leads[0];
@@ -97,13 +95,7 @@ async function recordKnownPerson(row, accounts) {
     if (chosen.convertedToUserId && phoneKey(chosen.phone) !== phoneKey(row.phone)) await clearClientDead({ convertedToUserId: chosen.convertedToUserId }, { preserveFinalReply: true });
     return 'updated';
   }
-  if (member) {
-    const lead = await makeMemberLead(member, row);
-    await addRemark(lead, row);
-    await Inbox.updateOne({ _id: row._id }, { $set: { leadId: lead._id }, $unset: { matchedLeadId: 1 } });
-    return 'created';
-  }
-  await makeLead(row); // only a trashed client or a guest holds this number: their account stays as it is
+  await makeLead(row); // no lead by number or email: their account stays as it is
   return 'created';
 }
 
@@ -149,7 +141,9 @@ async function queueReply(row, rule) {
 async function processRow(row, switches, rule) {
   if (!switches.recognise) return 'switched-off';
   let known = row.personKnown;
-  if (known === undefined || known === null) {
+  // Only "known" is kept: a lead added since this row was first read (a retry) makes the person known now,
+  // unless it is this row's own lead, which makeLead finds again.
+  if (known !== true && !(await Lead.exists({ 'inquiry.inboxId': row._id }))) {
     known = await isKnownPerson(row.phone);
     await Inbox.updateOne({ _id: row._id }, { $set: { personKnown: known } });
   }

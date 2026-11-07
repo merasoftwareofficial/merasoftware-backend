@@ -61,14 +61,25 @@ test('conflicting phone and email leads link the phone lead and note the other',
   assert.equal(String((await Lead.findById(a._id)).reservationUserId),String(result.data._id));
   assert.match((await Lead.findById(b._id)).followUps.map(x=>x.note).join('\n'),new RegExp(String(a._id)));
 });
-test('alt-only match creates a different person and notes contact overlap',async()=>{
-  const old=await lead({phone:'9811111111',altPhone:form().phone});
-  assert.equal((await call(signup,form())).success,true); assert.equal(await Lead.countDocuments(),2);
-  const saved=await Lead.findById(old._id); assert.equal(saved.reservationUserId,undefined); assert.match(saved.followUps.map(x=>x.note).join('\n'),/alternate number/);
+test('alt-only match links that lead: the account number becomes main, the old main the alternate (owner, 7 Nov)',async()=>{
+  const old=await lead({phone:'9811111111',altPhone:form().phone,email:'old@example.test'});
+  const result=await call(signup,form()); assert.equal(result.success,true); assert.equal(await Lead.countDocuments(),1);
+  const saved=await Lead.findById(old._id); assert.equal(String(saved.reservationUserId),String(result.data._id));
+  assert.equal(saved.phone,'+919876543210'); assert.equal(saved.altPhone,'9811111111'); assert.equal(saved.email,'person@example.test');
+  assert.match(saved.followUps.map(x=>x.note).join('\n'),/Earlier email: old@example.test/);
 });
-test('occupied lead is never stolen; Trash is restored and Wrong stays Wrong',async()=>{
+test('admin Add Lead: a number another lead has as phone or alternate is refused, either way round',async()=>{
+  await lead({phone:'9811111111',altPhone:'9822222222'});
+  for (const body of [{phone:'9822222222'},{phone:'9833333333',altPhone:'+91 98111 11111'},{phone:'9833333333',altPhone:'9822222222'}]) {
+    assert.equal((await call(createLead,{name:'New',...body})).status,409,JSON.stringify(body));
+  }
+  assert.equal((await call(createLead,{name:'New',phone:'9833333333',altPhone:'9844444444'})).status,201);
+  assert.equal(await Lead.countDocuments(),2);
+});
+test('occupied lead is never stolen, and no second lead is made: it is used without the link',async()=>{
   const owner=await User.create({email:'owner@example.test',roles:['member']}); const old=await lead({reservationUserId:owner._id});
-  assert.equal((await call(signup,form())).success,true); assert.equal(String((await Lead.findById(old._id)).reservationUserId),String(owner._id)); assert.equal(await Lead.countDocuments(),2);
+  assert.equal((await call(signup,form())).success,true); assert.equal(String((await Lead.findById(old._id)).reservationUserId),String(owner._id)); assert.equal(await Lead.countDocuments(),1);
+  assert.match((await Lead.findById(old._id)).followUps.map(x=>x.note).join('\n'),/belongs to another account/);
 });
 for(const status of ['Contacted','Dead','Wrong']) test(`signup reuses trashed ${status} lead`,async()=>{
   const old=await lead({status,deletedAt:new Date()}); assert.equal((await call(signup,form())).success,true);

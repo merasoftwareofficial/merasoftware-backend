@@ -6,8 +6,7 @@ const { ON_SALE } = require("../../helpers/servicePlanPublicCatalogue");
 const { requireIntegration } = require("../../helpers/integrationAuth");
 const { parsePhone } = require("../../helpers/phoneNumber");
 const { prepareTemplatedMail } = require("../../helpers/emailService");
-const { OPEN_LEAD_STATUSES } = require("../../helpers/leadStatuses");
-const { claimInquiryLead, findLeadsByPhone, leadForNewRequest } = require("../../helpers/leadPhone");
+const { findPersonLead, takeRequest } = require("../../helpers/leadPhone");
 const { linkPersonLead } = require("../../helpers/personLead");
 
 // Website plan page (merasoftware/src/app/plans/[plan]) → "Get this plan" by someone who is not a
@@ -21,7 +20,7 @@ const { linkPersonLead } = require("../../helpers/personLead");
 //
 // One lead per person: a member's account already owns at most one lead (leadModel
 // reservationUserId is unique, shared with offer reservations, helpers/offerReservations.js); a
-// visitor's open lead is found by phone. A new request is added to that lead as a follow-up, and a
+// visitor's lead is found by phone, then email, whatever its stage (findPersonLead). A new request is added to that lead as a follow-up, and a
 // repeat within REPEAT_WINDOW_MS (a double click or a quick resend) changes nothing.
 // Mail: plan.request.admin + plan.request.received are customer-started (helpers/emailCatalog.js),
 // so they send only while an admin has turned them On in Communication.
@@ -84,23 +83,6 @@ async function addToLead(lead, note, createdBy) {
   return false;
 }
 
-// Someone who wrote on WhatsApp now asks for a plan: their Inquiry lead takes this request instead of a second lead.
-// Not addToLead: a recent Inquiry would look like a quick repeat, and this request would be lost.
-async function addToInquiry({ contact, note, createdBy, reservationUserId }) {
-  const lead = await claimInquiryLead(contact.phone, { name: contact.name, email: contact.email, ...(reservationUserId ? { reservationUserId } : {}) });
-  if (!lead) return null;
-  lead.followUps.push({ note, badge: lead.status, createdBy: createdBy || undefined });
-  return lead.save();
-}
-
-// A Dead or Wrong person asks again: that lead takes the request instead of a second lead (helpers/leadPhone.js).
-async function addToReturning({ contact, note, createdBy }) {
-  const lead = await leadForNewRequest(contact.phone, contact);
-  if (!lead) return null;
-  lead.followUps.push({ note, badge: lead.status, createdBy: createdBy || undefined });
-  return lead.save();
-}
-
 // The two mails' data (helpers/emailDefinitions.js plan.request.*): who asked, which plan, what choice.
 async function notify({ lead, plan, quote, contact }) {
   const request = { lead, planName: plan.serviceName, contact, ...choiceText(plan, quote) };
@@ -161,21 +143,17 @@ const integrationPlanRequest = respond(async (req) => {
   const contact = { name, email, phone };
   const note = noteFor({ plan, quote, contact });
 
-  const inquiry = await addToInquiry({ contact, note });
-  if (inquiry) {
-    await notify({ lead: inquiry, plan, quote, contact });
+  // The person's one lead, whatever its stage, Trash or client included (helpers/leadPhone.js findPersonLead).
+  // A second lead is made only for someone the business has no lead for at all.
+  const found = await findPersonLead(contact);
+  if (found) {
+    const { lead: known, matchedBy } = found;
+    if (!known.deletedAt && Date.now() - lastRequestAt(known) < REPEAT_WINDOW_MS) return { created: false, repeated: true };
+    for (const extra of await takeRequest(known, contact, matchedBy)) known.followUps.push({ note: extra, badge: known.status });
+    known.followUps.push({ note, badge: known.status });
+    await known.save();
+    await notify({ lead: known, plan, quote, contact });
     return { created: false, repeated: false };
-  }
-  const returning = await addToReturning({ contact, note });
-  if (returning) {
-    await notify({ lead: returning, plan, quote, contact });
-    return { created: false, repeated: false };
-  }
-  const [open] = await findLeadsByPhone(phone, { deletedAt: null, convertedToUserId: null, status: { $in: OPEN_LEAD_STATUSES } });
-  if (open) {
-    const repeated = await addToLead(open, note);
-    if (!repeated) await notify({ lead: open, plan, quote, contact });
-    return { created: false, repeated };
   }
   const lead = await leadModel.create({ name, email, phone, source: SOURCE, notes: note });
   await notify({ lead, plan, quote, contact });

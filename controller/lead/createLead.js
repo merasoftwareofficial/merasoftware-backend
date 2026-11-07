@@ -2,7 +2,7 @@ const leadModel = require("../../models/leadModel");
 const userModel = require("../../models/userModel");
 const AdminSettings = require("../../models/adminSettingsModel");
 const { creditWalletInstant } = require("../../helpers/transactionService");
-const { findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
+const { findLeadsByContactNumber, phoneKey } = require("../../helpers/leadPhone");
 const { isAccountEmail } = require("../../helpers/emailValidator");
 const { memberOnPhone } = require("../../helpers/personLead");
 
@@ -21,7 +21,7 @@ const createLeadController = async (req, res) => {
     const cleanName = (name || "").trim();
     const cleanPhone = (phone || "").trim();
     const cleanEmail = (email || "").trim().toLowerCase();
-    // Optional extras: search and contact only, never used to match or block a person.
+    // Optional extras. The alternate number is also checked below: no other lead may hold either number.
     const cleanBusinessName = String(businessName || "").trim();
     const cleanAltPhone = String(altPhone || "").trim();
 
@@ -81,7 +81,10 @@ const createLeadController = async (req, res) => {
 
     if (duplicateOr.length) {
       const existingLead = await leadModel.findOne({ $or: duplicateOr }).lean();
-      if (existingLead || (await findLeadsByPhone(cleanPhone)).length) {
+      // A number counts whether another lead has it as its phone or its alternate, and both numbers here are checked.
+      const numberTaken = (await findLeadsByContactNumber(cleanPhone)).length
+        || (cleanAltPhone && (await findLeadsByContactNumber(cleanAltPhone)).length);
+      if (existingLead || numberTaken) {
         return res.status(409).json({
           message: "A lead with this phone or email already exists",
           error: true,

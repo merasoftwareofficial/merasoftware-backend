@@ -1,6 +1,6 @@
 const leadModel = require("../models/leadModel");
 const { WON, behaviourFromStatus } = require("./leadStatuses");
-const { findLeadsByPhone } = require("./leadPhone");
+const { findLeadsByContactNumber, findLeadsByPhone, liveFirst, phoneKey } = require("./leadPhone");
 const { hasConfirmedName } = require("./leadName");
 
 // Every client has a Won lead, so a campaign to Won leads reaches all of them.
@@ -10,20 +10,24 @@ const SOURCE = "Client account";
 const isClient = (user) => Boolean(user) && !user.isGuest && !user.deletedAt && (user.roles || []).includes("customer");
 
 /**
- * The open lead that is this person: the lead their website account already owns, else by phone first (the phone
- * is the person), else by email. A client's own project requests are not, nor a lead another account owns.
+ * The lead that is this person and no client's yet: the lead their website account already owns, else by phone first
+ * (the phone is the person), else by email. A live one before a trashed one: a trashed lead is still this person.
+ * A client's own project requests are not, nor a lead another account owns.
  */
 async function findOpenLeadFor(user) {
-  const open = { deletedAt: null, convertedToUserId: null, requestedByUserId: null };
+  const open = { convertedToUserId: null, requestedByUserId: null };
   if (user._id) {
-    const linked = await leadModel.findOne({ ...open, reservationUserId: user._id });
+    const [linked] = liveFirst(await leadModel.find({ ...open, reservationUserId: user._id }));
     if (linked) return linked;
     open.reservationUserId = { $in: [null, user._id] };
   }
-  const [byPhone] = await findLeadsByPhone(user.phone, open);
+  const [byPhone] = liveFirst(await findLeadsByPhone(user.phone, open));
   if (byPhone) return byPhone;
   const email = String(user.email || "").trim().toLowerCase();
-  return email ? leadModel.findOne({ ...open, email }).sort({ updatedAt: -1 }) : null;
+  const [byEmail] = email ? liveFirst(await leadModel.find({ ...open, email }).sort({ updatedAt: -1 })) : [];
+  if (byEmail) return byEmail;
+  // A lead with this number as its alternate is still this person (owner, 7 Nov 2026).
+  return liveFirst(await findLeadsByContactNumber(user.phone, open))[0] || null;
 }
 
 // A client's lead is the oldest one converted to them, a live one before a trashed one.
@@ -54,6 +58,16 @@ async function ensureWonLead(user, createdBy) {
   if (existing) return existing;
   const open = await findOpenLeadFor(user);
   if (!open) return createWonLead(user, createdBy);
+  if (open.deletedAt) open.set({ deletedAt: null, deletedBy: null });
+  // Found by email or alternate number: the account's phone becomes the main one, as syncClientLeads keeps it; the old one the alternate.
+  const phone = String(user.phone || "").trim();
+  if (phone && phoneKey(open.phone) !== phoneKey(phone)) {
+    const earlier = String(open.phone || "").trim();
+    const alternateFree = !open.altPhone || phoneKey(open.altPhone) === phoneKey(phone);
+    if (alternateFree) open.altPhone = earlier;
+    else if (earlier) open.followUps.push({ note: `Became a client. Earlier phone: ${earlier}`, badge: open.status, date: new Date(), createdAt: new Date() });
+    open.phone = phone;
+  }
   open.convertedToUserId = user._id;
   open.clientBehaviour = behaviourFromStatus(open.status);
   open.status = WON;

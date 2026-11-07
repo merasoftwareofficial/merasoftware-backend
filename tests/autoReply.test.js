@@ -4,7 +4,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { FinalMessage, Inbox, Lock, Queue, Rule, State, STATE_ID } = require('../whatsapp/src/models.js');
 const { DEFAULT_AD_MESSAGE, RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { RECOMMENDED } = require('../whatsapp/src/settings.js');
@@ -43,7 +43,8 @@ const openSending = () => State.updateOne({ _id: STATE_ID }, { $set: { connectio
 
 before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-auto-reply-test-secret';
-  db = await MongoMemoryServer.create();
+  // A replica set: a member's lead is found or made in a transaction (helpers/personLead.js), as in production.
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.MONGODB_URI = db.getUri(); // the worker config requires it; nothing here connects with it
   await mongoose.connect(db.getUri(), { dbName: 'auto-reply-isolated-test' });
   await Promise.all([Inbox.init(), Rule.init(), Queue.init(), Broadcast.init(), BroadcastRecipient.init(), Template.init()]);
@@ -334,6 +335,33 @@ test('a website member with no lead gets the account\'s lead; with a lead, that 
   assert.equal((await Lead.findOne().lean()).followUps.length, 2);
   assert.equal(await Queue.countDocuments(), 2);
   await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('a member whose lead has their email but an older number: that lead is linked, never a second one', async () => {
+  await setSwitches();
+  await freshStart();
+  const user = await userModel.create({ name: 'Member', email: 'known@example.test', phone: '9876543210', roles: ['member'] });
+  const old = await Lead.create({ name: 'Member', phone: '9811100000', email: 'known@example.test', status: 'Positive' });
+  await Inbox.create(row());
+  await processInbox();
+  assert.equal(await Lead.countDocuments(), 1);
+  const lead = await Lead.findById(old._id).lean();
+  assert.equal(String(lead.reservationUserId), String(user._id));
+  assert.equal(lead.phone, '9876543210', 'the account\'s number becomes the main one, as at signup');
+  assert.equal(lead.altPhone, '9811100000');
+  assert.equal(lead.status, 'Positive');
+  assert.equal((await Inbox.findOne().lean()).outcome, 'updated-and-reply');
+  await userModel.deleteOne({ email: 'known@example.test' });
+});
+
+test('a row first read as unknown: a lead added before the retry gets the remark, no second lead', async () => {
+  await setSwitches();
+  await freshStart();
+  const lead = await Lead.create({ name: 'Ravi', phone: '9876543210', status: 'Positive' });
+  await Inbox.create(row({ personKnown: false }));
+  await processInbox();
+  assert.equal(await Lead.countDocuments(), 1);
+  assert.equal((await Lead.findById(lead._id).lean()).followUps.length, 1);
 });
 
 test('a team number: nothing changes and nothing is sent, even with a lead on it', async () => {

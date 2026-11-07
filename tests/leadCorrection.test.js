@@ -317,6 +317,26 @@ test("a person's open lead is found by phone first, by email only when no number
   assert.equal(await findOpenLeadFor({ email: 'nobody@example.test' }), null);
 });
 
+test("a new client whose only lead is in Trash: that lead comes back as their Won lead, no second one", async () => {
+  const client = await userModel.create({ name: 'Back', email: 'back@example.test', phone: '9000000044', roles: ['customer'] });
+  const trashed = await lead('Positive', { phone: '+91 90000 00044', deletedAt: new Date() });
+  const won = await ensureWonLead(client);
+  assert.equal(String(won._id), String(trashed._id));
+  assert.equal(won.deletedAt, null);
+  assert.equal(won.status, 'Won');
+  assert.equal(await leadModel.countDocuments({ phone: { $in: ['+91 90000 00044', '9000000044'] } }), 1);
+});
+
+test("a new client whose number is only a lead's alternate: that lead becomes theirs, with the account's number as main", async () => {
+  const client = await userModel.create({ name: 'Alt', email: 'alt@example.test', phone: '9000000055', roles: ['customer'] });
+  const old = await lead('Positive', { phone: '9000000066', altPhone: '+91 90000 00055' });
+  const won = await ensureWonLead(client);
+  assert.equal(String(won._id), String(old._id));
+  assert.equal(won.phone, '9000000055');
+  assert.equal(won.altPhone, '9000000066');
+  assert.equal(await leadModel.countDocuments({ convertedToUserId: client._id }), 1);
+});
+
 test('granting the customer role adds the Won lead; other roles do not', async () => {
   const user = await userModel.create({ name: 'New', email: 'new@example.test', phone: '9000000003', roles: ['member'] });
   assert.equal((await json('/addRole', { userId: user._id, role: 'partner' })).status, 200);

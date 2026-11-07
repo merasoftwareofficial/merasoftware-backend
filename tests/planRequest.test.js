@@ -112,10 +112,49 @@ test('one open lead per phone: a quick repeat changes nothing, a later request i
   lead = await leadModel.findOne().lean();
   assert.equal(lead.followUps.length, 1);
   assert.ok(lead.followUps[0].note.includes('Choice: 40 files × 1 update, one-time'));
-  // A closed lead is not reused.
-  await leadModel.updateOne({ _id: lead._id }, { $set: { status: 'Negative' } });
+  // A Negative lead is still the person: it takes the request and comes back to Neutral, no second lead.
+  await leadModel.updateOne({ _id: lead._id }, { $set: { status: 'Negative', followUps: [] } });
   await visitor();
-  assert.equal(await leadModel.countDocuments(), 2);
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal((await leadModel.findOne().lean()).status, 'Contacted');
+});
+
+test('never a second lead: Trash, Wrong, a client, the same email or an alternate number all take the request', async () => {
+  const trashed = await leadModel.create({ name: 'Ravi', phone: '+919876543210', status: 'Positive', deletedAt: new Date() });
+  await visitor();
+  let lead = await leadModel.findById(trashed._id).lean();
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal(lead.deletedAt, null, 'back from Trash');
+  assert.equal(lead.email, 'ravi@example.test', 'a missing email is filled');
+
+  await leadModel.deleteMany({});
+  const wrong = await leadModel.create({ name: 'Ravi', phone: '9876543210', status: 'Wrong' });
+  await visitor();
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal((await leadModel.findById(wrong._id).lean()).status, 'Wrong', 'only the admin changes Wrong');
+
+  await leadModel.deleteMany({});
+  const won = await leadModel.create({ name: 'Asha Client', phone: client.phone, email: client.email, status: 'Won', convertedToUserId: client._id });
+  await visitor({ phone: '9822222222', email: client.email });
+  lead = await leadModel.findById(won._id).lean();
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal(lead.status, 'Won');
+  assert.equal(lead.followUps.length, 1);
+
+  await leadModel.deleteMany({});
+  const byEmail = await leadModel.create({ name: 'Ravi', phone: '+919811100000', email: 'ravi@example.test', status: 'Positive' });
+  await visitor();
+  lead = await leadModel.findById(byEmail._id).lean();
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal(lead.phone, '+919811100000', 'the main number stays');
+  assert.equal(lead.altPhone, '+919876543210', 'the new number becomes the alternate');
+
+  await leadModel.deleteMany({});
+  const byAlternate = await leadModel.create({ name: 'Ravi', phone: '+919811100000', altPhone: '9876543210', status: 'Positive' });
+  await visitor({ email: 'other@example.test' });
+  lead = await leadModel.findById(byAlternate._id).lean();
+  assert.equal(await leadModel.countDocuments(), 1);
+  assert.equal(lead.email, 'other@example.test');
 });
 
 test('the open lead is found however its number was typed', async () => {

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const leadModel = require('../models/leadModel');
 const { INQUIRY, CONTACTED } = require('./leadStatuses');
-const { phoneKey, findLeadsByPhone, findLeadsByContactNumber, isReturning, revive } = require('./leadPhone');
+const { phoneKey, liveFirst, findLeadsByPhone, findLeadsByContactNumber, isReturning, revive } = require('./leadPhone');
 const { hasConfirmedName } = require('./leadName');
 
 // One main phone = one person = one lead (merasoftware/src/docs/signup.md §3). A website member's account owns at
@@ -11,7 +11,6 @@ const SIGNUP_SOURCE = 'Website signup';
 
 const line = (note, badge, createdBy) => ({ note, badge, date: new Date(), createdAt: new Date(), ...(createdBy ? { createdBy } : {}) });
 const emailOf = value => String(value || '').trim().toLowerCase();
-const liveFirst = leads => [...leads.filter(lead => !lead.deletedAt), ...leads.filter(lead => lead.deletedAt)];
 
 /** A lead nobody else owns: not a client's, not a client's project request, not linked to another account. Trash counts. */
 const freeFor = userId => ({ convertedToUserId: null, requestedByUserId: null, reservationUserId: { $in: [null, userId] } });
@@ -46,17 +45,21 @@ async function linkInSession(user, { session, source, fields }) {
 
   const byPhone = user.phone ? await findLeadsByPhone(user.phone, {}, { session }) : [];
   const byEmail = email ? await leadModel.find({ email }).sort({ updatedAt: -1 }).session(session) : [];
+  // Leads with this number only as their alternate: still this person (owner, 7 Nov 2026), checked after phone and email.
+  const byAlternate = user.phone ? (await findLeadsByContactNumber(user.phone, {}, { session })).filter(row => phoneKey(row.phone) !== phoneKey(user.phone)) : [];
   const phoneLead = liveFirst(byPhone.filter(lead => isFree(lead, user._id)))[0];
   const emailLead = liveFirst(byEmail.filter(lead => isFree(lead, user._id)))[0];
+  const alternateLead = liveFirst(byAlternate.filter(lead => isFree(lead, user._id)))[0];
   const who = `${user.email}${user.name ? ` (${user.name})` : ''}`;
-  const lead = phoneLead || emailLead;
+  const lead = phoneLead || emailLead || alternateLead;
+  const what = other => (byPhone.includes(other) ? 'phone number' : byEmail.includes(other) ? 'email' : 'alternate number');
 
   // A lead with this number or email that belongs to someone else stays theirs: it only gets a note.
   const noted = new Set(lead ? [String(lead._id)] : []);
-  for (const other of [...byPhone, ...byEmail].filter(row => !row.deletedAt && !isFree(row, user._id))) {
+  for (const other of [...byPhone, ...byEmail, ...byAlternate].filter(row => !row.deletedAt && !isFree(row, user._id))) {
     if (noted.has(String(other._id))) continue;
     noted.add(String(other._id));
-    await addNote(other, `A website account (${who}) signed up with this lead's ${byPhone.includes(other) ? 'phone number' : 'email'}. This lead belongs to another account, so it was not linked.`, session);
+    await addNote(other, `A website account (${who}) signed up with this lead's ${what(other)}. This lead belongs to another account, so it was not linked.`, session);
   }
 
   if (lead) {
@@ -69,11 +72,20 @@ async function linkInSession(user, { session, source, fields }) {
       lead.set({ email });
       if (emailLead && String(emailLead._id) !== String(lead._id)) await addNote(emailLead, `Same email signed up on the website, see lead ${lead.name ? `${lead.name} ` : ''}(${lead._id}).`, session);
     } else {
-      // Case 4: matched by email only. The account's phone becomes the main number; the old one moves to alternate or a note.
+      // Case 4 (email) and 6 (alternate number): the account's phone becomes the main number; the old main one
+      // moves to alternate (taking the account's number's place there) or, when another alternate is kept, a note.
       const earlier = String(lead.phone || '').trim();
+      const alternate = String(lead.altPhone || '').trim();
+      const alternateFree = !alternate || phoneKey(alternate) === phoneKey(user.phone);
+      if (alternateFree) lead.set({ altPhone: '' });
       if (earlier && phoneKey(earlier) !== phoneKey(user.phone)) {
-        if (!String(lead.altPhone || '').trim()) lead.set({ altPhone: earlier });
+        if (alternateFree) lead.set({ altPhone: earlier });
         else notes.push(`Signed up on website. Earlier phone: ${earlier}`);
+      }
+      if (lead === alternateLead) {
+        const earlierEmail = emailOf(lead.email);
+        if (earlierEmail && email && earlierEmail !== email) notes.push(`Signed up on website. Earlier email: ${lead.email}`);
+        if (email) lead.set({ email });
       }
       phoneChanged = phoneKey(earlier) !== phoneKey(user.phone);
       lead.set({ phone: user.phone });
@@ -85,13 +97,17 @@ async function linkInSession(user, { session, source, fields }) {
     return { lead, created: false, phoneChanged };
   }
 
-  // Case 6: the number is only some lead's alternate number. A shared number is not proof of the same person.
-  if (user.phone) {
-    for (const other of (await findLeadsByContactNumber(user.phone, { deletedAt: null }, { session })).filter(row => phoneKey(row.phone) !== phoneKey(user.phone))) {
-      await addNote(other, `A website account (${who}) signed up with this lead's alternate number.`, session);
+  // A lead with this number or email that another account or a client holds is still this person: never a second
+  // lead (owner, 7 Nov 2026). It takes the request without the link, which stays with its account; the note above tells the team.
+  const [occupied] = liveFirst([...byPhone, ...byEmail, ...byAlternate].filter(row => !row.requestedByUserId));
+  if (occupied) {
+    if (occupied.deletedAt) {
+      occupied.set({ deletedAt: null, deletedBy: null });
+      await occupied.save({ session });
     }
+    return { lead: occupied, created: false, phoneChanged: false };
   }
-  // Case 7: a new lead, Contacted (the model's default), like any other Contacted lead.
+  // Case 7: nobody has this number or email: a new lead, Contacted (the model's default), like any other Contacted lead.
   const [created] = await leadModel.create([{ name: user.name || user.email, email, phone: user.phone || '', source, reservationUserId: user._id, ...fields }], { session });
   return { lead: created, created: true, phoneChanged: false };
 }

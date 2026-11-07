@@ -11,7 +11,7 @@ const { reconcileCycle } = require("../../helpers/finalMessageCycle");
 const { clientStartReadiness } = require("../../helpers/clientFinalMessageReadiness");
 const { isClient } = require("../../helpers/wonLead");
 const { prepareFor: prepareFinalMessage } = require("../../helpers/finalMessage");
-const { findAccountsByPhone, findLeadsByPhone, phoneKey } = require("../../helpers/leadPhone");
+const { findAccountsByPhone, findLeadsByContactNumber, phoneKey } = require("../../helpers/leadPhone");
 const { hasConfirmedName } = require("../../helpers/leadName");
 const { memberOnPhone } = require("../../helpers/personLead");
 
@@ -362,7 +362,10 @@ const updateLeadController = async (req, res) => {
       const existingLead = await leadModel
         .findOne({ ...others, $or: duplicateOr })
         .lean();
-      if (existingLead || (await findLeadsByPhone(cleanPhone, others)).length) {
+      // A number counts whether another lead has it as its phone or its alternate, and both numbers here are checked.
+      const numberTaken = (await findLeadsByContactNumber(cleanPhone, others)).length
+        || (cleanAltPhone && (await findLeadsByContactNumber(cleanAltPhone, others)).length);
+      if (existingLead || numberTaken) {
         return res.status(409).json({
           message: "A lead with this phone or email already exists",
           error: true,
