@@ -1,6 +1,7 @@
 const { createHash } = require('node:crypto');
 const Catalogue = require('../models/salesCatalogueModel');
 const Product = require('../models/productModel');
+const Draft = require('../models/packageDraftModel');
 const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
 
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
@@ -124,7 +125,9 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   const item = validatePackage(autoId ? { ...raw, id: 'package' } : raw);
   if (item.pages.some(slug => !packagePages.some(page => page.slug === slug))) fail('A selected website page no longer exists. Refresh and try again.');
   const existing = await readPackages();
-  if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set(existing.map(row => row.id)));
+  // A draft's ID is reserved for it (helpers/packageDrafts.js), so an automatic ID skips those too.
+  const draftIds = async () => (await Draft.find().select('packageId').lean()).map(row => row.packageId);
+  if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set([...existing.map(row => row.id), ...await draftIds()]));
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
   // An archived category keeps its old packages, but only an archived package may stay in it.
@@ -144,7 +147,7 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     const result = await Catalogue.updateOne({ _id: 'packages', ...(creating ? { [path]: { $exists: false } } : { [path]: { $exists: true } }) }, { $set: { [path]: item } });
     if (result.matchedCount) return item;
     if (!autoId) break;
-    item.id = packageIdCandidate(packageIdBase(item.name), new Set((await readPackages()).map(row => row.id)));
+    item.id = packageIdCandidate(packageIdBase(item.name), new Set([...(await readPackages()).map(row => row.id), ...await draftIds()]));
   }
   fail('Package changed; refresh the catalogue and try again', 409);
 }

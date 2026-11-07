@@ -4,6 +4,7 @@ const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
 const { catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories } = require('../../helpers/projectCategories');
+const drafts = require('../../helpers/packageDrafts');
 
 async function requireAdmin(req) {
   const user = await User.findById(req.userId).select('roles');
@@ -19,7 +20,16 @@ const adminRead = handle(async (req, res) => {
   const plans = await Product.find({ category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null }).select('_id serviceName servicePlan.purchaseType servicePlan.capability').lean();
   // Project categories come from the SSOT so the website offer/package editors never hardcode them.
   const categories = (await listProjectCategories()).map(({ category, label, status, sortOrder }) => ({ category, label, status, sortOrder }));
-  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans, categories } });
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans, categories, drafts: await drafts.listDrafts() } });
+});
+// Package working copies (helpers/packageDrafts.js): save, delete after publish or discard, forget an ended offer.
+const adminDraft = handle(async (req, res) => {
+  await requireAdmin(req);
+  const { action, packageId, version, data, offerSlug } = req.body || {};
+  if (action === 'save') return res.json({ success: true, data: await drafts.saveDraft({ packageId, version, data }, req.userId) });
+  if (action === 'delete') return res.json({ success: true, data: await drafts.deleteDraft(packageId, version) });
+  if (action === 'clearOffer') return res.json({ success: true, data: await drafts.clearDraftOffer(packageId, offerSlug) });
+  fail('Choose a draft action');
 });
 const adminSave = handle(async (req, res) => {
   await requireAdmin(req);
@@ -38,6 +48,7 @@ const adminLinkOffer = handle(async (req, res) => {
 const adminUnlinkPage = handle(async (req, res) => {
   await requireAdmin(req);
   const updated = await unlinkPackagePage(req.body.pageSlug);
+  await drafts.unlinkDraftPage(req.body.pageSlug);
   res.json({ success: true, data: { pageSlug: req.body.pageSlug, updated } });
 });
 const integrationRead = handle(async (req, res) => {
@@ -49,4 +60,4 @@ const integrationRead = handle(async (req, res) => {
   // Service references are admin-only; public packages never expose internal notes/IDs.
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, ...item }) => item), categories } });
 });
-module.exports = { adminRead, adminSave, adminLinkOffer, adminUnlinkPage, integrationRead };
+module.exports = { adminRead, adminSave, adminDraft, adminLinkOffer, adminUnlinkPage, integrationRead };

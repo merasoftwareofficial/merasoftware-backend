@@ -208,6 +208,7 @@ router.post("/admin/clients/:customerId/create-project", authToken, adminCreateP
 router.get("/admin/website-offers", authToken, adminWebsiteOffersController);
 router.get('/admin/sales-packages', authToken, require('../controller/order/salesPackagesController').adminRead);
 router.patch('/admin/sales-packages', authToken, require('../controller/order/salesPackagesController').adminSave);
+router.patch('/admin/sales-packages/drafts', authToken, require('../controller/order/salesPackagesController').adminDraft);
 router.patch('/admin/sales-packages/offer-links', authToken, require('../controller/order/salesPackagesController').adminLinkOffer);
 router.patch('/admin/sales-packages/page-unlink', authToken, require('../controller/order/salesPackagesController').adminUnlinkPage);
 router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
