@@ -40,6 +40,11 @@ const markNegative = async id => {
   const response = await nativeFetch(`${base}/admin/leads/${id}`, { method: 'POST', headers: { Cookie: cookie() }, body: form });
   return { status: response.status, ...await response.json() };
 };
+const markNotNow = async id => {
+  const form = new FormData(); form.append('action', 'followUp'); form.append('badge', 'NotNow'); form.append('note', 'Needs it later');
+  const response = await nativeFetch(`${base}/admin/leads/${id}`, { method: 'POST', headers: { Cookie: cookie() }, body: form });
+  return { status: response.status, ...await response.json() };
+};
 const decide = async (id, choice, channels) => {
   const draft = (await call(`/email-control/drafts/${id}`, 'GET')).data;
   return { draft, result: await call(`/email-control/drafts/${id}/decision`, 'POST', { choice, ...(channels ? { channels } : {}), subject: draft.subject, subjectDoc: draft.templateSubjectDoc, doc: draft.templateDoc || draft.doc, templateId: draft.selectedTemplateId }) };
@@ -361,6 +366,74 @@ after(async () => {
   await new Promise(resolve => server.close(resolve));
   await mongoose.disconnect();
   await db?.stop();
+});
+
+test('Not Now opens the existing final template without starting a countdown, including after sending and replying', async () => {
+  const { _id } = await lead();
+  const marked = await markNotNow(_id);
+  assert.equal(marked.success, true);
+  assert.equal((await Lead.findById(_id).lean()).status, 'NotNow');
+  assert.equal(marked.emailDraftIds.length, 1);
+  assert.equal((await EmailDraft.findById(marked.emailDraftIds[0]).lean()).event, 'lead.finalMessage');
+  assert.equal(await FinalMessage.countDocuments(), 0);
+  await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+  await sendQueue(phone());
+  await incoming({ conversation: 'Please call me' });
+  await followFinalMessages();
+  assert.equal((await Lead.findById(_id).lean()).status, 'NotNow');
+  assert.equal(await FinalMessage.countDocuments(), 0);
+});
+
+test('Not Now follow-ups work repeatedly for clients without a countdown', async () => {
+  const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
+  const clientLead = await lead({ status: 'Won', convertedToUserId: user._id });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const marked = await markNotNow(clientLead._id);
+    assert.equal(marked.success, true);
+    assert.equal(marked.emailDraftIds.length, 1);
+    assert.equal((await EmailDraft.findById(marked.emailDraftIds[0]).lean()).event, 'lead.finalMessage');
+    await decide(marked.emailDraftIds[0], 'skip');
+  }
+  const saved = await Lead.findById(clientLead._id).lean();
+  assert.equal(saved.status, 'Won');
+  assert.equal(saved.clientBehaviour, 'NotNow');
+  assert.equal(await FinalMessage.countDocuments(), 0);
+});
+
+test('Not Now saves even if final-message template is disabled', async () => {
+  const { _id } = await lead({ name: '', status: 'Inquiry' });
+  await EmailPolicy.create({ event: 'lead.finalMessage', mode: 'off' });
+  const marked = await markNotNow(_id);
+  assert.equal(marked.success, true);
+  assert.equal((await Lead.findById(_id).lean()).status, 'NotNow');
+  assert.equal(marked.emailDraftIds?.length || 0, 0);
+  assert.match(marked.finalMessageNote, /unavailable/i);
+  assert.equal(await FinalMessage.countDocuments(), 0);
+});
+
+test('moving a waiting Negative lead to Not Now stops the old cycle before preparing the ordinary review', async () => {
+  const { id } = await sentAndWaiting();
+  const marked = await markNotNow(id);
+  assert.equal(marked.success, true);
+  assert.equal(marked.emailDraftIds.length, 1);
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal((await Lead.findById(id).lean()).status, 'NotNow');
+  await decide(marked.emailDraftIds[0], 'send', 'whatsapp');
+  await sendQueue(phone());
+  await followFinalMessages();
+  assert.equal((await row(id)).status, 'stopped');
+  assert.equal((await Lead.findById(id).lean()).status, 'NotNow');
+});
+
+test('Not Now review supports email, WhatsApp and both without creating a timer', async () => {
+  for (const [channel, number] of [['email', '9000000011'], ['whatsapp', '9000000012'], ['both', '9000000013']]) {
+    const { _id } = await lead({ phone: number, email: `${channel}@example.test` });
+    const marked = await markNotNow(_id);
+    const { result } = await decide(marked.emailDraftIds[0], 'send', channel);
+    assert.equal(result.success, true, channel);
+    assert.equal((await Lead.findById(_id).lean()).status, 'NotNow');
+    assert.equal(await FinalMessage.countDocuments({ leadId: _id }), 0);
+  }
 });
 
 test('expiry uses the editable template, quotes the original and queues once across repeated jobs and queue retention', async () => {

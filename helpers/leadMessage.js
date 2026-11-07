@@ -64,6 +64,19 @@ async function prepare(lead) {
   return !!draftId;
 }
 
+// Reuse the final-message templates as an ordinary reviewed message: no FinalMessage row or timer.
+async function prepareNotNow(lead) {
+  // A status change can be saved while an earlier Negative send is still in flight.
+  // Do not start a new review until the previous tracked cycle has settled.
+  const result = await require('./finalMessageCycle').reconcileCycle(lead._id);
+  if (result === 'pending') fail('The previous final message is still being sent. Try again after it finishes.');
+  await require('./leadContactBlock').assertMayContact(lead);
+  const type = (await typesFor(lead)).find(item => item.id === 'lead.finalMessage');
+  if (!type?.enabled) return false;
+  const { draftId } = await queueMail(type.id, await mailFor(type.id, lead));
+  return Boolean(draftId);
+}
+
 /** The first dropdown. Only an untouched draft moves; values and contacts always come from the saved lead. */
 async function changeMessageType(draftId, event, actor) {
   const draft = await EmailDraft.findOne({ _id: draftId, leadId: { $ne: null } }).select('leadId').lean();
@@ -100,4 +113,4 @@ async function recordOnTimeline(draftId) {
   } } });
 }
 
-module.exports = { prepare, messageTypes, changeMessageType, recordOnTimeline };
+module.exports = { prepare, prepareNotNow, messageTypes, changeMessageType, recordOnTimeline };

@@ -1,3 +1,7 @@
+## Not Now stage — 7 November 2026
+
+Not Now: helpers/leadStatuses.js, helpers/leadMessage.js and controller/lead/updateLead.js use the existing final-message template as an ordinary review with no countdown. scripts/migrateNotNow.js is dry-run-first; apply requires writer maintenance and a new backup. See E:/Allprojects/merasoftware/src/docs/not-now-stage-plan.md. Local tests passed; no deployment or production migration.
+
 ## Final Message Stop/identity corrections — 4 November 2026
 
 Verified local corrections and remaining rollout gates: [FINAL_MESSAGE_CORRECTIONS.md](FINAL_MESSAGE_CORRECTIONS.md). Proven defects: lost automated acknowledgement caused false manual Stop; unguarded stage-moved job overwrote Stop; manual provenance depended on temporary drafts; sending status blocked Stop during typing. Also covered interrupted manual-result settlement.

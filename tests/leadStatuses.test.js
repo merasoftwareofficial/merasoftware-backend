@@ -29,9 +29,9 @@ after(async () => {
 });
 
 test('the status list: New and Proposal Sent are gone, Won and Inquiry cannot be chosen, old badges stay valid', () => {
-  assert.deepEqual(LEAD_STATUSES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won']);
-  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
-  assert.deepEqual(FOLLOW_UP_BADGES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won', 'Proposal Sent']);
+  assert.deepEqual(LEAD_STATUSES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won']);
+  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Active', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
+  assert.deepEqual(FOLLOW_UP_BADGES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won', 'Proposal Sent']);
 });
 
 test('Proposal Sent is refused as a status, kept on an old follow-up', async () => {

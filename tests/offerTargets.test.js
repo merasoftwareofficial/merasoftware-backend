@@ -81,7 +81,7 @@ after(async () => {
 // Categories
 test('a lead can take every new category, and Contacted stays the stored value', async () => {
   const { _id } = await lead();
-  for (const badge of ['Active', 'Lazy', 'Tough', 'Unhappy', 'Wrong', 'Contacted']) {
+  for (const badge of ['Active', 'NotNow', 'Unhappy', 'Wrong', 'Contacted']) {
     assert.equal((await follow(_id, { badge })).status, 200, badge);
     assert.equal((await stored(_id)).status, badge);
   }
@@ -99,13 +99,13 @@ test('behaviour is for a client only, leaves Won alone, and shows on the timelin
   const user = await client();
   const won = await ensureWonLead(user, admin._id);
   const open = await lead({ phone: '9000000003' });
-  assert.equal((await call(`/api/offer-targets/leads/${open._id}/behaviour`, 'PATCH', { behaviour: 'Tough' })).status, 409);
+  assert.equal((await call(`/api/offer-targets/leads/${open._id}/behaviour`, 'PATCH', { behaviour: 'NotNow' })).status, 409);
   assert.equal((await call(`/api/offer-targets/leads/${won._id}/behaviour`, 'PATCH', { behaviour: 'Wrong' })).status, 400);
-  assert.equal((await call(`/api/offer-targets/leads/${won._id}/behaviour`, 'PATCH', { behaviour: 'Tough' })).status, 200);
+  assert.equal((await call(`/api/offer-targets/leads/${won._id}/behaviour`, 'PATCH', { behaviour: 'NotNow' })).status, 200);
   const saved = await stored(won._id);
   assert.equal(saved.status, 'Won');
-  assert.equal(saved.clientBehaviour, 'Tough');
-  assert.match(saved.followUps.at(-1).note, /Neutral to Tough/);
+  assert.equal(saved.clientBehaviour, 'NotNow');
+  assert.match(saved.followUps.at(-1).note, /Neutral to Not Now/);
   assert.equal((await call(`/admin/leads/${won._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Active' })).status, 200, 'the portal lead page path');
   assert.equal((await stored(won._id)).clientBehaviour, 'Active');
 });
@@ -121,7 +121,7 @@ test('becoming a client: the category carries over, Dead and Wrong must change f
   assert.equal((await call(`/admin/leads/${tough._id}/convert`, 'POST', {})).status, 200);
   const converted = await stored(tough._id);
   assert.equal(converted.status, 'Won');
-  assert.equal(converted.clientBehaviour, 'Tough');
+  assert.equal(converted.clientBehaviour, 'NotNow');
   for (const status of ['Dead', 'Wrong']) {
     const blocked = await lead({ status, phone: `900000001${status.length}`, email: `${status}@example.test` });
     const result = await call(`/admin/leads/${blocked._id}/convert`, 'POST', {});

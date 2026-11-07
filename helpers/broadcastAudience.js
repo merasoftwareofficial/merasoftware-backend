@@ -1,12 +1,12 @@
 const Lead = require('../models/leadModel');
-const { INQUIRY, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NEGATIVE, UNHAPPY, WON, PROPOSAL_SENT, PROPOSAL_GROUP_STATUSES, leadStatusLabel } = require('./leadStatuses');
+const { INQUIRY, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NOT_NOW, NEGATIVE, UNHAPPY, WON, PROPOSAL_SENT, PROPOSAL_GROUP_STATUSES, leadStatusLabel } = require('./leadStatuses');
 const { normalizePhone } = require('./whatsappQueue');
 const { fail } = require('./broadcastContent');
 const { contactBlocks } = require('./leadContactBlock');
 const { hasConfirmedName } = require('./leadName');
 const { altSendingEnabled, usableAlt } = require('./contactNumbers');
 // Dead and Wrong are never a group.
-const GROUPS = [CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NEGATIVE, UNHAPPY, WON, PROPOSAL_SENT, INQUIRY].map(id => ({ id, label: leadStatusLabel(id) }));
+const GROUPS = [CONTACTED, POSITIVE, ACTIVE, NOT_NOW, NEGATIVE, UNHAPPY, WON, PROPOSAL_SENT, INQUIRY].map(id => ({ id, label: leadStatusLabel(id) }));
 function groupQuery(group) {
   if (!GROUPS.some(row => row.id === group)) fail('Choose a lead group.');
   return { deletedAt: null, ...(group === PROPOSAL_SENT

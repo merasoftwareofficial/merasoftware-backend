@@ -5,7 +5,7 @@ const userModel = require("../../models/userModel");
 const GoogleDriveService = require("../../helpers/googleDriveService");
 const { isAccountEmail } = require("../../helpers/emailValidator");
 const offerTargetModel = require("../../models/offerTargetModel");
-const { CONTACTED, INQUIRY, NEGATIVE, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES, CLIENT_BEHAVIOURS, DEFAULT_CLIENT_BEHAVIOUR } = require("../../helpers/leadStatuses");
+const { CONTACTED, INQUIRY, NEGATIVE, NOT_NOW, WON, WRONG, NAME_OPTIONAL_STATUSES, SELECTABLE_LEAD_STATUSES: ALLOWED_STATUSES, SELECTABLE_OFFER_STAGES, CLIENT_BEHAVIOURS, DEFAULT_CLIENT_BEHAVIOUR } = require("../../helpers/leadStatuses");
 const { changeClientStatus } = require("../../helpers/clientStatus");
 const { reconcileCycle } = require("../../helpers/finalMessageCycle");
 const { clientStartReadiness } = require("../../helpers/clientFinalMessageReadiness");
@@ -163,7 +163,10 @@ const updateLeadController = async (req, res) => {
       if (clientFollowUp && badge !== WON && badge !== clientBefore) {
         try {
           const result = await changeClientStatus(lead._id, badge, req.userId, { note, attachment });
-          return res.json({ message: "Follow-up added", data: await leadModel.findById(lead._id), finalMessage: result.finalMessage, finalMessageNote: noteFor(result.finalMessage), success: true, error: false });
+          const updated = await leadModel.findById(lead._id);
+          let finalMessageNote = noteFor(result.finalMessage);
+          if (badge === NOT_NOW) { try { if (!await require('../../helpers/leadMessage').prepareNotNow(updated)) finalMessageNote = 'Final message unavailable; check template and contact details.'; } catch (error) { finalMessageNote = error.message; } }
+          return res.json({ message: "Follow-up added", data: updated, finalMessage: result.finalMessage, finalMessageNote, success: true, error: false });
         } catch (error) { return failed(res, error); }
       }
 
@@ -186,12 +189,14 @@ const updateLeadController = async (req, res) => {
       // Leaving Negative ends a running final message now, with its reason on the timeline.
       else await reconcileCycle(lead._id, { actor: req.userId });
       const finalMessage = target || clientFollowUp ? undefined : await offerFinalMessage(savedLead, previousStatus);
+      let finalMessageNote = noteFor(finalMessage);
+      if (!target && badge === NOT_NOW) { try { if (!await require('../../helpers/leadMessage').prepareNotNow(savedLead)) finalMessageNote = 'Final message unavailable; check template and contact details.'; } catch (error) { finalMessageNote = error.message; } }
 
       return res.json({
         message: "Follow-up added",
         data: savedLead,
         finalMessage,
-        finalMessageNote: noteFor(finalMessage),
+        finalMessageNote,
         success: true,
         error: false,
       });

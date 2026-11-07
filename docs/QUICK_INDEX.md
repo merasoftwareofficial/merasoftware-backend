@@ -1,3 +1,7 @@
+## Not Now stage — 7 November 2026
+
+Not Now: helpers/leadStatuses.js, helpers/leadMessage.js and controller/lead/updateLead.js use the existing final-message template as an ordinary review with no countdown. scripts/migrateNotNow.js is dry-run-first; apply requires writer maintenance and a new backup. See E:/Allprojects/merasoftware/src/docs/not-now-stage-plan.md. Local tests passed; no deployment or production migration.
+
 ## Final Message Stop/identity corrections — 4 November 2026
 
 Start with [FINAL_MESSAGE_CORRECTIONS.md](FINAL_MESSAGE_CORRECTIONS.md). Queue insertion/source: `helpers/whatsappQueue.js`; single sender/attempt IDs: `whatsapp/src/sender.js`; Stop/handoff/cycle guards: `helpers/stopFinalMessage.js`; deadline writers: `helpers/finalMessageJobs.js`, `helpers/finalMessageExpiry.js`; new-cycle CAS: `helpers/finalMessage.js`; contract: `whatsapp/src/models.js`. Local regression 292/292, including queue/email/broadcast/Auto Reply. No live deployment or legacy recovery. Backup `backup/fix2`; production rollout requires backend/worker compatibility and a fresh legacy audit.
