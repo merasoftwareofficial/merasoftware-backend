@@ -44,6 +44,9 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
     await require('./helpers/reservationReminders').sendDueReminders().catch(error => console.error('[reservation reminders]', error.message));
     await require('./helpers/reservationStart').deliverStartNotices().catch(error => console.error('[reservation start notices]', error.message));
     await require('./helpers/reservationStart').alertPendingStarts().catch(error => console.error('[reservation start alerts]', error.message));
+    // Package Start requests (helpers/packageStart.js); each call checks PACKAGE_START_REQUESTS_ENABLED.
+    await require('./helpers/packageStart').deliverPackageStartNotices().catch(error => console.error('[package start notices]', error.message));
+    await require('./helpers/packageStart').alertPendingPackageStarts().catch(error => console.error('[package start alerts]', error.message));
   });
   console.log('Offer reservation jobs initialized');
 }

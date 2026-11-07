@@ -25,6 +25,8 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
     }
     const order = new Order({ ...orderData, _id: projectId });
     await require('./offerReservations').attachProjectReservation({ order, offer: sourceOffer, reservationId: sourceReservationId, session });
+    // A project on a package closes that person's open package Start request (helpers/packageStart.js).
+    await require('./packageStart').closeOnProject({ order, session });
     initializeProjectTimeline({ order, startingNodeTitle, actorId });
     await order.save({ session });
     const installment = order.isPartialPayment ? order.installments[0] : null;

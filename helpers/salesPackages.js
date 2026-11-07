@@ -17,6 +17,33 @@ const cleanText = (value, max, label) => {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(`Enter a valid ${label}`);
   return value.trim();
 };
+// The package page design (website src/lib/package-design.ts, same limits). The website shows it on
+// /package/<id>; it never changes price or scope, so it stays out of the quote key like pages.
+const DESIGN_FIELDS = { eyebrow: [100, true], heading: [160, true], headingHighlight: [120, false], supportingLine: [200, false],
+  subheading: [160, true], tagline: [100, true], badge: [60, true], priceDescription: [200, true], ctaLabel: [80, true], contactHref: [500, true] };
+const contactLink = value => /^mailto:[^\s?]+@[^\s?]+(?:\?.*)?$/.test(value) || /^tel:\+?[\d\s()-]{5,30}$/.test(value)
+  || (() => { try { return new URL(value).protocol === 'https:'; } catch { return false; } })();
+function validateDesign(raw) {
+  if (raw === undefined || raw === null) return undefined; // Packages saved before page design existed.
+  if (typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !DESIGN_FIELDS[key])) fail('Enter a valid page design');
+  const design = {};
+  for (const [key, [max, required]] of Object.entries(DESIGN_FIELDS)) {
+    const value = raw[key] === undefined ? '' : raw[key];
+    if (typeof value !== 'string' || value.trim().length > max || (required && !value.trim())) fail(`Enter a valid page design ${key}`);
+    design[key] = value.trim();
+  }
+  if (!contactLink(design.contactHref)) fail('Use an HTTPS, email (mailto:) or telephone (tel:) contact link');
+  return design;
+}
+// A new package's permanent ID comes from its name (owner decision 7 Nov 2026): "Business Starter" →
+// business-starter, then business-starter-2 while taken. Names without Latin letters get "package".
+function packageIdBase(name) {
+  const base = String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70).replace(/-+$/, '');
+  return base && safeId(base) ? base : 'package';
+}
+const packageIdCandidate = (base, taken) => {
+  for (let n = 1; ; n++) { const id = n === 1 ? base : `${base}-${n}`; if (!taken.has(id)) return id; }
+};
 function validatePackage(raw) {
   if (!raw || !safeId(raw.id)) fail('Use a safe lowercase package ID');
   if (typeof raw.category !== 'string' || !KEY_PATTERN.test(raw.category)) fail('Choose a project category');
@@ -38,12 +65,14 @@ function validatePackage(raw) {
   const regularPrice = amount(raw.regularPrice, 'main price');
   const discountedPrice = amount(raw.discountedPrice, 'discounted price');
   if (discountedPrice > regularPrice) fail('Discounted price cannot be more than the main price');
+  const design = validateDesign(raw.design);
   return {
     id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 500, 'description'),
     category: raw.category, status: raw.status, regularPrice, discountedPrice,
     offerExtraPrice: amount(raw.offerExtraPrice, 'offer extras price'), offerSlug: raw.offerSlug || '',
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
     linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order, pages: [...new Set(pages)],
+    ...(design ? { design } : {}),
   };
 }
 // Which packages an offer applies to is stored only on the package (offerSlug), so one package
@@ -76,7 +105,7 @@ function quotePackage(item, offers, now = Date.now()) {
     : { discountAmount: 0, finalPrice: discountedPrice, regularPrice: discountedPrice, offer: null, terms };
   // Where a package is shown does not change its price or scope, so pages stay out of the
   // version key; moving a package between pages never invalidates an open project form.
-  const { pages, ...priced } = item;
+  const { pages, design, ...priced } = item;
   // An offer's own quoteKey (website src/lib/offer-quote.ts) already signs everything commercial
   // about it and leaves out display/timing settings such as its reserve window, so the package
   // version follows that key, as service-plan quotes do (serviceOfferPolicy.js). An offer
@@ -90,9 +119,12 @@ async function catalogueWithQuotes(offers, admin = false) {
   return items.filter(item => admin || item.status === 'published').map(item => quotePackage(item, offers));
 }
 async function savePackage(raw, creating, offers, packagePages = []) {
-  const item = validatePackage(raw);
+  // A new package without an ID gets one from its name; an ID is never typed or changed by the admin.
+  const autoId = creating && (raw?.id === undefined || raw?.id === '');
+  const item = validatePackage(autoId ? { ...raw, id: 'package' } : raw);
   if (item.pages.some(slug => !packagePages.some(page => page.slug === slug))) fail('A selected website page no longer exists. Refresh and try again.');
   const existing = await readPackages();
+  if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set(existing.map(row => row.id)));
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
   // An archived category keeps its old packages, but only an archived package may stay in it.
@@ -106,10 +138,15 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   try {
     await Catalogue.updateOne({ _id: 'packages' }, { $setOnInsert: { packages: {} } }, { upsert: true });
   } catch (error) { if (error.code !== 11000) throw error; }
-  const path = `packages.${item.id}`;
-  const result = await Catalogue.updateOne({ _id: 'packages', ...(creating ? { [path]: { $exists: false } } : { [path]: { $exists: true } }) }, { $set: { [path]: item } });
-  if (!result.matchedCount) fail('Package changed; refresh the catalogue and try again', 409);
-  return item;
+  // The write only creates when the ID is still free; an automatic ID taken meanwhile moves to the next number.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const path = `packages.${item.id}`;
+    const result = await Catalogue.updateOne({ _id: 'packages', ...(creating ? { [path]: { $exists: false } } : { [path]: { $exists: true } }) }, { $set: { [path]: item } });
+    if (result.matchedCount) return item;
+    if (!autoId) break;
+    item.id = packageIdCandidate(packageIdBase(item.name), new Set((await readPackages()).map(row => row.id)));
+  }
+  fail('Package changed; refresh the catalogue and try again', 409);
 }
 function checkOfferFits(item, offer) {
   if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category)) fail(`The offer is unavailable or does not match the category of ${item.name}`);
@@ -146,4 +183,4 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, validatePackage, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage };
+module.exports = { money, fail, readPackages, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage };

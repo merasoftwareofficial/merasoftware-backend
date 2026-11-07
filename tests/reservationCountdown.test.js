@@ -223,9 +223,9 @@ test('the Reservation box counts running, used and expired reservations', async 
 // --- Send via -----------------------------------------------------------------------------------------
 test('every action has one route: customer WhatsApp, team Both, subscription Email', () => {
   const team = events.filter(row => row.audience === 'team').map(row => row.key);
-  assert.equal(team.length, 12);
+  assert.equal(team.length, 13, 'with the package start request (helpers/packageStart.js)');
   // Owner decision 7 Nov 2026: the reservation countdown and start-request messages to the customer go by Both.
-  const customerBoth = ['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired'];
+  const customerBoth = ['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received'];
   for (const row of events) {
     const expected = row.key.startsWith('website.subscription.') ? 'email' : row.audience === 'team' || customerBoth.includes(row.key) ? 'both' : 'whatsapp';
     assert.equal(channelFor(row.key, null), expected, row.key);

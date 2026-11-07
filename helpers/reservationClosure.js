@@ -66,7 +66,10 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
     Reservation.countDocuments({ ...open, startRequestedAt: null, ...duePast(now) }),
     Reservation.aggregate([{ $match: { closureStatus: { $in: ['sent', 'not-sent', 'late', 'failed'] } } }, { $group: { _id: '$closureStatus', count: { $sum: 1 } } }]),
   ]);
-  const users = await User.find({ _id: { $in: running.map(row => row.userId) } }).select('name email phone').lean();
+  // Open "Start my project" requests on packages without an offer (helpers/packageStart.js), oldest first.
+  const starts = await require('../models/packageStartRequestModel').find({ closedAt: null }).sort({ requestedAt: 1 }).limit(limit)
+    .select('userId packageSnapshot requestedAt').lean();
+  const users = await User.find({ _id: { $in: [...running, ...starts].map(row => row.userId) } }).select('name email phone').lean();
   const runningCount = running.length < limit ? running.length
     : await Reservation.countDocuments(runningQuery);
   // Paused first, the longest-waiting request at the top; then by deadline.
@@ -82,6 +85,11 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '', offer: row.offerSnapshot?.title || '',
         reservedAt: row.reservedAt, deadline: row.extendedUntil || row.expiresAt, extended: !!row.extendedUntil, startRequestedAt: row.startRequestedAt || null,
         hours: Math.round((new Date(row.expiresAt) - new Date(row.reservedAt)) / 3600000) };
+    }),
+    packageStarts: starts.map(row => {
+      const user = users.find(item => String(item._id) === String(row.userId));
+      return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '',
+        package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, requestedAt: row.requestedAt };
     }),
   };
 }

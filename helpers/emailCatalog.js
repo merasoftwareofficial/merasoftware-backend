@@ -50,6 +50,8 @@ const events = [
   ['offer.reservation.lastHour', 'Offers', 'Offer reservation reminder (1 hour left)', 'Offer reservation'],
   ['offer.start.request.admin', 'Offers', 'Start project request (admin)', 'Offer reservation'],
   ['offer.start.request.received', 'Offers', 'Start project request received', 'Offer reservation'],
+  ['package.start.request.admin', 'Offers', 'Package start request (admin)', 'Package start request'],
+  ['package.start.request.received', 'Offers', 'Package start request received', 'Package start request'],
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation', 'Subscription'],
   ['website.subscription.manage', 'Website', 'Subscription management', 'Subscription'],
@@ -76,11 +78,14 @@ const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserCo
 // every step), whichever request or job caused it (helpers/servicePlanNotifications.js).
 const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliveryStuck', 'offer.payment.reminder','offer.reserved', 'offer.reservation.extended',
   'offer.reservation.expired', 'offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.admin', 'offer.start.request.received',
+  // Package Start requests (helpers/packageStart.js) are sent by its job, like the offer Start messages; the
+  // whole feature stays behind PACKAGE_START_REQUESTS_ENABLED until it is tested on a real phone.
+  'package.start.request.admin', 'package.start.request.received',
   'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
 // Mail addressed to admins or a developer. Every other action reaches a customer or a lead.
 const TEAM = new Set(['plan.request.admin', 'sendUpdateRequestNotification', 'sendUploadDeliveryStuck', 'sendDeveloperAssignmentEmail',
   'sendAdminPurchaseConfirmationEmail', 'sendAdminUPIPendingNotification', 'sendContactRequestNotification', 'sendCallbackRequestNotification',
-  'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin', 'offer.start.request.admin']);
+  'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin', 'offer.start.request.admin', 'package.start.request.admin']);
 // Team mail addressed to the admins (not the developer): its recipients and WhatsApp numbers come from the
 // admins' own settings (helpers/teamContacts.js), whatever address its builder names.
 const ADMIN_RECIPIENT = new Set([...TEAM].filter(key => key !== 'sendDeveloperAssignmentEmail'));
@@ -93,7 +98,7 @@ const CHANNELS = ['whatsapp', 'email', 'both'];
 // wrong WhatsApp can be deleted for everyone and an email can't. Team mail keeps Email + WhatsApp.
 // Owner decision 7 Nov 2026: what a reserving customer is told about the countdown and their start request
 // goes by Email + WhatsApp (every reserving account has both).
-const CUSTOMER_BOTH = new Set(['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired']);
+const CUSTOMER_BOTH = new Set(['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received']);
 const defaultChannel = key => EMAIL_ONLY.has(key) ? 'email' : TEAM.has(key) || CUSTOMER_BOTH.has(key) ? 'both' : 'whatsapp';
 const catalog = events.map(([key, section, label, group = label]) => ({
   key, section, label, group, application: section === 'Website' ? 'website' : 'portal',

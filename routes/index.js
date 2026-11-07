@@ -35,6 +35,8 @@ const addRoleToUserController = require('../controller/user/addRoleToUser')
 const adminCreateAccountController = require('../controller/user/adminCreateAccount')
 const authToken = require('../middleware/authToken')
 router.use('/offer-reservations', authToken, require('./offerReservations'));
+// "Start my project" on a package page without an offer (helpers/packageStart.js).
+router.use('/package-starts', authToken, require('./packageStarts'));
 // Website plan page "Get this plan" for a non-client: a signed-in member here, a visitor through the
 // website server below (controller/lead/planRequest.js). Clients buy in the portal instead.
 router.post('/plan-request', authToken, require('../controller/lead/planRequest').memberPlanRequest);

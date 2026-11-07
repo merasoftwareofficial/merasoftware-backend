@@ -1212,6 +1212,53 @@ definitions['offer.start.request.received'] = {
   },
 };
 
+// "Start my project" on a package page without an offer (helpers/packageStart.js). No price is held.
+const packagePageLink = request => link(process.env.PORTFOLIO_WEBSITE_URL, `/package/${encodeURIComponent(request.packageId)}`);
+// To the team, once per request, and again after each full day nobody acted (at most 3 times).
+definitions['package.start.request.admin'] = {
+  subject: 'Start project request - {{packageName}}',
+  text: lines('A customer wants to start their project on a package. Create the project on this package in the portal,',
+    'or close the request in their Reserved offers.', '',
+    '{{waiting}}', '',
+    '**Customer:** {{customerName}}', '**Phone:** {{phone}}', '**Email:** {{customerEmail}}', '**Account:** {{account}}', '',
+    '**Package:** {{packageName}}', '**Package price:** {{price}}', '**Requested on:** {{requestedAt}}', '',
+    '**Open the lead:** {{leadLink}}', '', ...SYSTEM_SIGN_OFF),
+  variables: { customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, phone: detail('Phone', '+919876543210'),
+    account: detail('Account', 'Client', 'Client, or Member (needs a client account before the project)'),
+    packageName: detail('Package', 'Business Starter'), price: detail('Package price', '₹9,999'),
+    requestedAt: detail('Requested on', '7 Nov 2026, 10:19 am IST'),
+    leadLink: detail('Lead link', 'https://portal.example.com/admin-panel/leads/123', "The person's lead in the admin Leads list") },
+  blocks: { waiting: { label: 'Still waiting', hint: 'Only in the daily reminder: how long the request has waited.',
+    sample: () => noteBlock('This request has been waiting 1 day.') } },
+  build(request, user) {
+    if (!user || !request) return null;
+    const days = request.waitingDays;
+    return { to: ADMIN_EMAILS, values: {
+      customerName: text(user.name), customerEmail: text(user.email), phone: text(user.phone),
+      account: request.isClient ? 'Client' : 'Member (needs a client account before the project)',
+      packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price),
+      requestedAt: moment(request.requestedAt),
+      leadLink: adminLink(request.leadId ? `/admin-panel/leads/${request.leadId}` : '/admin-panel/leads'),
+    }, blocks: { waiting: days ? noteBlock(`This request has been waiting ${days} day${days === 1 ? '' : 's'}.`) : { html: '', text: '' } } };
+  },
+};
+definitions['package.start.request.received'] = {
+  subject: 'We have received your request to start your project',
+  text: lines('Hello {{name}},', '', 'We have received your request to start your project on {{packageName}}.', '',
+    'Our team will contact you shortly to set up your project.', '',
+    '**Package price:** {{price}}', '', '**Your package:** {{link}}', '', ...SIGN_OFF),
+  variables: { name: detail('Name', 'Client'), packageName: detail('Package', 'Business Starter'), price: detail('Package price', '₹9,999'),
+    link: detail('Package page', 'https://www.merasoftware.com/package/business-starter', 'The package page') },
+  blocks: {},
+  build(request, user) {
+    if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
+    const href = packagePageLink(request);
+    return { to: [user.email], requiredLinks: [href], values: {
+      name: text(user.name), packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price), link: href,
+    } };
+  },
+};
+
 // --- Plans: every step of a service plan (merasoftware/src/docs/plan.md §4 "Plan communication").
 // Sent by helpers/servicePlanNotifications.js as system mail (WhatsApp mirrors every sent mail).
 const planLink = order => link(process.env.ADMIN_DASHBOARD_URL, `/plan-details/${order?._id}`);
