@@ -38,6 +38,7 @@ before(async () => {
 beforeEach(async () => {
   process.env.ENABLE_WHATSAPP = 'true'; process.env.BROADCAST_JOBS_ENABLED = 'true';
   await Promise.all([Lead, Template, Broadcast, Recipient, BroadcastGate, Queue, State, Lock].map(model => model.deleteMany({})));
+  await Promise.all([require('../models/emailControlModel').EmailDraft.deleteMany({}), require('../models/emailControlModel').EmailHistory.deleteMany({}), require('../models/emailControlModel').EmailPolicy.deleteMany({})]);
   await State.create({ _id: 'main', connection: 'connected', heartbeatAt: new Date(), settings: { quietHours: false, jitterSec: 0, typing: false } });
 });
 after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
@@ -187,4 +188,173 @@ test('routes require a current admin; preview uses the actual renderer', async (
   const result = await api('/api/broadcast/preview', 'POST', { doc: named() });
   assert.equal(result.data.text, render(content(named()), { name: 'Sandeep Singh' }));
   assert.equal((await listTemplates()).length, 0);
+});
+
+const media = () => ({ id: String(new mongoose.Types.ObjectId()), url: 'https://res.cloudinary.com/test/video/upload/v1/clip.mp4', publicId: 'clip', assetId: 'immutable-asset', kind: 'video', bytes: 1000, format: 'mp4' });
+const composed = extra => ({ version: 2, doc: doc('Separate text'), caption: doc('Caption'), media: media(), position: 'before', subject: 'News', ...extra });
+
+test('canonical composition preserves media-only, field-only text and both orders without changing the old text codec', () => {
+  const { composition, compositionParts, readComposition } = require('../helpers/broadcastContent');
+  const value = composition(composed());
+  assert.deepEqual(compositionParts(value, { name: 'A' }).map(part => !!part.media), [false, true]);
+  assert.deepEqual(compositionParts({ ...value, position: 'after' }, {}).map(part => !!part.media), [true, false]);
+  assert.equal(compositionParts(composition(composed({ doc: null, caption: null })), {}).length, 1);
+  const onlyName = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'emailVariable', attrs: { key: 'name' } }] }] };
+  assert.equal(compositionParts(composition({ doc: onlyName }), { name: 'Ravi' })[0].text, 'Ravi');
+  assert.equal(readComposition(encode(doc('Old'))).version, 1);
+  assert.throws(() => composition(composed({ media: { ...media(), bytes: 17 * 1024 * 1024 } })), /16 MB/);
+});
+
+test('SSOT catalog includes Reservation and blocked behaviours; lead-only excludes client project requests', async () => {
+  const { CATALOG } = require('../helpers/broadcastAudience');
+  assert.ok(CATALOG.some(row => row.id === 'leads:Reservation'));
+  assert.ok(CATALOG.find(row => row.id === 'clients:Dead').blocked);
+  await Lead.create([{ name: 'Lead', phone: '9876543210' }, { name: 'Request', phone: '9876543211', requestedByUserId: customer._id }]);
+  assert.equal((await audience('leads:Contacted')).count, 1);
+  const client = await Lead.create({ name: 'Client', phone: '9876543212', status: 'Won', convertedToUserId: customer._id });
+  assert.equal((await audience('clients:Contacted')).count, 1);
+  await Lead.updateOne({ _id: client._id }, { clientBehaviour: 'NotNow' });
+  assert.equal((await audience('clients:Contacted')).count, 0);
+  assert.equal((await audience('clients:NotNow')).count, 0);
+  await User.updateOne({ _id: customer._id }, { deletedAt: new Date() });
+  assert.equal((await audience('clients:Contacted')).count, 0);
+  await User.updateOne({ _id: customer._id }, { $unset: { deletedAt: 1 } });
+});
+
+test('channel audiences include email-only people and dedupe each destination independently', async () => {
+  await Lead.create([{ name: 'Email', email: 'one@example.test' }, { name: 'Both', phone: '9876543210', email: 'two@example.test' }, { name: 'Same', phone: '+91 9876543210', email: 'TWO@example.test' }]);
+  assert.equal((await audience('leads:Contacted', { channel: 'email' })).count, 2);
+  const both = await audience('leads:Contacted', { channel: 'both' });
+  assert.equal(both.count, 3);
+  assert.equal(both.recipients.filter(row => row.channel === 'email').length, 2);
+});
+
+test('media parts release through the original queue in order, preserve payload, and recheck immediately before handoff', async () => {
+  const lead = await Lead.create({ name: 'Lead', phone: '9876543210' });
+  await send(composed({ audience: 'leads:Contacted' }));
+  await dispatch();
+  assert.equal(await Recipient.countDocuments(), 2);
+  assert.equal(await Queue.countDocuments(), 1);
+  assert.equal((await Queue.findOne()).text, 'Separate text');
+  const calls = [];
+  const sender = createSender({ Queue, State, config: { timeZone: 'Asia/Kolkata' }, transport: { isConnected: () => true, resolve: async to => to, send: async (jid, text, typing, options) => { if (!await options.beforeSend()) throw Object.assign(new Error('Changed'), { code: 'FINAL_MESSAGE_CHANGED' }); calls.push({ text, media: options.media }); return `sent-${calls.length}`; } } });
+  await sender.step(); await dispatch();
+  assert.equal(await Queue.countDocuments(), 2);
+  const queuedMedia = await Queue.findOne({ 'media.kind': 'video' });
+  assert.equal(queuedMedia.text, 'Caption');
+  await Lead.updateOne({ _id: lead._id }, { status: 'Positive' });
+  await State.updateOne({ _id: 'main' }, { nextSendAt: new Date(0) });
+  await sender.step();
+  assert.equal((await Queue.findById(queuedMedia._id)).status, 'cancelled');
+  assert.equal(calls.length, 1);
+});
+
+test('Both uses the existing email provider path once, without an extra WhatsApp copy; preference survives recovery', async () => {
+  await Lead.create({ name: 'Lead', phone: '9876543210', email: 'lead@example.test' });
+  const nativeFetch = global.fetch, mails = [];
+  process.env.RESEND_API_KEY = 'isolated'; process.env.FROM_EMAIL = 'sender@example.test';
+  global.fetch = async (url, options) => { assert.equal(url, 'https://api.resend.com/emails'); mails.push(JSON.parse(options.body)); return new Response(JSON.stringify({ id: 'email-1' })); };
+  try {
+    await send(composed({ channel: 'both', audience: 'leads:Contacted', media: null, caption: null }));
+    await State.updateOne({ _id: 'main' }, { paused: true });
+    await dispatch(); await dispatch();
+    assert.equal(mails.length, 1);
+    assert.equal(await Queue.countDocuments(), 0, 'WhatsApp still waits for its existing readiness gate');
+    assert.equal(await Recipient.countDocuments({ channel: 'email', state: 'sent' }), 1);
+    await State.updateOne({ _id: 'main' }, { paused: false }); await dispatch();
+    assert.equal(await Queue.countDocuments(), 1, 'exactly one original Broadcast queue row');
+    assert.equal(mails[0].subject, 'News');
+    assert.equal((await require('../models/emailControlModel').EmailPolicy.findOne({ event: 'broadcast.manual' })).channel, 'both');
+    await send(composed({ requestKey: 'another-request-key-0002', channel: 'email', media: null, caption: null }));
+    assert.equal((await require('../models/emailControlModel').EmailPolicy.findOne({ event: 'broadcast.manual' })).channel, 'email');
+  } finally { global.fetch = nativeFetch; }
+});
+
+test('signed library media is mandatory on routes; used assets cannot be retired and retired assets cannot be accepted', async () => {
+  const asset = media();
+  await Lead.create({ name: 'Lead', phone: '9876543210' });
+  const payload = { ...composed({ media: asset }), audience: 'leads:Contacted', requestKey: 'media-route-key-0001', origin: 'new' };
+  assert.equal((await api('/api/broadcast/send', 'POST', payload)).status, 400);
+  const token = jwt.sign({ asset }, require('../helpers/broadcastMedia').key(), { issuer: 'merasoftware-website', audience: 'broadcast-media', expiresIn: '60s' });
+  assert.equal((await api('/api/broadcast/send', 'POST', { ...payload, mediaToken: token })).status, 200);
+  await assert.rejects(require('../helpers/broadcastMedia').retireMedia(asset.id), /used by/);
+  const other = media();
+  await require('../helpers/broadcastMedia').retireMedia(other.id);
+  await assert.rejects(send(composed({ media: other, requestKey: 'retired-media-key-0001' })), /being used or removed/);
+});
+
+
+test('email failure retries only its locked email through Broadcast, with the same provider key and no duplicate WhatsApp', async () => {
+  await Lead.create({ name: 'Lead', phone: '9876543210', email: 'lead@example.test' });
+  const nativeFetch = global.fetch, keys = []; let fail = true;
+  process.env.RESEND_API_KEY = 'isolated'; process.env.FROM_EMAIL = 'sender@example.test';
+  global.fetch = async (url, options) => { assert.equal(url, 'https://api.resend.com/emails'); keys.push(options.headers['Idempotency-Key']); return new Response(JSON.stringify(fail ? { error: 'temporary' } : { id: 'retried-email' }), { status: fail ? 503 : 200 }); };
+  try {
+    const run = await send(composed({ channel: 'both', media: null, caption: null }));
+    await dispatch();
+    assert.equal(await Queue.countDocuments(), 1);
+    const recipient = await Recipient.findOne({ channel: 'email' });
+    assert.equal(recipient.state, 'failed');
+    const draft = await require('../models/emailControlModel').EmailDraft.findById(recipient._id);
+    await assert.rejects(require('../helpers/emailController').decide(String(draft._id), admin._id, { choice: 'send', channels: 'both', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true }), /Manage this delivery from Broadcast/);
+    fail = false;
+    assert.equal((await require('../helpers/broadcastService').retryEmail(run.id)).count, 1);
+    await dispatch(); await dispatch();
+    assert.equal((await Recipient.findById(recipient._id)).state, 'sent');
+    assert.equal(await Queue.countDocuments(), 1);
+    assert.equal(keys.length, 2); assert.equal(keys[0], keys[1]);
+    assert.equal((await require('../helpers/broadcastService').retryEmail(run.id)).count, 0);
+  } finally { global.fetch = nativeFetch; }
+});
+
+test('recipient index upgrade preserves existing queue identities and permits multiple message parts', async () => {
+  await Recipient.collection.dropIndex('broadcastId_1_channel_1_phone_1_email_1_part_1');
+  await Recipient.collection.createIndex({ broadcastId: 1, phone: 1 }, { unique: true });
+  const id = new mongoose.Types.ObjectId(), run = new mongoose.Types.ObjectId(), lead = new mongoose.Types.ObjectId();
+  await Recipient.collection.insertOne({ _id: id, broadcastId: run, leadId: lead, phone: '919876543210', state: 'sent' });
+  await require('../helpers/broadcastJobs').upgradeRecipientIndex();
+  const legacy = await Recipient.findById(id).lean();
+  assert.equal(legacy.channel, 'whatsapp'); assert.equal(legacy.part, 0);
+  await Recipient.create({ broadcastId: run, leadId: lead, phone: legacy.phone, part: 1, parts: 2 });
+  assert.equal(await Recipient.countDocuments(), 2);
+});
+
+
+test('media without caption reaches the existing queue with an empty text field, and later text waits for its result', async () => {
+  await Lead.create({ name: 'Lead', phone: '9876543210' });
+  await send(composed({ caption: null, position: 'after' }));
+  await dispatch();
+  const first = await Queue.findOne();
+  assert.equal(first.text, ''); assert.equal(first.media.kind, 'video');
+  await dispatch(); assert.equal(await Queue.countDocuments(), 1);
+  await Queue.updateOne({ _id: first._id }, { status: 'failed', lastError: 'Transport refused before handoff' });
+  await dispatch();
+  assert.equal(await Queue.countDocuments(), 1, 'text after a failed video is not sent');
+  assert.equal(await Recipient.countDocuments({ state: 'cancelled', part: 1 }), 1);
+});
+
+test('website media retirement requires a request-bound assertion and blocks stale signed media after deletion begins', async () => {
+  const asset = media();
+  const nativeFetch = global.fetch;
+  const body = { id: asset.id }, path = '/media/retire';
+  const { signingKey, digest } = require('../helpers/websiteEmailAccess');
+  const token = jwt.sign({ access: 'admin', method: 'POST', path, digest: digest(body) }, signingKey(), { issuer: 'merasoftware-website', audience: 'email-control', expiresIn: '60s' });
+  const invoke = (values, assertion) => nativeFetch(base + '/api/broadcast' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(assertion ? { 'x-website-email-assertion': assertion } : {}) }, body: JSON.stringify(values) });
+  assert.equal((await invoke(body)).status, 403);
+  assert.equal((await invoke({ id: media().id }, token)).status, 400);
+  assert.equal((await invoke(body, token)).status, 200);
+  await assert.rejects(saveTemplate(composed({ media: asset }), admin._id), /being used or removed/);
+});
+
+
+test('an oversized personalized caption skips only that destination and does not wedge other broadcasts', async () => {
+  await Lead.create({ name: 'A very long recipient name that exceeds the sample', phone: '9876543210' });
+  const caption = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'x'.repeat(1000) }, { type: 'emailVariable', attrs: { key: 'name' } }] }] };
+  await send(composed({ caption }));
+  await dispatch(); await dispatch();
+  assert.equal(await Queue.countDocuments(), 0);
+  assert.equal((await Recipient.findOne()).state, 'skipped');
+  await send({ requestKey: 'valid-message-after-caption', doc: doc('Good message') });
+  await dispatch();
+  assert.equal(await Queue.countDocuments(), 1);
 });

@@ -53,6 +53,7 @@ function messageText(draft) {
  * the reason, so the admin page shows why nothing went. Throws on a database error (11000 = already queued).
  */
 async function enqueueWhatsApp({ to, text, skipReason, ...fields }, { session } = {}) {
+  if (fields.media) fields.media = require('./broadcastMedia').validateMedia(fields.media);
   const row = to
     ? { status: 'pending', to }
     : { status: 'skipped', lastError: skipReason || NO_PHONE, expiresAt: finishedExpiry(new Date()) };

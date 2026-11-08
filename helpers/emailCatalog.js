@@ -108,8 +108,11 @@ const catalog = events.map(([key, section, label, group = label]) => ({
   trigger: SYSTEM_TRIGGERED.has(key) ? 'system' : CUSTOMER_TRIGGERED.has(key) ? 'customer' : 'admin',
   audience: TEAM.has(key) ? 'team' : 'customer', defaultChannel: defaultChannel(key), channels: EMAIL_ONLY.has(key) ? ['email'] : CHANNELS,
 }));
-const byKey = new Map(catalog.map(event => [event.key, event]));
-const eventKeys = application => catalog.filter(event => event.application === application).map(event => event.key);
+// Composed broadcasts participate in the same delivery/audit/access catalog, but their
+// reusable content is owned by Broadcast, not by the action-template settings.
+const deliveryCatalog = [...catalog, { key: 'broadcast.manual', section: 'Broadcast', label: 'Broadcast', group: 'Broadcast', application: 'portal', trigger: 'admin', audience: 'customer', defaultChannel: 'whatsapp', channels: CHANNELS }];
+const byKey = new Map(deliveryCatalog.map(event => [event.key, event]));
+const eventKeys = application => deliveryCatalog.filter(event => event.application === application).map(event => event.key);
 const isCustomerTriggered = key => byKey.get(key)?.trigger === 'customer';
 const isAutomaticEvent = key => isCustomerTriggered(key) || byKey.get(key)?.trigger === 'system';
 const customerEventKeys = catalog.filter(event => event.trigger === 'customer').map(event => event.key);

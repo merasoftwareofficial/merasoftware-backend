@@ -12,7 +12,8 @@ export const QUEUE_STATUSES = ['pending', 'sending', 'sent', 'failed', 'skipped'
 const queueSchema = new mongoose.Schema({
   // Country code + number, digits only. A skipped row (no usable phone) has none.
   to: { type: String, match: /^[1-9]\d{9,14}$/, required() { return this.status !== 'skipped'; } },
-  text: { type: String, required: true, maxlength: 60_000 },
+  text: { type: String, required() { return !this.media?.url; }, maxlength: 60_000 },
+  media: { id: String, kind: String, url: String, bytes: Number, format: String, publicId: String, assetId: String },
   event: String, // email action key, e.g. sendProjectCreatedEmail
   application: { type: String, enum: ['website', 'portal'] },
   emailDraftId: mongoose.Schema.Types.ObjectId, // the sent email this WhatsApp copies

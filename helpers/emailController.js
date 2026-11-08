@@ -302,6 +302,7 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
 async function decideChannels(id, actor, decision, access) {
   if (decision.choice === 'send') {
     const draft = await EmailDraft.findOne({ _id: id, ...draftAccess(actor, access), expiresAt: { $gt: new Date() } }).lean();
+    if (draft?.event === 'broadcast.manual' && !access.broadcastDelivery) throw new Error('Manage this delivery from Broadcast; its channels and content are locked.');
     const locked = !!draft?.delivery?.channels?.length;
     if (draft && (locked || decision.channels !== undefined || (draft.status === 'pending' && !draft.attemptCount))) {
       const delivery = require('./reviewDelivery');
@@ -334,6 +335,7 @@ async function markNotSent(draft, reason) {
 // Delivered by the action's route: an email that was sent, or a WhatsApp-only message in the queue.
 const DELIVERED = ['sent', 'queued'];
 async function decide(id, actor, decision, access = {}) {
+  if (decision.choice === 'skip' && !access.broadcastDelivery && await EmailDraft.exists({ _id: id, event: 'broadcast.manual' })) throw new Error('Manage this delivery from Broadcast; its channels and content are locked.');
   if (decision.choice === 'send') await require('./leadContactBlock').assertDraftMayGo(id);
   const result = await decideChannels(id, actor, decision, access);
   // Send message on a lead's page leaves a line on its timeline. It can never change the send's result.

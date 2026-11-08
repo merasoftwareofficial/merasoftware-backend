@@ -64,7 +64,7 @@ router.get('/queue', handle(async req => {
   const retryAfter = new Date(Date.now() - maxAgeMs(await savedSettings()));
   const [rows, total] = await Promise.all([
     Queue.find(filter).sort({ createdAt: -1 }).skip((page - 1) * PAGE_SIZE).limit(PAGE_SIZE)
-      .select('to email event application text status attempts lastError sentAt createdAt broadcastRecipientId').lean(),
+      .select('to email event application text media status attempts lastError sentAt createdAt broadcastRecipientId').lean(),
     Queue.countDocuments(filter),
   ]);
   return {
@@ -80,7 +80,7 @@ router.get('/queue/upcoming', handle(async () => {
   const [state, rows, total] = await Promise.all([
     State.findById(STATE_ID).lean(),
     Queue.find({ status: { $in: WAITING } }).sort({ createdAt: 1 }).limit(UPCOMING_MAX)
-      .select('to email event application text status attempts lastError createdAt nextAttemptAt').lean(),
+      .select('to email event application text media status attempts lastError createdAt nextAttemptAt').lean(),
     Queue.countDocuments({ status: { $in: WAITING } }),
   ]);
   const now = new Date();

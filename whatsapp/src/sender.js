@@ -9,6 +9,16 @@ import whatsappQueue from '../../helpers/whatsappQueue.js';
 import contacts from '../../helpers/contactNumbers.js';
 
 const INTERRUPTED = 'The service restarted while sending this message, so it may or may not have arrived. Not sent again automatically, to avoid a duplicate.';
+async function broadcastEligible(item) {
+  if (!item.broadcastRecipientId) return true;
+  const { Broadcast, BroadcastRecipient } = await import('../../models/broadcastModel.js').then(value => value.default);
+  const recipient = await BroadcastRecipient.findById(item.broadcastRecipientId).lean();
+  const broadcast = recipient && await Broadcast.findById(recipient.broadcastId).lean();
+  if (!broadcast) return false;
+  const content = await import('../../helpers/broadcastContent.js').then(value => value.default);
+  const audience = await import('../../helpers/broadcastAudience.js').then(value => value.default);
+  return !!await audience.eligible(broadcast.audience, recipient, { requireName: content.compositionUsesName(content.readComposition(broadcast.message)) });
+}
 const NOT_ON_WHATSAPP = 'This number is not on WhatsApp.';
 const TOO_OLD = 'Not sent: it waited more than a day (WhatsApp was paused or not linked).';
 
@@ -101,9 +111,10 @@ export function createSender({
         attempted = true;
         const messageId = await transport.send(jid, item.text, typingTime(rules, item.text.length, random()), {
           messageId: item.attemptMessageId,
+          ...(item.media?.url ? { media: item.media } : {}),
           ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
           beforeSend: async () => {
-            if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await stopFinalMessage.claimHandoff(item)) return false;
+            if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await broadcastEligible(item) || !await stopFinalMessage.claimHandoff(item)) return false;
             handedOff = true;
             await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'handoff', handedOffAt: now() } });
             return true;
@@ -114,7 +125,7 @@ export function createSender({
     } catch (error) {
       const message = error?.message || 'Unknown sending error';
       outcome = error?.code === 'FINAL_MESSAGE_CHANGED'
-        ? { status: 'cancelled', lastError: expiry.CANCELLED }
+        ? { status: 'cancelled', lastError: item.broadcastRecipientId ? 'Broadcast eligibility changed before sending.' : expiry.CANCELLED }
         : handedOff || item.attempts >= rules.maxAttempts
         ? { status: 'failed', lastError: message }
         : { status: 'pending', lastError: message, nextAttemptAt: new Date(now().getTime() + rules.retryDelayMin * 60_000) };

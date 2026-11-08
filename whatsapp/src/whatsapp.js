@@ -142,7 +142,7 @@ export function createConnection({ Auth, State, logger, onMessages, makeSocket =
         }
         try {
           if (options.beforeSend && !await options.beforeSend()) throw Object.assign(new Error('Final message cycle changed'), { code: 'FINAL_MESSAGE_CHANGED' });
-          const message = await socket.sendMessage(jid, { text }, { ...(options.quoted ? { quoted: options.quoted } : {}), ...(options.messageId ? { messageId: options.messageId } : {}) });
+          const message = await socket.sendMessage(jid, options.media ? { [options.media.kind]: { url: options.media.url }, ...(text ? { caption: text } : {}), ...(options.media.kind === 'video' ? { mimetype: 'video/mp4' } : {}) } : { text }, { ...(options.quoted ? { quoted: options.quoted } : {}), ...(options.messageId ? { messageId: options.messageId } : {}) });
           return message?.key?.id;
         } finally {
           if (typingMs > 0) await presence('unavailable');

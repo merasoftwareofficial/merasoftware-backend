@@ -22,6 +22,7 @@ const PROPOSAL_SENT = "Proposal Sent"; // history only: old follow-ups keep this
 // Active, Lazy and Tough stay valid for stored data and old follow-up badges, but can't be chosen (Active is now Positive).
 const LEAD_STATUSES = [INQUIRY, CONTACTED, POSITIVE, RESERVATION, ACTIVE, LAZY, TOUGH, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG, WON];
 const SELECTABLE_LEAD_STATUSES = [CONTACTED, POSITIVE, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG];
+const LEAD_CATEGORIES = [INQUIRY, CONTACTED, POSITIVE, RESERVATION, ...SELECTABLE_LEAD_STATUSES.filter(value => value !== CONTACTED && value !== POSITIVE)];
 const FOLLOW_UP_BADGES = [...LEAD_STATUSES, PROPOSAL_SENT];
 const DEFAULT_LEAD_STATUS = CONTACTED;
 // A new request is added to a lead in one of these instead of creating another lead.
@@ -62,7 +63,7 @@ const offerPanelOptions = () => ({
   stages: SELECTABLE_OFFER_STAGES.map(toOption),
   allStages: OFFER_STAGES.map(toOption),
   behaviours: CLIENT_BEHAVIOURS.map(toOption),
-  leadCategories: [INQUIRY, CONTACTED, POSITIVE, RESERVATION, ...SELECTABLE_LEAD_STATUSES.filter(status => ![CONTACTED, POSITIVE].includes(status))].map(toOption),
+  leadCategories: LEAD_CATEGORIES.map(toOption),
 });
 
 /** What a client who referred this lead may see. Our categories for a person stay inside the team. */
@@ -70,7 +71,7 @@ const referredLeadStatus = (status) => (status === WON ? "Matured" : [NEGATIVE, 
 
 module.exports = {
   INQUIRY, RESERVATION, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG, WON, PROPOSAL_SENT,
-  LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, OPEN_LEAD_STATUSES, NAME_OPTIONAL_STATUSES,
+  LEAD_CATEGORIES, LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, OPEN_LEAD_STATUSES, NAME_OPTIONAL_STATUSES,
   PROPOSAL_GROUP_STATUSES, NO_MARKETING_STATUSES, CLIENT_BEHAVIOURS, STORED_CLIENT_BEHAVIOURS, DEFAULT_CLIENT_BEHAVIOUR, behaviourFromStatus,
   MARKETABLE_CLIENT_BEHAVIOURS, OFFER_STAGES, SELECTABLE_OFFER_STAGES, leadStatusLabel, offerPanelOptions, referredLeadStatus,
 };

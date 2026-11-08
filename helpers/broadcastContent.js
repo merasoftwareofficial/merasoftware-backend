@@ -12,7 +12,7 @@ function marksFor(value) {
     return { type: mark.type };
   });
 }
-function content(input, { fields = FIELDS } = {}) {
+function content(input, { fields = FIELDS, allowEmpty = false } = {}) {
   let size = 0;
   function node(value, depth = 0) {
     if (!value || depth > 12 || ++size > 4000) fail('Message is too large.');
@@ -41,7 +41,7 @@ function content(input, { fields = FIELDS } = {}) {
   const expand = value => value && typeof value === 'object' ? { ...value, ...(['doc', 'paragraph', 'bulletList', 'listItem'].includes(value.type) ? { content: (value.content || []).map(expand) } : {}) } : value;
   const doc = node(expand(input));
   const plain = render(doc, { name: 'Recipient' });
-  if (!plain.trim()) fail('Write a message first.');
+  if (!plain.trim() && !allowEmpty) fail('Write a message first.');
   if (plain.length > 20000 || JSON.stringify(doc).length > 100000) fail('Message is too long.');
   return doc;
 }
@@ -82,4 +82,38 @@ const textToDoc = text => ({ type: 'doc', content: String(text).split(/\n{2,}/).
   type: 'paragraph',
   content: paragraph.split('\n').flatMap((line, index) => [...(index ? [{ type: 'hardBreak' }] : []), { type: 'text', text: line }]),
 })) });
-module.exports = { FIELDS, content, encode, decode, render, title, usesName, textToDoc, fail };
+// A versioned composition wraps the existing text codec; Auto Reply keeps its text-only contract.
+function composition(input) {
+  const empty = { type: 'doc', content: [{ type: 'paragraph', content: [] }] };
+  const optional = doc => content(doc || empty, { allowEmpty: true });
+  const doc = optional(input.doc), caption = optional(input.caption);
+  const media = input.media ? require('./broadcastMedia').validateMedia(input.media) : null;
+  const position = input.position || 'after';
+  if (!['before', 'after'].includes(position)) fail('Choose text before or after media.');
+  const subject = String(input.subject || '').trim();
+  if (subject.length > 300 || /[\r\n]/.test(subject)) fail('Use an email subject on one line, up to 300 characters.');
+  if (!media && render(caption, { name: 'Recipient' })) fail('A caption needs media.');
+  if (!media && !render(doc, { name: 'Recipient' })) fail('Write a message or choose media.');
+  if (render(caption, { name: 'Recipient' }).length > 1024) fail('Keep the caption within 1024 characters.');
+  return { version: 2, doc, caption, media, position, subject };
+}
+function readComposition(message) {
+  const value = JSON.parse(message);
+  return value.version === 2 ? composition(value) : { version: 1, doc: content(value), caption: null, media: null, position: 'after', subject: '' };
+}
+function compositionParts(value, values) {
+  const text = render(value.doc, values), caption = value.caption ? render(value.caption, values) : '';
+  if (text.length > 60000) fail('Personalized text exceeds 60000 characters.');
+  if (caption.length > 1024) fail('Personalized caption exceeds 1024 characters.');
+  const parts = value.media ? [{ text: caption, media: value.media }] : [];
+  if (text) value.position === 'before' ? parts.unshift({ text }) : parts.push({ text });
+  return parts;
+}
+function compositionHtml(value, values) {
+  return compositionParts(value, values).map(part => part.media
+    ? `<div>${part.media.kind === 'video' ? `<a href="${escapeHtml(part.media.url)}"><img src="${escapeHtml(part.media.url.replace(/\.mp4(?:\?.*)?$/, '.jpg'))}" alt="Open video" style="max-width:100%">Open video</a>` : `<img src="${escapeHtml(part.media.url)}" alt="" style="max-width:100%">`}${part.text ? render(value.caption, values, { html: true }) : ''}</div>`
+    : render(value.doc, values, { html: true })).join('');
+}
+const compositionUsesName = value => usesName(value.doc) || (value.caption && usesName(value.caption));
+const compositionTitle = value => (value.subject || render(value.doc, { name: 'Recipient' }) || (value.caption && render(value.caption, { name: 'Recipient' })) || 'Media message').slice(0, 100);
+module.exports = { FIELDS, content, encode, decode, render, title, usesName, textToDoc, fail, composition, readComposition, compositionParts, compositionHtml, compositionUsesName, compositionTitle };

@@ -32,9 +32,10 @@ function fakeWhatsApp() {
       end() {}, logout: async () => {},
       calls: [], // what was said to WhatsApp, in order
       messageOptions: [],
+      payloads: [],
       sendPresenceUpdate: async (type, to) => { socket.calls.push(['presence', type, to]); },
       presenceSubscribe: async to => { socket.calls.push(['subscribe', to]); },
-      sendMessage: async (to, content, options) => { socket.calls.push(['message', to, content.text]); socket.messageOptions.push(options); return { key: { id: 'msg-1' } }; },
+      sendMessage: async (to, content, options) => { socket.payloads.push(content); socket.calls.push(['message', to, content.text]); socket.messageOptions.push(options); return { key: { id: 'msg-1' } }; },
     };
     sockets.push(socket);
     return socket;
@@ -157,4 +158,19 @@ it('shows "typing…" for the given time before the message, then goes offline; 
   wa.sockets[0].calls.length = 0;
   await connection.transport.send(jid, 'Hi', 0);
   assert.deepEqual(wa.sockets[0].calls, [['message', jid, 'Hi']]);
+});
+
+it('the existing transport sends media with optional captions and preserves the handoff check', async () => {
+  const wa = fakeWhatsApp();
+  const connection = createConnection({ Auth, State, logger: silent, makeSocket: wa.makeSocket, fetchVersion: wa.fetchVersion });
+  open.push(connection); connection.start();
+  assert.ok(await until(() => wa.sockets.length === 1));
+  await wa.sockets[0].emit('connection.update', { connection: 'open' });
+  const media = { kind: 'video', url: 'https://res.cloudinary.com/test/video/upload/clip.mp4' };
+  await connection.transport.send('919876543210@s.whatsapp.net', '', 0, { media, messageId: 'media-id', beforeSend: async () => true });
+  assert.deepEqual(wa.sockets[0].payloads[0], { video: { url: media.url }, mimetype: 'video/mp4' });
+  await connection.transport.send('919876543210@s.whatsapp.net', 'Caption', 0, { media: { ...media, kind: 'image' }, beforeSend: async () => true });
+  assert.deepEqual(wa.sockets[0].payloads[1], { image: { url: media.url }, caption: 'Caption' });
+  await assert.rejects(connection.transport.send('919876543210@s.whatsapp.net', 'Cancelled', 0, { media, beforeSend: async () => false }), { code: 'FINAL_MESSAGE_CHANGED' });
+  assert.equal(wa.sockets[0].payloads.length, 2);
 });
