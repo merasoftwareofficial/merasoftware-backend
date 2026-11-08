@@ -79,7 +79,7 @@ const stateSchema = new mongoose.Schema({
 const authSchema = new mongoose.Schema({ _id: String, value: { type: String, required: true } },
   { collection: 'whatsapp_auth', versionKey: false });
 
-const lockSchema = new mongoose.Schema({ _id: String, owner: String, expiresAt: Date },
+const lockSchema = new mongoose.Schema({ _id: String, owner: String, expiresAt: Date, revision: Number },
   { collection: 'whatsapp_locks', versionKey: false });
 
 // Auto Reply: the message to recognise. Stored as rows so more could be added later; the screen offers one.

@@ -149,12 +149,17 @@ async function releaseEmail(ownsLease) {
   const lead = await eligible(broadcast.audience, recipient, nameRule(broadcast));
   if (!lead) return Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'skipped', reason: 'Person left the group, was blocked or their email changed.' } });
   const { EmailDraft, EmailHistory } = require('../models/emailControlModel');
-  const { reconcileSent } = require('./emailOutbox');
-  await reconcileSent({ draftId: recipient._id });
   let draft = await EmailDraft.findById(recipient._id).lean();
+  const audit = await EmailHistory.findOne({ draftId: recipient._id, status: 'sent', providerId: { $nin: [null, ''] } }).select('sentAt providerId').lean();
+  if (draft?.status === 'sent' || draft?.providerId || audit) {
+    return Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'sent', sentAt: draft?.sentAt || audit?.sentAt, reason: '' } });
+  }
   if (draft?.status === 'sending') {
     // Provider outcome is uncertain; never automatically resend after its idempotency window.
     return Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'failed', reason: 'Email delivery was interrupted; check Email history before retrying.' } });
+  }
+  if (draft?.attemptCount && Date.now() - draft.createdAt.getTime() >= 23 * 3600000) {
+    return Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'failed', reason: 'The safe email retry window ended before release. Review the provider result before sending again.' } });
   }
   if (!draft) {
     const value = readComposition(broadcast.message), values = { name: lead.name };
@@ -174,7 +179,9 @@ async function releaseEmail(ownsLease) {
     const accepted = draft.status === 'sent' || await EmailHistory.exists({ draftId: draft._id, status: 'sent', providerId: { $nin: [null, ''] } });
     if (!accepted) await require('./emailController').decide(String(draft._id), broadcast.createdBy, { choice: 'send', channels: 'email', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true, broadcastDelivery: true });
     const result = await EmailDraft.findById(draft._id).lean();
-    await Recipient.updateOne({ _id: recipient._id }, { $set: { state: result.status === 'sent' ? 'sent' : 'failed', sentAt: result.sentAt, reason: result.failure || '' } });
+    const sentAudit = result?.status === 'sent' ? null : await EmailHistory.findOne({ draftId: draft._id, status: 'sent', providerId: { $nin: [null, ''] } }).select('sentAt').lean();
+    const sent = result?.status === 'sent' || !!result?.providerId || !!sentAudit;
+    await Recipient.updateOne({ _id: recipient._id }, { $set: { state: sent ? 'sent' : 'failed', sentAt: result?.sentAt || sentAudit?.sentAt, reason: sent ? '' : result?.failure || 'Email delivery needs review.' } });
   } catch (error) {
     await Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'failed', reason: error.message } });
   }

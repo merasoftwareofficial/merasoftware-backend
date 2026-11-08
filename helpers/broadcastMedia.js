@@ -17,23 +17,33 @@ function verifyMedia(token) {
 }
 async function withMediaLock(id, work) {
   if (!/^[a-f\d]{24}$/i.test(id)) throw new Error('Invalid media identity.');
+  const mongoose = require('mongoose');
   const { Lock } = require('../whatsapp/src/models.js');
-  const owner = require('node:crypto').randomUUID(), lockId = `broadcast-media:${id}`;
+  const lockId = `broadcast-media:${id}`;
+  // Keep one guard document, so save/send and retirement always write the same
+  // record in their transactions. No expiring lease can permit a stale save.
   try {
-    await Lock.updateOne({ _id: lockId, expiresAt: { $lte: new Date() } }, { $set: { owner, expiresAt: new Date(Date.now() + 120000) } }, { upsert: true });
-  } catch (error) { if (error.code === 11000) throw new Error('Media is being used or removed. Try again.'); throw error; }
-  try { return await work(async () => Lock.updateOne({ _id: lockId, owner }, { $set: { owner: 'retired', expiresAt: new Date('2100-01-01') } })); }
-  finally { await Lock.deleteOne({ _id: lockId, owner }); }
+    await Lock.updateOne({ _id: lockId }, { $setOnInsert: { owner: 'available', revision: 0, expiresAt: new Date('2100-01-01') } }, { upsert: true });
+  } catch (error) { if (error.code !== 11000) throw error; }
+  const session = await mongoose.startSession();
+  try {
+    return await session.withTransaction(async () => {
+      const guard = await Lock.findOneAndUpdate({ _id: lockId, owner: { $ne: 'retired' }, $or: [{ owner: 'available' }, { expiresAt: { $lte: new Date() } }] },
+        { $inc: { revision: 1 }, $set: { owner: 'available', expiresAt: new Date('2100-01-01') } }, { session, new: true });
+      if (!guard) throw new Error('Media is being used or removed. Try again.');
+      return work(session, () => Lock.updateOne({ _id: lockId }, { $set: { owner: 'retired' } }, { session }));
+    });
+  } finally { await session.endSession(); }
 }
 async function retireMedia(id) {
   const { Lock } = require('../whatsapp/src/models.js');
   if (await Lock.exists({ _id: `broadcast-media:${id}`, owner: 'retired' })) return { retired: true };
-  return withMediaLock(id, async retire => {
+  return withMediaLock(id, async (session, retire) => {
     const { Broadcast } = require('../models/broadcastModel');
     const Template = require('../models/messageTemplateModel');
     // Match canonical JSON asset identity. Historical sends also retain reviewable media.
     const needle = `"id":"${id}"`;
-    if (await Broadcast.exists({ message: { $regex: needle } }) || await Template.exists({ purpose: 'broadcast', message: { $regex: needle } })) throw new Error('This media is used by a Broadcast or saved message.');
+    if (await Broadcast.exists({ message: { $regex: needle } }).session(session) || await Template.exists({ purpose: 'broadcast', message: { $regex: needle } }).session(session)) throw new Error('This media is used by a Broadcast or saved message.');
     await retire();
     return { retired: true };
   });

@@ -19,13 +19,16 @@ async function listTemplates() {
   return rows.map(({ message, ...row }) => ({ ...row, ...readComposition(message) }));
 }
 async function saveTemplate(input, userId, id) {
-  const save = () => saveTemplateContent(input, userId, id);
+  const save = session => saveTemplateContent(input, userId, id, session);
   return input.media ? require('./broadcastMedia').withMediaLock(input.media.id, save) : save();
 }
-async function saveTemplateContent(input, userId, id) {
+async function saveTemplateContent(input, userId, id, session) {
   const values = await templateInput(input);
-  if (!id) return Template.create({ ...values, purpose: 'broadcast', createdBy: userId });
-  const row = await Template.findOneAndUpdate({ _id: objectId(id), purpose: 'broadcast' }, { $set: values }, { new: true });
+  if (!id) {
+    const data = { ...values, purpose: 'broadcast', createdBy: userId };
+    return session ? (await Template.create([data], { session }))[0] : Template.create(data);
+  }
+  const row = await Template.findOneAndUpdate({ _id: objectId(id), purpose: 'broadcast' }, { $set: values }, { new: true, session });
   if (!row) throw Object.assign(new Error('Saved message not found.'), { status: 404 });
   return row;
 }
@@ -34,10 +37,10 @@ async function deleteTemplate(id) {
   if (!row) throw Object.assign(new Error('Saved message not found.'), { status: 404 });
 }
 async function submit(input, userId) {
-  const accept = () => acceptBroadcast(input, userId);
+  const accept = session => acceptBroadcast(input, userId, session);
   return input.media ? require('./broadcastMedia').withMediaLock(input.media.id, accept) : accept();
 }
-async function acceptBroadcast(input, userId) {
+async function acceptBroadcast(input, userId, session) {
   groupQuery(input.audience);
   if (typeof input.requestKey !== 'string' || !/^[a-zA-Z0-9-]{16,100}$/.test(input.requestKey)) fail('A valid send request key is required.');
   if (!['new', 'template'].includes(input.origin)) fail('Choose a new or saved message.');
@@ -48,33 +51,34 @@ async function acceptBroadcast(input, userId) {
   const templateId = input.origin === 'template' ? objectId(input.templateId) : undefined;
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify([input.audience, message, input.origin, templateId, channel])).digest('hex');
   const id = deterministicId(`${userId}:${input.requestKey}`);
-  let row = await Broadcast.findById(id);
+  let row = await Broadcast.findById(id).session(session || null);
   if (!row) {
-    if (templateId && !await Template.exists({ _id: templateId, purpose: 'broadcast' })) fail('Saved message no longer exists.');
+    if (templateId && !await Template.exists({ _id: templateId, purpose: 'broadcast' }).session(session || null)) fail('Saved message no longer exists.');
     const requireName = compositionUsesName(readComposition(message));
     if (!(await audience(input.audience, { requireName, channel })).count) fail(requireName ? 'No one in this group has both a usable number and a name. Remove the name from the message, or choose another group.' : 'This group has no eligible phone numbers.');
     try {
-      row = await Broadcast.create({ _id: id, createdBy: userId, requestKey: input.requestKey, fingerprint, audience: input.audience, message, channel, templateId, origin: input.origin });
-    } catch (error) { if (error.code !== 11000) throw error; row = await Broadcast.findById(id); }
+      const data = { _id: id, createdBy: userId, requestKey: input.requestKey, fingerprint, audience: input.audience, message, channel, templateId, origin: input.origin };
+      row = session ? (await Broadcast.create([data], { session }))[0] : await Broadcast.create(data);
+    } catch (error) { if (session || error.code !== 11000) throw error; row = await Broadcast.findById(id); }
   }
   const legacyFingerprint = crypto.createHash('sha256').update(JSON.stringify([input.audience, message, input.origin, templateId])).digest('hex');
   if (row.fingerprint !== fingerprint && !(!row.channel && row.fingerprint === legacyFingerprint)) throw Object.assign(new Error('This send request was already used for a different message.'), { status: 409 });
-  await completeAcceptance(row);
+  await completeAcceptance(row, session);
   return { id: row._id, state: row.state, accepted: true };
 }
-async function completeAcceptance(row) {
+async function completeAcceptance(row, session) {
   if (row.acceptanceCompletedAt) return;
   // Retry-safe side effects: one template per new broadcast, and never an implicit template edit.
   if (row.origin === 'new') {
     const autoId = deterministicId(`broadcast-template:${row._id}`);
-    await Template.updateOne({ _id: autoId }, { $setOnInsert: { purpose: 'broadcast', name: compositionTitle(readComposition(row.message)), message: row.message, createdBy: row.createdBy, sourceBroadcastId: row._id }, $max: { lastUsedAt: row.createdAt } }, { upsert: true });
+    await Template.updateOne({ _id: autoId }, { $setOnInsert: { purpose: 'broadcast', name: compositionTitle(readComposition(row.message)), message: row.message, createdBy: row.createdBy, sourceBroadcastId: row._id }, $max: { lastUsedAt: row.createdAt } }, { upsert: true, session });
   } else {
-    await Template.updateOne({ _id: row.templateId, purpose: 'broadcast' }, { $max: { lastUsedAt: row.createdAt } });
+    await Template.updateOne({ _id: row.templateId, purpose: 'broadcast' }, { $max: { lastUsedAt: row.createdAt } }, { session });
   }
   // Acceptance is replayable: an older recovery must never replace a newer preference.
-  await require('../models/emailControlModel').EmailPolicy.updateOne({ event: 'broadcast.manual', $or: [{ updatedAt: { $lte: row.createdAt } }, { updatedAt: { $exists: false } }] }, { $set: { channel: row.channel || 'whatsapp', updatedAt: row.createdAt } }, { timestamps: false });
-  await require('../models/emailControlModel').EmailPolicy.updateOne({ event: 'broadcast.manual' }, { $setOnInsert: { channel: row.channel || 'whatsapp', updatedAt: row.createdAt } }, { upsert: true, timestamps: false });
-  await Broadcast.updateOne({ _id: row._id }, { $set: { acceptanceCompletedAt: new Date() } });
+  await require('../models/emailControlModel').EmailPolicy.updateOne({ event: 'broadcast.manual', $or: [{ updatedAt: { $lte: row.createdAt } }, { updatedAt: { $exists: false } }] }, { $set: { channel: row.channel || 'whatsapp', updatedAt: row.createdAt } }, { timestamps: false, session });
+  await require('../models/emailControlModel').EmailPolicy.updateOne({ event: 'broadcast.manual' }, { $setOnInsert: { channel: row.channel || 'whatsapp', updatedAt: row.createdAt } }, { upsert: true, timestamps: false, session });
+  await Broadcast.updateOne({ _id: row._id }, { $set: { acceptanceCompletedAt: new Date() } }, { session });
 }
 async function history() {
   const rows = await Broadcast.find().sort({ createdAt: -1 }).limit(30).lean();

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const Lead = require('../models/leadModel');
 const Template = require('../models/messageTemplateModel');
 const User = require('../models/userModel');
@@ -20,7 +20,7 @@ let db, server, base, admin, customer;
 const send = (values = {}) => submit({ requestKey: 'test-request-key-0001', audience: 'Contacted', doc: named(), origin: 'new', ...values }, admin._id);
 before(async () => {
   process.env.TOKEN_SECRET_KEY = 'isolated-broadcast-secret';
-  db = await MongoMemoryServer.create();
+  db = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.MONGODB_URI = db.getUri();
   await mongoose.connect(db.getUri(), { dbName: 'broadcast-isolated' });
   await Promise.all([Queue.init(), Broadcast.init(), Recipient.init(), Template.init()]);
@@ -357,4 +357,147 @@ test('an oversized personalized caption skips only that destination and does not
   await send({ requestKey: 'valid-message-after-caption', doc: doc('Good message') });
   await dispatch();
   assert.equal(await Queue.countDocuments(), 1);
+});
+
+
+test('asset retirement waits for a media save transaction, then sees its committed reference', async () => {
+  const asset = media(), { withMediaLock, retireMedia } = require('../helpers/broadcastMedia');
+  let entered, release;
+  const ready = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const saving = withMediaLock(asset.id, async session => {
+    await Template.create([{ name: 'Pinned media', purpose: 'broadcast', message: JSON.stringify(require('../helpers/broadcastContent').composition(composed({ media: asset }))), createdBy: admin._id }], { session });
+    entered(); await gate;
+  });
+  await ready;
+  let retired = false;
+  const deletion = retireMedia(asset.id).then(() => { retired = true; }, error => error);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(retired, false);
+  release(); await saving;
+  assert.match((await deletion).message, /used by/);
+  assert.equal(await Template.countDocuments({ name: 'Pinned media' }), 1);
+});
+
+test('a rolled-back media save leaves no template/broadcast/preference and does not prevent deletion', async () => {
+  const asset = media(), { withMediaLock, retireMedia } = require('../helpers/broadcastMedia');
+  await assert.rejects(withMediaLock(asset.id, async session => {
+    await Template.create([{ name: 'Rolled back', purpose: 'broadcast', message: JSON.stringify(require('../helpers/broadcastContent').composition(composed({ media: asset }))), createdBy: admin._id }], { session });
+    throw new Error('Process failed before commit');
+  }), /before commit/);
+  assert.equal(await Template.countDocuments({ name: 'Rolled back' }), 0);
+  assert.equal(await Broadcast.countDocuments(), 0);
+  assert.equal((await retireMedia(asset.id)).retired, true);
+  await assert.rejects(saveTemplate(composed({ media: asset }), admin._id), /being used or removed/);
+});
+
+test('a retiring transaction prevents a stale media save from committing even when its work resumes later', async () => {
+  const asset = media(), { withMediaLock } = require('../helpers/broadcastMedia');
+  let entered, release;
+  const ready = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const deleting = withMediaLock(asset.id, async (session, retire) => { await retire(); entered(); await gate; });
+  await ready;
+  const saving = saveTemplate(composed({ media: asset }), admin._id).catch(error => error);
+  release(); await deleting;
+  assert.match((await saving).message, /being used or removed/);
+  assert.equal(await Template.countDocuments(), 0);
+});
+
+test('an accepted email audit repairs an interrupted draft without contacting the provider again', async () => {
+  await Lead.create({ name: 'Email lead', email: 'email@example.test' });
+  const nativeFetch = global.fetch;
+  process.env.RESEND_API_KEY = 'isolated'; process.env.FROM_EMAIL = 'sender@example.test';
+  global.fetch = async () => new Response(JSON.stringify({ error: 'temporary' }), { status: 503 });
+  try {
+    await send(composed({ channel: 'email', media: null, caption: null })); await dispatch();
+    const recipient = await Recipient.findOne({ channel: 'email' });
+    const { EmailDraft, EmailHistory } = require('../models/emailControlModel');
+    const sentAt = new Date();
+    await EmailDraft.updateOne({ _id: recipient._id }, { status: 'sending' });
+    await EmailHistory.updateOne({ draftId: recipient._id }, { status: 'sent', providerId: 'accepted-before-restart', sentAt });
+    await Recipient.updateOne({ _id: recipient._id }, { state: 'releasing' });
+    global.fetch = async () => { throw new Error('Provider must not be called twice'); };
+    await dispatch();
+    const recovered = await Recipient.findById(recipient._id);
+    assert.equal(recovered.state, 'sent'); assert.equal(+recovered.sentAt, +sentAt);
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally { global.fetch = nativeFetch; }
+});
+
+test('a queued email retry is refused at release if its provider dedupe window expired while waiting', async () => {
+  await Lead.create({ name: 'Email lead', email: 'email@example.test' });
+  const nativeFetch = global.fetch; let calls = 0;
+  process.env.RESEND_API_KEY = 'isolated'; process.env.FROM_EMAIL = 'sender@example.test';
+  global.fetch = async () => { calls++; return new Response(JSON.stringify({ error: 'temporary' }), { status: 503 }); };
+  try {
+    const run = await send(composed({ channel: 'email', media: null, caption: null })); await dispatch();
+    assert.equal((await require('../helpers/broadcastService').retryEmail(run.id)).count, 1);
+    const recipient = await Recipient.findOne({ channel: 'email' });
+    await require('../models/emailControlModel').EmailDraft.collection.updateOne({ _id: recipient._id }, { $set: { createdAt: new Date(Date.now() - 24 * 3600000) } });
+    await dispatch();
+    assert.equal(calls, 1);
+    assert.equal((await Recipient.findById(recipient._id)).state, 'failed');
+    assert.match((await Recipient.findById(recipient._id)).reason, /retry window ended/);
+  } finally { global.fetch = nativeFetch; }
+});
+
+test('signed image/video broadcasts pass through the actual dispatcher, sender and connection transport in both orders', async () => {
+  const { createConnection } = require('../whatsapp/src/whatsapp.js');
+  const { Auth } = require('../whatsapp/src/models.js');
+  await Lead.create({ name: 'Lead', phone: '9876543210' });
+  const handlers = {}, payloads = [];
+  let opened;
+  const ready = new Promise(resolve => { opened = resolve; });
+  const logger = { error() {}, warn() {}, info() {}, debug() {}, trace() {}, child() { return this; } };
+  // Only the socket is fake: there is no live phone connection in this test.
+  const socket = { ev: { on: (event, fn) => { handlers[event] = fn; } }, onWhatsApp: async to => [{ exists: true, jid: `${to}@s.whatsapp.net` }], end() {}, sendMessage: async (jid, payload) => { payloads.push(payload); return { key: { id: `sent-${payloads.length}` } }; } };
+  const connection = createConnection({ Auth, State, logger, makeSocket: () => { opened(); return socket; }, fetchVersion: async () => null });
+  connection.start(); await ready; await handlers['connection.update']({ connection: 'open' });
+  let time = new Date();
+  const sender = createSender({ Queue, State, config: { timeZone: 'Asia/Kolkata' }, transport: connection.transport, now: () => time, random: () => 0 });
+  try {
+    for (const kind of ['image', 'video']) for (const position of ['before', 'after']) {
+      const asset = { ...media(), kind, format: kind === 'image' ? 'png' : 'mp4', url: `https://res.cloudinary.com/test/${kind}/upload/v1/asset.${kind === 'image' ? 'png' : 'mp4'}` };
+      const token = jwt.sign({ asset }, require('../helpers/broadcastMedia').key(), { issuer: 'merasoftware-website', audience: 'broadcast-media', expiresIn: '60s' });
+      const result = await api('/api/broadcast/send', 'POST', { ...composed({ media: asset, position }), mediaToken: token, audience: 'leads:Contacted', origin: 'new', requestKey: `transport-${kind}-${position}` });
+      assert.equal(result.status, 200);
+      const start = payloads.length;
+      await State.updateOne({ _id: 'main' }, { nextSendAt: new Date(0) });
+      await dispatch();
+      time = new Date(Math.max(time.getTime(), Date.now()) + 1000);
+      assert.equal((await sender.step()).reason, 'sent');
+      time = new Date(time.getTime() + 40000);
+      await dispatch(); await sender.step(); await reconcile();
+      const delivered = payloads.slice(start);
+      assert.equal(delivered.length, 2);
+      const mediaPayload = delivered[position === 'before' ? 1 : 0];
+      assert.deepEqual(mediaPayload[kind], { url: asset.url }); assert.equal(mediaPayload.caption, 'Caption');
+      assert.equal(delivered[position === 'before' ? 0 : 1].text, 'Separate text');
+      assert.equal(await Recipient.countDocuments({ broadcastId: result.data.id, state: 'sent' }), 2);
+    }
+  } finally { await connection.stop(); }
+});
+
+test('media acceptance rolls back its run, auto-template and preference together when acceptance fails', async () => {
+  await Lead.create({ name: 'Lead', phone: '9876543210' });
+  const asset = media(), { EmailPolicy } = require('../models/emailControlModel');
+  const original = EmailPolicy.updateOne;
+  EmailPolicy.updateOne = () => { throw new Error('Injected preference write failure'); };
+  try { await assert.rejects(send(composed({ media: asset })), /preference write failure/); }
+  finally { EmailPolicy.updateOne = original; }
+  assert.equal(await Broadcast.countDocuments(), 0);
+  assert.equal(await Template.countDocuments(), 0);
+  assert.equal(await EmailPolicy.countDocuments(), 0);
+  assert.equal((await require('../helpers/broadcastMedia').retireMedia(asset.id)).retired, true);
+});
+
+test('concurrent media sends on different assets share channel preference without losing either acceptance', async () => {
+  await Lead.create({ name: 'Lead', phone: '9876543210' });
+  const accepted = await Promise.all([
+    send(composed({ requestKey: 'parallel-media-accept-0001' })),
+    send(composed({ requestKey: 'parallel-media-accept-0002' })),
+  ]);
+  assert.equal(accepted.length, 2);
+  assert.equal(await Broadcast.countDocuments(), 2);
+  assert.equal(await Template.countDocuments(), 2);
+  assert.equal(await require('../models/emailControlModel').EmailPolicy.countDocuments({ event: 'broadcast.manual' }), 1);
 });
