@@ -17,8 +17,9 @@ const DEAD = "Dead"; // below Negative, kept for later: no reply to the final me
 const WRONG = "Wrong"; // someone who can't be sold to at all. Leads only: a client has already been filtered in
 const PROPOSAL_SENT = "Proposal Sent"; // history only: old follow-ups keep this badge
 
+// Active, Lazy and Tough stay valid for stored data and old follow-up badges, but can't be chosen (Active is now Positive).
 const LEAD_STATUSES = [INQUIRY, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG, WON];
-const SELECTABLE_LEAD_STATUSES = [CONTACTED, POSITIVE, ACTIVE, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG];
+const SELECTABLE_LEAD_STATUSES = [CONTACTED, POSITIVE, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG];
 const FOLLOW_UP_BADGES = [...LEAD_STATUSES, PROPOSAL_SENT];
 const DEFAULT_LEAD_STATUS = CONTACTED;
 // A new request is added to a lead in one of these instead of creating another lead.
@@ -31,18 +32,32 @@ const PROPOSAL_GROUP_STATUSES = [CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH];
 const NO_MARKETING_STATUSES = [DEAD, WRONG];
 
 // How a client generally behaves, kept apart from the client's Won status (lead.clientBehaviour). No value means Neutral.
-// CLIENT_BEHAVIOURS are the ones the admin chooses; a stored one may also be Inquiry, which only the system sets.
-const CLIENT_BEHAVIOURS = SELECTABLE_LEAD_STATUSES.filter((status) => status !== WRONG);
-const STORED_CLIENT_BEHAVIOURS = [INQUIRY, LAZY, TOUGH, ...CLIENT_BEHAVIOURS];
+// It only says whether the client may be marketed to (owner, 8 Nov 2026): Neutral = yes; Not Now and Unhappy = no
+// Broadcast; Negative = the final message; Dead = never. Selling one offer to a client is that offer's stage.
+const CLIENT_BEHAVIOURS = [CONTACTED, NOT_NOW, NEGATIVE, UNHAPPY, DEAD];
+// Older values stay valid on stored clients until the admin changes them; none of them can be chosen.
+const STORED_CLIENT_BEHAVIOURS = [INQUIRY, POSITIVE, ACTIVE, LAZY, TOUGH, ...CLIENT_BEHAVIOURS];
 const DEFAULT_CLIENT_BEHAVIOUR = CONTACTED;
-/** The behaviour a lead starts with on becoming a client: its category, unless that is one a client can't keep. */
-const behaviourFromStatus = (status) => ([LAZY, TOUGH].includes(status) ? NOT_NOW : CLIENT_BEHAVIOURS.includes(status) && status !== DEAD ? status : DEFAULT_CLIENT_BEHAVIOUR);
+/** The behaviour a lead starts with on becoming a client: Not Now, Unhappy and Negative carry over, everything else is Neutral. */
+const behaviourFromStatus = (status) => ([LAZY, TOUGH].includes(status) ? NOT_NOW : [NOT_NOW, UNHAPPY, NEGATIVE].includes(status) ? status : DEFAULT_CLIENT_BEHAVIOUR);
+/** A Broadcast may reach this client: Neutral only (no saved value counts as Neutral). */
+const MARKETABLE_CLIENT_BEHAVIOURS = [null, DEFAULT_CLIENT_BEHAVIOUR];
 
 // A person's stage in one offer (models/offerTargetModel.js). Won is set only by Bought this offer.
 const OFFER_STAGES = [CONTACTED, POSITIVE, NEGATIVE, WON];
 const SELECTABLE_OFFER_STAGES = [CONTACTED, POSITIVE, NEGATIVE];
 
 const leadStatusLabel = (status) => (status === CONTACTED ? "Neutral" : status === WON ? "Matured" : status === NOT_NOW ? "Not Now" : status);
+const toOption = (value) => ({ value, label: leadStatusLabel(value) });
+/** The choices the website's offer people panel shows, from these lists (merasoftware offer-targets-panel.tsx).
+ *  behaviours are both what a client can be set to and the client filter; leadCategories filter leads; labels name
+ *  every stored value, older ones included. */
+const offerPanelOptions = () => ({
+  labels: Object.fromEntries(FOLLOW_UP_BADGES.map(value => [value, leadStatusLabel(value)])),
+  stages: SELECTABLE_OFFER_STAGES.map(toOption),
+  behaviours: CLIENT_BEHAVIOURS.map(toOption),
+  leadCategories: [INQUIRY, ...SELECTABLE_LEAD_STATUSES].map(toOption),
+});
 
 /** What a client who referred this lead may see. Our categories for a person stay inside the team. */
 const referredLeadStatus = (status) => (status === WON ? "Matured" : [NEGATIVE, DEAD, WRONG].includes(status) ? "Closed" : "In progress");
@@ -51,5 +66,5 @@ module.exports = {
   INQUIRY, CONTACTED, POSITIVE, ACTIVE, LAZY, TOUGH, NOT_NOW, NEGATIVE, UNHAPPY, DEAD, WRONG, WON, PROPOSAL_SENT,
   LEAD_STATUSES, SELECTABLE_LEAD_STATUSES, FOLLOW_UP_BADGES, DEFAULT_LEAD_STATUS, OPEN_LEAD_STATUSES, NAME_OPTIONAL_STATUSES,
   PROPOSAL_GROUP_STATUSES, NO_MARKETING_STATUSES, CLIENT_BEHAVIOURS, STORED_CLIENT_BEHAVIOURS, DEFAULT_CLIENT_BEHAVIOUR, behaviourFromStatus,
-  OFFER_STAGES, SELECTABLE_OFFER_STAGES, leadStatusLabel, referredLeadStatus,
+  MARKETABLE_CLIENT_BEHAVIOURS, OFFER_STAGES, SELECTABLE_OFFER_STAGES, leadStatusLabel, offerPanelOptions, referredLeadStatus,
 };

@@ -28,9 +28,9 @@ after(async () => {
   fs.rmSync(backupFile, { force: true });
 });
 
-test('the status list: New and Proposal Sent are gone, Won and Inquiry cannot be chosen, old badges stay valid', () => {
+test('the status list: New and Proposal Sent are gone, Won, Inquiry and Active cannot be chosen, old badges stay valid', () => {
   assert.deepEqual(LEAD_STATUSES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won']);
-  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'Active', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
+  assert.deepEqual(SELECTABLE_LEAD_STATUSES, ['Contacted', 'Positive', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
   assert.deepEqual(FOLLOW_UP_BADGES, ['Inquiry', 'Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong', 'Won', 'Proposal Sent']);
 });
 

@@ -22,6 +22,7 @@ const { audience, eligible } = require('../helpers/broadcastAudience');
 const { contactBlocks, blockForLead } = require('../helpers/leadContactBlock');
 const { leadForNewRequest, clearClientDead } = require('../helpers/leadPhone');
 const { ensureWonLead } = require('../helpers/wonLead');
+const { behaviourFromStatus } = require('../helpers/leadStatuses');
 const leadFileUpload = require('../middleware/leadFileUpload');
 
 const nativeFetch = global.fetch;
@@ -81,10 +82,11 @@ after(async () => {
 // Categories
 test('a lead can take every new category, and Contacted stays the stored value', async () => {
   const { _id } = await lead();
-  for (const badge of ['Active', 'NotNow', 'Unhappy', 'Wrong', 'Contacted']) {
+  for (const badge of ['Positive', 'NotNow', 'Unhappy', 'Wrong', 'Contacted']) {
     assert.equal((await follow(_id, { badge })).status, 200, badge);
     assert.equal((await stored(_id)).status, badge);
   }
+  assert.equal((await follow(_id, { badge: 'Active' })).status, 400, 'Active is Positive now (owner, 8 Nov 2026)');
 });
 test('Wrong is refused for a client: their own request lead and a number a client holds', async () => {
   const user = await client();
@@ -106,8 +108,23 @@ test('behaviour is for a client only, leaves Won alone, and shows on the timelin
   assert.equal(saved.status, 'Won');
   assert.equal(saved.clientBehaviour, 'NotNow');
   assert.match(saved.followUps.at(-1).note, /Neutral to Not Now/);
-  assert.equal((await call(`/admin/leads/${won._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Active' })).status, 200, 'the portal lead page path');
-  assert.equal((await stored(won._id)).clientBehaviour, 'Active');
+  assert.equal((await call(`/admin/leads/${won._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Unhappy' })).status, 200, 'the portal lead page path');
+  assert.equal((await stored(won._id)).clientBehaviour, 'Unhappy');
+  // A client's behaviour only says whether they may be marketed to (owner, 8 Nov 2026).
+  for (const behaviour of ['Positive', 'Active', 'Inquiry']) assert.equal((await call(`/api/offer-targets/leads/${won._id}/behaviour`, 'PATCH', { behaviour })).status, 400, behaviour);
+});
+test('a lead becomes a client as Neutral, unless it was Not Now, Unhappy or Negative', () => {
+  for (const [status, behaviour] of [['Positive', 'Contacted'], ['Active', 'Contacted'], ['Inquiry', 'Contacted'], ['Contacted', 'Contacted'], ['Dead', 'Contacted'],
+    ['Lazy', 'NotNow'], ['Tough', 'NotNow'], ['NotNow', 'NotNow'], ['Unhappy', 'Unhappy'], ['Negative', 'Negative']]) assert.equal(behaviourFromStatus(status), behaviour, status);
+});
+test('the website panel gets its stages, client statuses and names from the one list', async () => {
+  const { options } = (await call(`/api/offer-targets/offers/${SLUG}`, 'GET')).data;
+  assert.deepEqual(options.stages.map(row => row.value), ['Contacted', 'Positive', 'Negative']);
+  assert.deepEqual(options.behaviours.map(row => row.value), ['Contacted', 'NotNow', 'Negative', 'Unhappy', 'Dead']);
+  assert.deepEqual(options.leadCategories.map(row => row.value), ['Inquiry', 'Contacted', 'Positive', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
+  assert.equal(options.labels.Contacted, 'Neutral');
+  assert.equal(options.labels.Won, 'Matured');
+  assert.equal(options.labels.Lazy, 'Lazy', 'older values still have a name');
 });
 test('existing clients are left as they are: no behaviour stored, and they count as Neutral', async () => {
   const user = await client();
@@ -247,8 +264,18 @@ test('the Proposal Sent group takes the open categories, not Unhappy, Negative o
   let n = 0;
   for (const status of ['Contacted', 'Positive', 'Active', 'Lazy', 'Tough', 'Negative', 'Unhappy', 'Wrong']) await lead({ status, phone: `90000001${String(n++).padStart(2, '0')}`, proposalSentAt: new Date() });
   assert.equal((await audience('Proposal Sent')).count, 5);
-  assert.equal((await audience('Active')).count, 1);
+  await assert.rejects(audience('Active'), /Choose a lead group/, 'Active is no Broadcast group now');
   assert.equal((await audience('Unhappy')).count, 1);
+});
+test('the Matured group reaches Neutral clients only: Not Now, Unhappy, Negative and older statuses are left out', async () => {
+  let n = 0;
+  for (const clientBehaviour of [undefined, 'Contacted', 'Positive', 'Active', 'Inquiry', 'NotNow', 'Unhappy', 'Negative']) {
+    await lead({ name: `Client ${n}`, status: 'Won', convertedToUserId: new mongoose.Types.ObjectId(), phone: `90000002${String(n++).padStart(2, '0')}`, ...(clientBehaviour ? { clientBehaviour } : {}) });
+  }
+  const group = await audience('Won');
+  assert.equal(group.count, 2);
+  const reached = await Lead.find({ _id: { $in: group.recipients.map(row => row.leadId) } }).lean();
+  assert.deepEqual(reached.map(row => row.clientBehaviour || 'none').sort(), ['Contacted', 'none']);
 });
 
 // Offer targets

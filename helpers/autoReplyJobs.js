@@ -60,8 +60,8 @@ async function reopen(lead, row, cameBackFrom) {
 
 /** Records the message on this person's one lead. Returns 'created' when a new lead was made, else 'updated'. */
 async function recordKnownPerson(row, accounts) {
-  // Dead for good after a closure message: they come back as an Inquiry first, as from any other message, so the
-  // Final Message job and this one agree whichever runs first. The remark below then goes on that Inquiry.
+  // Dead for good after a closure message: they come back first (Neutral, or Inquiry with no name), as from any other
+  // message, so the Final Message job and this one agree whichever runs first. The remark below then goes on that lead.
   await comeBackByPhone(row.phone);
   const client = accounts.find(isClient);
   if (client) {

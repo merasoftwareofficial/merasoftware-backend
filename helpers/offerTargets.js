@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const Lead = require('../models/leadModel');
 const userModel = require('../models/userModel');
 const Target = require('../models/offerTargetModel');
-const { CLIENT_BEHAVIOURS, CONTACTED, DEFAULT_CLIENT_BEHAVIOUR, SELECTABLE_OFFER_STAGES, WON, leadStatusLabel } = require('./leadStatuses');
+const { CLIENT_BEHAVIOURS, CONTACTED, DEFAULT_CLIENT_BEHAVIOUR, SELECTABLE_OFFER_STAGES, WON, leadStatusLabel, offerPanelOptions } = require('./leadStatuses');
 const { LABELS, MESSAGES, contactBlocks, reasonFor } = require('./leadContactBlock');
 const { phoneKey } = require('./leadPhone');
 const { findLiveWebsiteOffer } = require('./websiteOffers');
@@ -128,7 +128,7 @@ async function targets(slug) {
       stage: row.stage, addedAt: row.createdAt, boughtAt: row.boughtAt, ...blockFields(reasonFor(lead, blocks)),
     }];
   });
-  return { rows: list, counts: stageCounts(list) };
+  return { rows: list, counts: stageCounts(list), options: offerPanelOptions() };
 }
 
 const loadTarget = async (id) => {

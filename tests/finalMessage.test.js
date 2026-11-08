@@ -108,10 +108,10 @@ test('client reply stays Negative for a decision and stale behaviour cancels an 
     assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Negative');
     const list = await call('/auto-reply/final-message', 'GET');
     assert.equal(list.data.needsDecision.length, 1);
-    await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Positive' });
+    await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Unhappy' });
     const decision = await call('/auto-reply/final-message/decision', 'POST', { id: String((await row(clientLead._id))._id), choice: 'dead' });
     assert.equal(decision.status, 409);
-    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Positive');
+    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Unhappy');
   } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
 });
 
@@ -615,7 +615,7 @@ test('a queued client message cannot send after its current status or phone chan
     const item = await lead({ status: 'Won', convertedToUserId: account._id });
     const response = await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Negative' });
     await decide(response.emailDraftIds[0], 'send', 'whatsapp');
-    await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Active' });
+    await call(`/admin/leads/${item._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Unhappy' });
     const transport = phone();
     await sendQueue(transport);
     assert.equal(transport.sent.length, 0);
@@ -1371,7 +1371,8 @@ test('a client follow-up to Negative is refused before saving when the final mes
   assert.equal(saved.clientBehaviour, undefined);
   assert.equal(saved.followUps.length, 0);
   assert.equal((await followUpTo(item._id, 'Wrong')).status, 400, 'Wrong is not a client status');
-  assert.equal((await followUpTo(item._id, 'Positive')).status, 200, 'other statuses need no final message');
+  assert.equal((await followUpTo(item._id, 'Positive')).status, 400, 'Positive is no longer a client status (owner, 8 Nov 2026)');
+  assert.equal((await followUpTo(item._id, 'Unhappy')).status, 200, 'other statuses need no final message');
 });
 
 test('moving a client or a lead out of Negative ends the countdown at once: no Dead, no closure, no Stop', () => withClients(async () => {
@@ -1379,17 +1380,17 @@ test('moving a client or a lead out of Negative ends the countdown at once: no D
     await Promise.all([Lead, User, EmailDraft, Queue, FinalMessage].map(model => model.deleteMany({})));
     await User.create({ _id: admin._id, name: 'Admin', email: 'admin@example.test', roles: ['admin'] });
     const { id, transport } = await start();
-    await followUpTo(id, 'Positive', 'Called, wants to continue');
+    await followUpTo(id, 'Unhappy', 'Called, unhappy with the delay');
     const cycle = await row(id);
     assert.equal(cycle.status, 'stopped');
     assert.equal(cycle.stopSource, 'status-change');
-    assert.equal(cycle.stopReason, 'Status changed to Positive');
+    assert.equal(cycle.stopReason, 'Status changed to Unhappy');
     const page = await detail(id);
     assert.equal(page.finalMessage.stopLabel, null);
     assert.equal(page.finalMessageCanStart, false, 'not Negative: nothing to start');
     await pastDeadline(id); await followFinalMessages(); await followFinalMessages(); await sendQueue(transport);
     const saved = await Lead.findById(id).lean();
-    assert.equal(saved.convertedToUserId ? saved.clientBehaviour : saved.status, 'Positive');
+    assert.equal(saved.convertedToUserId ? saved.clientBehaviour : saved.status, 'Unhappy');
     assert.equal(await Queue.countDocuments({ finalMessageExpiryId: { $exists: true } }), 0);
     assert.equal(transport.sent.length, 1);
   }
@@ -1397,7 +1398,7 @@ test('moving a client or a lead out of Negative ends the countdown at once: no D
 
 test('Negative again after a finished cycle starts a new review for a client and for a lead; the old cycle is kept', () => withClients(async () => {
   const client = await clientSentAndWaiting();
-  await followUpTo(client.id, 'Positive');
+  await followUpTo(client.id, 'Unhappy');
   const again = await followUpTo(client.id, 'Negative');
   assert.equal(again.finalMessage, 'prepared');
   assert.equal((await row(client.id)).status, 'review');
@@ -1575,7 +1576,7 @@ async function closedAndSent(fields) {
   return id;
 }
 
-test('after the closure message any message, even an emoji, brings a Dead lead back as an Inquiry', async () => {
+test('after the closure message any message, even an emoji, brings a Dead lead back as Neutral', async () => {
   for (const message of [{ conversation: 'Please call me' }, { conversation: 'ok' }, { conversation: '👍🙏' }, { reactionMessage: { text: '👍', key: { id: 'x' } } }, { imageMessage: {} }]) {
     await Promise.all([Queue.deleteMany({}), FinalMessage.deleteMany({}), Lead.deleteMany({})]);
     const id = await closedAndSent();
@@ -1583,18 +1584,30 @@ test('after the closure message any message, even an emoji, brings a Dead lead b
     assert.ok((await row(id)).expirySentAt, 'closure time kept');
     await incoming(message, later(5));
     await followFinalMessages();
-    assert.equal(await stage(id), 'Inquiry', JSON.stringify(message));
+    assert.equal(await stage(id), 'Contacted', JSON.stringify(message));
     const cycle = await row(id);
     assert.equal(cycle.status, 'stopped');
     assert.equal(cycle.stopSource, 'came-back');
     assert.ok(cycle.cameBackAt);
     const saved = await Lead.findById(id).lean();
-    assert.match(saved.followUps.at(-1).note, /after the closure message[\s\S]*Came back from Dead to Inquiry/);
-    assert.equal(saved.followUps.at(-1).badge, 'Inquiry');
-    assert.equal((await audience('Inquiry')).count, 1, 'no longer blocked as Dead');
+    assert.match(saved.followUps.at(-1).note, /after the closure message[\s\S]*Came back from Dead to Neutral/);
+    assert.equal(saved.followUps.at(-1).badge, 'Contacted');
+    assert.equal((await audience('Contacted')).count, 1, 'no longer blocked as Dead');
   }
   const box = await call('/auto-reply/final-message', 'GET');
   assert.equal(box.data.counts['came-back'], 1);
+});
+
+test('a Dead lead with no name comes back as an Inquiry, and can still be saved and followed up', async () => {
+  const id = await closedAndSent({ name: undefined, status: 'Inquiry' });
+  assert.equal(await stage(id), 'Dead');
+  await incoming({ conversation: 'hi' }, later(5));
+  await followFinalMessages();
+  assert.equal(await stage(id), 'Inquiry', 'Neutral needs a name (models/leadModel.js)');
+  const saved = await Lead.findById(id);
+  assert.match(saved.followUps.at(-1).note, /Came back from Dead to Inquiry/);
+  saved.source = 'Edited';
+  await saved.save(); // a nameless Neutral lead would fail validation here
 });
 
 test('before the closure message goes, the old rules stay: a real reply is Negative, a listed word keeps it Dead', async () => {
@@ -1629,10 +1642,10 @@ test('a month later, after the queue forgot the closure, our own message stops n
   assert.equal((await call(`/admin/leads/${id}/final-message/stop`, 'POST', { reason: 'check', draftId: String((await row(id)).draftId) })).status, 409, 'nothing to stop after the closure');
   await incoming({ conversation: 'hi' }, later(30 * 24 * 3600));
   await followFinalMessages();
-  assert.equal(await stage(id), 'Inquiry');
+  assert.equal(await stage(id), 'Contacted');
 });
 
-test('a Dead client who writes after the closure gets current status Inquiry and stays Matured', async () => {
+test('a Dead client who writes after the closure gets current status Neutral and stays Matured', async () => {
   process.env.CLIENT_FINAL_MESSAGE_ENABLED = 'true';
   try {
     const user = await User.create({ name: 'Client', email: 'client@example.test', phone: '9876543210', roles: ['customer'] });
@@ -1647,16 +1660,14 @@ test('a Dead client who writes after the closure gets current status Inquiry and
     await followFinalMessages();
     const saved = await Lead.findById(clientLead._id).lean();
     assert.equal(saved.status, 'Won');
-    assert.equal(saved.clientBehaviour, 'Inquiry');
+    assert.equal(saved.clientBehaviour, undefined, 'Neutral: no saved value');
+    assert.match(saved.followUps.at(-1).note, /Came back from Dead to Neutral/);
+    assert.equal(saved.followUps.at(-1).badge, 'Won', 'as leadPhone.js clearClientDead records it');
     assert.equal((await row(clientLead._id)).stopSource, 'came-back');
-    // A note keeps Inquiry; the admin can't choose it.
-    const form = new FormData(); form.append('action', 'followUp'); form.append('badge', 'Inquiry'); form.append('note', 'Called back');
-    const noted = await nativeFetch(`${base}/admin/leads/${clientLead._id}`, { method: 'POST', headers: { Cookie: cookie() }, body: form });
-    assert.equal(noted.status, 200);
-    assert.equal((await Lead.findById(clientLead._id).lean()).clientBehaviour, 'Inquiry');
+    // Inquiry is no client status any more: it can't be chosen.
     const chosen = await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Inquiry' });
     assert.notEqual(chosen.status, 200);
-    assert.equal((await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Positive' })).status, 200, 'the admin moves it on as usual');
+    assert.equal((await call(`/admin/leads/${clientLead._id}`, 'POST', { action: 'setBehaviour', behaviour: 'Unhappy' })).status, 200, 'the admin moves it on as usual');
   } finally { delete process.env.CLIENT_FINAL_MESSAGE_ENABLED; }
 });
 
@@ -1673,8 +1684,7 @@ test('Negative again after coming back starts a fresh cycle; the came-back count
   const id = await closedAndSent();
   await incoming({ conversation: 'hi' }, later(5));
   await followFinalMessages();
-  assert.equal(await stage(id), 'Inquiry');
-  await Lead.updateOne({ _id: id }, { $set: { status: 'Contacted' } });
+  assert.equal(await stage(id), 'Contacted');
   await markNegative(id);
   const fresh = await row(id);
   assert.equal(fresh.status, 'review');
@@ -1683,7 +1693,7 @@ test('Negative again after coming back starts a fresh cycle; the came-back count
   assert.equal((await call('/auto-reply/final-message', 'GET')).data.counts['came-back'], 1);
 });
 
-test('an ad reply after the closure brings even a named lead back as an Inquiry, whichever job runs first', async () => {
+test('an ad reply after the closure brings a named lead back as Neutral, whichever job runs first', async () => {
   const { DEFAULT_AD_MESSAGE } = require('../whatsapp/src/autoReplyRules.js');
   const { processInbox } = require('../helpers/autoReplyJobs');
   for (const first of ['auto-reply', 'final-message']) {
@@ -1694,7 +1704,7 @@ test('an ad reply after the closure brings even a named lead back as an Inquiry,
     await State.updateOne({ _id: STATE_ID }, { $set: { autoReply: { recognise: true, sendReplies: false, addLeads: true } } });
     await Inbox.create({ messageId: `ad-${first}`, phone: PHONE, text: DEFAULT_AD_MESSAGE, status: 'new', profileName: 'Ravi', sentAt: at });
     if (first === 'auto-reply') { await processInbox(); await followFinalMessages(); } else { await followFinalMessages(); await processInbox(); }
-    assert.equal(await stage(id), 'Inquiry', first);
+    assert.equal(await stage(id), 'Contacted', first);
     assert.equal((await row(id)).stopSource, 'came-back', first);
     const saved = await Lead.findById(id).lean();
     assert.ok(saved.followUps.some(entry => /New WhatsApp ad message/.test(entry.note)), 'the ad remark is still recorded');

@@ -377,8 +377,9 @@ test('matured converted leads accept notes and files; a client status on the lin
   assert.equal(row.status, 'Won');
   assert.equal(row.followUps[1].badge, 'Won');
   assert.ok(row.followUps[1].attachment.driveFileId);
-  assert.equal((await send(path, { action: 'followUp', note: 'Client status', badge: 'Positive' })).status, 200);
-  assert.equal((await read(created._id)).clientBehaviour, 'Positive');
+  assert.equal((await send(path, { action: 'followUp', note: 'Client status', badge: 'Unhappy' })).status, 200);
+  assert.equal((await read(created._id)).clientBehaviour, 'Unhappy');
+  assert.equal((await send(path, { action: 'followUp', note: 'Not a client status any more', badge: 'Positive' })).status, 400);
   assert.equal((await read(created._id)).status, 'Won');
   assert.equal((await send(path, { action: 'followUp', note: 'Not a client status', badge: 'Wrong' })).status, 400);
   assert.equal((await send(path, { action: 'followUp', note: ' ', badge: 'Won' })).status, 400);

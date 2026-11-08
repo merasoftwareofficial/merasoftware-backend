@@ -1,15 +1,19 @@
 const mongoose = require('mongoose');
 const Lead = require('../models/leadModel');
 const { FinalMessage, Queue } = require('../whatsapp/src/models.js');
-const { DEAD, INQUIRY, WON, leadStatusLabel } = require('./leadStatuses');
+const { CONTACTED, DEAD, INQUIRY, WON, leadStatusLabel } = require('./leadStatuses');
 const { findLeadsByPhone } = require('./leadPhone');
 const { normalizePhone } = require('./whatsappQueue');
 const { onNumber } = require('./finalMessageCopies');
+const { hasConfirmedName } = require('./leadName');
 
 // Once the countdown ended and the closure message went, the person is Dead for good. Any message they send after
 // that closure, of any kind (text, a listed word, an emoji, a reaction, a photo, an ad reply), brings them back as
-// an Inquiry: a lead's stage, or a client's current status. Everything before the closure follows the Final Message
-// rules (finalMessageJobs.js). Run by the minute job, and by Auto Reply before it records an ad message, so both agree.
+// Neutral (owner, 8 Nov 2026), as a new request does (leadPhone.js revive, clearClientDead): a client's current status
+// is cleared to Neutral; a lead becomes Neutral when we know its name, else Inquiry, because a lead needs a name
+// outside the name-optional stages (models/leadModel.js) and the team asks for it there. Everything before the closure
+// follows the Final Message rules (finalMessageJobs.js). Run by the minute job, and by Auto Reply before it records
+// an ad message, so both agree.
 const CAME_BACK = 'Wrote after the closure message.';
 // Message times come in whole seconds, the closure's in milliseconds. A reply before the closure stops it going
 // (stopFinalMessage.js claimHandoff), so a message in the closure's own second came after it.
@@ -63,21 +67,23 @@ async function comeBackIfWrote(row) {
     await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: 'dead' }, { $set: { status: 'stopped', stoppedAt: now, stopReason: reason, stopSource: 'status-change' } });
     return false;
   }
-  const note = `Wrote on WhatsApp after the closure message: ${message.text}\nCame back from Dead to Inquiry.`;
+  const note = to => `Wrote on WhatsApp after the closure message: ${message.text}\nCame back from Dead to ${leadStatusLabel(to)}.`;
   return mongoose.connection.transaction(async session => {
     const claimed = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: 'dead' },
       { $set: { status: 'stopped', stoppedAt: now, stopReason: CAME_BACK, stopSource: 'came-back', cameBackAt: message.at, cameBackText: message.text } }, { session });
     if (!claimed.modifiedCount) return false;
     if (row.subjectKind === 'client') {
+      // Neutral is no saved value, as leadPhone.js clearClientDead leaves it; the line keeps the client's Won badge, as there.
       const changed = await Lead.updateOne({ _id: lead._id, deletedAt: null, status: WON, convertedToUserId: row.clientId, clientBehaviour: DEAD, clientBehaviourRevision: lead.clientBehaviourRevision ? lead.clientBehaviourRevision : { $in: [null, 0] } },
-        { $set: { clientBehaviour: INQUIRY }, $inc: { clientBehaviourRevision: 1 }, $push: { followUps: timelineEntry(note, INQUIRY, now) } }, { session });
+        { $unset: { clientBehaviour: 1 }, $inc: { clientBehaviourRevision: 1 }, $push: { followUps: timelineEntry(note(CONTACTED), WON, now) } }, { session });
       if (!changed.modifiedCount) throw new Error('Client changed while coming back.');
       return true;
     }
     // Every Dead lead with this number, as the countdown made them Dead together (finalMessageJobs.js closeRow): one left would keep the number blocked.
     const leads = await findLeadsByPhone(row.phone, { status: DEAD, deletedAt: null, convertedToUserId: null }, { session });
     for (const item of leads) {
-      const changed = await Lead.updateOne({ _id: item._id, status: DEAD }, { $set: { status: INQUIRY }, $push: { followUps: timelineEntry(note, INQUIRY, now) } }, { session });
+      const to = hasConfirmedName(item) ? CONTACTED : INQUIRY;
+      const changed = await Lead.updateOne({ _id: item._id, status: DEAD }, { $set: { status: to }, $push: { followUps: timelineEntry(note(to), to, now) } }, { session });
       if (String(item._id) === String(row.leadId) && !changed.modifiedCount) throw new Error('Lead changed while coming back.');
     }
     return true;
