@@ -1065,19 +1065,32 @@ definitions['offer.payment.reminder'] = {
 const heldHours = reservation => String(Math.round((new Date(reservation.expiresAt) - new Date(reservation.reservedAt)) / 3600000));
 const noteBlock = value => ({ html: `<p style="margin:0 0 14px">${escapeHtml(value)}</p>`, text: value });
 const RESERVATION_STEPS = {
-  customer: 'Get your project started before then. After that time this offer expires and its price is no longer held for you.',
+  customer: 'Start your project before it ends to keep the offer price.',
   admin_project: 'Your project has started. Complete the first payment before then to keep the reserved price.',
 };
+// Owner decision 8 Nov 2026: short and to the point (name, offer, start, duration, end); the price is on My offers.
 definitions['offer.reserved'] = {
   subject: 'Your offer is reserved',
-  text: lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
+  text: lines('Hello {{name}},', '', 'Your reservation for {{offerTitle}} has started.',
+    '**Started:** {{reservedAt}}', '**Duration:** {{hours}} hours', '**Ends:** {{expiresAt}}', '',
+    '{{nextStep}}', '',
+    '**My offers:** {{link}}', '', ...SIGN_OFF),
+  // Earlier Standard wordings: an unedited copy of any of them moves to the text above. The first shipped 5 Nov
+  // 2026; the second is the reservation part 2 wording still stored on production (checked 8 Nov 2026); the third
+  // shipped before 5 Nov 2026.
+  replaces: [lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
     '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
     '**Reservation ends:** {{expiresAt}}', '',
     'Your reservation lasts {{hours}} hours, until the time above.', '',
     '{{nextStep}}', '',
     '**My offers:** {{link}}', '', ...SIGN_OFF),
-  // The wording shipped before 5 Nov 2026: an unedited Standard copy moves to the text above.
-  replaces: [lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
+  lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
+    '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
+    '**Payment deadline:** {{expiresAt}}', '',
+    'Your reservation is valid for 72 hours from the reserved time above. Complete the required first payment before the deadline to lock the agreed price.',
+    'Our team will help you with your project and payment steps. Reserving does not itself confirm a payment or start a project.', '',
+    '**My offers:** {{link}}', '', ...SIGN_OFF),
+  lines('Hello {{name}},', '', 'You have reserved {{offerTitle}}.',
     '**Reserved price:** {{price}}', '**Reserved on:** {{reservedAt}}',
     '**Payment deadline:** {{expiresAt}}', '',
     'Your initial reservation lasts 72 hours. Any team extension is included in the payment deadline above. Complete the required first payment before that deadline to lock the agreed price.',
@@ -1101,9 +1114,12 @@ definitions['offer.reserved'] = {
 // Sent once when a reservation's deadline passes with no project on it (helpers/reservationClosure.js).
 definitions['offer.reservation.expired'] = {
   subject: 'Your offer has expired',
-  text: lines('Hello {{name}},', '', 'Your reservation for {{offerTitle}} has ended, and this offer has now expired.', '',
+  text: lines('Hello {{name}},', '', 'Your {{offerTitle}} reservation has ended and the offer has expired.', '',
+    'See our other offers here:', '{{offersLink}}', '',
+    'Best wishes for your next project!', '', ...SIGN_OFF),
+  replaces: [lines('Hello {{name}},', '', 'Your reservation for {{offerTitle}} has ended, and this offer has now expired.', '',
     'More offers are waiting for you. Visit our offers page:', '{{offersLink}}', '',
-    'Better luck next time!', '', ...SIGN_OFF),
+    'Better luck next time!', '', ...SIGN_OFF)],
   variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'),
     offersLink: detail('Offers page', 'https://www.merasoftware.com/offers', 'The website offers page') },
   blocks: {},
@@ -1142,9 +1158,12 @@ definitions['offer.reservation.extended'] = {
 // page sends a signed-in customer to My offers instead (website app/offer/[slug]/page.tsx).
 const offerPageLink = reservation => link(process.env.PORTFOLIO_WEBSITE_URL, `/offer/${encodeURIComponent(reservation.offerSlug)}`);
 const leftWords = ms => require('./reservationStart').timeLeftWords(ms);
-const reminderDefinition = (subject, opening, action, sampleLeft) => ({
+// opening: the message's first lines. earlier: the wording shipped before 8 Nov 2026 ([opening, action]), so an
+// unedited Standard copy moves to the short text.
+const reminderDefinition = (subject, opening, action, sampleLeft, earlier = null) => ({
   subject,
-  text: lines('Hello {{name}},', '', opening, '**Reserved price:** {{price}}', '', action, '{{link}}', '', ...SIGN_OFF),
+  text: lines('Hello {{name}},', '', ...opening, '', action, '{{link}}', '', ...SIGN_OFF),
+  ...(earlier ? { replaces: [lines('Hello {{name}},', '', earlier[0], '**Reserved price:** {{price}}', '', earlier[1], '{{link}}', '', ...SIGN_OFF)] } : {}),
   variables: { name: detail('Name', 'Client'), offerTitle: detail('Offer', 'Website offer'), price: detail('Reserved price', '₹5,000'),
     timeLeft: detail('Time left', sampleLeft, 'The time left when the message is sent, in words'),
     deadline: detail('Reservation ends', '8 Nov 2026, 10:00 am IST', 'The exact deadline in force'),
@@ -1160,12 +1179,21 @@ const reminderDefinition = (subject, opening, action, sampleLeft) => ({
     } };
   },
 });
+// Owner decision 8 Nov 2026: four short reminders (helpers/reservationReminders.js); the price is left out.
+definitions['offer.reservation.dayPassed'] = reminderDefinition('Your offer reservation: the first 24 hours are over',
+  ['The first 24 hours of your {{offerTitle}} reservation are over.', '**Time left:** {{timeLeft}} (ends {{deadline}})'],
+  'Start your project to keep the offer price:', 'about 48 hours');
 definitions['offer.reservation.reminder'] = reminderDefinition('Your offer reservation ends soon',
-  'Your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.',
-  'Start your project before then to keep this price. Open your offer and press Start my project:', 'about 24 hours');
+  ['Only {{timeLeft}} left on your {{offerTitle}} reservation.', '**Ends:** {{deadline}}'],
+  'Press Start my project to keep the offer price:', 'about 24 hours',
+  ['Your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.', 'Start your project before then to keep this price. Open your offer and press Start my project:']);
+definitions['offer.reservation.sixHours'] = reminderDefinition('Only 6 hours left on your offer reservation',
+  ['Only {{timeLeft}} left on your {{offerTitle}} reservation.', '**Ends:** {{deadline}}'],
+  'Press Start my project now to keep the offer price:', 'about 6 hours');
 definitions['offer.reservation.lastHour'] = reminderDefinition('Last hour: your offer reservation is ending',
-  'This is the last hour: your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.',
-  'Press Start my project on your offer now, or this offer expires for you:', 'about 1 hour');
+  ['Last hour! Your {{offerTitle}} reservation ends on {{deadline}}.'],
+  'Press Start my project now, or the offer expires:', 'about 1 hour',
+  ['This is the last hour: your reservation for {{offerTitle}} ends in {{timeLeft}}, on {{deadline}}.', 'Press Start my project on your offer now, or this offer expires for you:']);
 // To the team, once per request, and again after each full day nobody acted (at most 3 times).
 definitions['offer.start.request.admin'] = {
   subject: 'Start project request - {{offerTitle}}',

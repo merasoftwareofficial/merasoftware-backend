@@ -121,7 +121,8 @@ test('the website panel gets its stages, client statuses and names from the one 
   const { options } = (await call(`/api/offer-targets/offers/${SLUG}`, 'GET')).data;
   assert.deepEqual(options.stages.map(row => row.value), ['Contacted', 'Positive', 'Negative']);
   assert.deepEqual(options.behaviours.map(row => row.value), ['Contacted', 'NotNow', 'Negative', 'Unhappy', 'Dead']);
-  assert.deepEqual(options.leadCategories.map(row => row.value), ['Inquiry', 'Contacted', 'Positive', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
+  assert.deepEqual(options.allStages.map(row => row.value), ['Contacted', 'Positive', 'Reservation', 'NotNow', 'Negative', 'Won']);
+  assert.deepEqual(options.leadCategories.map(row => row.value), ['Inquiry', 'Contacted', 'Positive', 'Reservation', 'NotNow', 'Negative', 'Unhappy', 'Dead', 'Wrong']);
   assert.equal(options.labels.Contacted, 'Neutral');
   assert.equal(options.labels.Won, 'Matured');
   assert.equal(options.labels.Lazy, 'Lazy', 'older values still have a name');
@@ -320,6 +321,16 @@ test('only a running offer takes new people', async () => {
   liveOffers = [];
   assert.equal((await addPeople([{ type: 'lead', id: String(open._id) }])).status, 409);
   assert.equal(await Target.countDocuments(), 0);
+});
+test('a note on a reserved offer may keep its Reservation stage; the admin can still move it, but not to a system stage', async () => {
+  const open = await lead();
+  const target = await Target.create({ leadId: open._id, offerSlug: SLUG, offerTitle: 'One', stage: 'Reservation' });
+  assert.equal((await follow(open._id, { badge: 'Reservation', offerSlug: SLUG })).status, 200, 'a note keeps the stage');
+  assert.equal((await Target.findById(target._id)).stage, 'Reservation');
+  assert.equal((await follow(open._id, { badge: 'NotNow', offerSlug: SLUG })).status, 400, 'Not Now on an offer is set only by the reservation');
+  assert.equal((await follow(open._id, { badge: 'Positive', offerSlug: SLUG })).status, 200);
+  assert.equal((await Target.findById(target._id)).stage, 'Positive');
+  assert.equal((await follow(open._id, { badge: 'Reservation', offerSlug: SLUG })).status, 400, 'and once moved, the admin cannot set it back');
 });
 test("a follow-up for an offer moves only that offer: never the lead, another offer, or the final message", async () => {
   const open = await lead();

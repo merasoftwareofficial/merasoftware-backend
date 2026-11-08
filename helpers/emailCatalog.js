@@ -46,7 +46,9 @@ const events = [
   ['offer.reserved', 'Offers', 'Offer reservation confirmation', 'Offer reservation'],
   ['offer.reservation.extended', 'Offers', 'Offer reservation extended', 'Offer reservation'],
   ['offer.reservation.expired', 'Offers', 'Offer reservation expired', 'Offer reservation'],
+  ['offer.reservation.dayPassed', 'Offers', 'Offer reservation reminder (24 hours over)', 'Offer reservation'],
   ['offer.reservation.reminder', 'Offers', 'Offer reservation reminder (24 hours left)', 'Offer reservation'],
+  ['offer.reservation.sixHours', 'Offers', 'Offer reservation reminder (6 hours left)', 'Offer reservation'],
   ['offer.reservation.lastHour', 'Offers', 'Offer reservation reminder (1 hour left)', 'Offer reservation'],
   ['offer.start.request.admin', 'Offers', 'Start project request (admin)', 'Offer reservation'],
   ['offer.start.request.received', 'Offers', 'Start project request received', 'Offer reservation'],
@@ -77,7 +79,8 @@ const CUSTOMER_TRIGGERED = new Set(['sendUpdateRequestNotification', 'sendUserCo
 // Plan steps are system mail too: they go out the moment the step happens (the client is told at
 // every step), whichever request or job caused it (helpers/servicePlanNotifications.js).
 const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliveryStuck', 'offer.payment.reminder','offer.reserved', 'offer.reservation.extended',
-  'offer.reservation.expired', 'offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.admin', 'offer.start.request.received',
+  'offer.reservation.expired', 'offer.reservation.dayPassed', 'offer.reservation.reminder', 'offer.reservation.sixHours', 'offer.reservation.lastHour',
+  'offer.start.request.admin', 'offer.start.request.received',
   // Package Start requests (helpers/packageStart.js) are sent by its job, like the offer Start messages; the
   // whole feature stays behind PACKAGE_START_REQUESTS_ENABLED until it is tested on a real phone.
   'package.start.request.admin', 'package.start.request.received',
@@ -98,7 +101,7 @@ const CHANNELS = ['whatsapp', 'email', 'both'];
 // wrong WhatsApp can be deleted for everyone and an email can't. Team mail keeps Email + WhatsApp.
 // Owner decision 7 Nov 2026: what a reserving customer is told about the countdown and their start request
 // goes by Email + WhatsApp (every reserving account has both).
-const CUSTOMER_BOTH = new Set(['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received']);
+const CUSTOMER_BOTH = new Set(['offer.reservation.dayPassed', 'offer.reservation.reminder', 'offer.reservation.sixHours', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received']);
 const defaultChannel = key => EMAIL_ONLY.has(key) ? 'email' : TEAM.has(key) || CUSTOMER_BOTH.has(key) ? 'both' : 'whatsapp';
 const catalog = events.map(([key, section, label, group = label]) => ({
   key, section, label, group, application: section === 'Website' ? 'website' : 'portal',

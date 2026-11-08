@@ -1,4 +1,4 @@
-// Reservation reminders (24 h / 1 h left) and "Start my project" (merasoftware/src/docs/reservation-countdown.md,
+// Reservation reminders (24 h over; 24 h, 6 h and 1 h left), the stages a reservation sets (owner decisions 8 Nov 2026) and "Start my project" (merasoftware/src/docs/reservation-countdown.md,
 // owner decisions 7 Nov 2026). Isolated MongoDB, fake email provider, real WhatsApp queue rows.
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -83,11 +83,11 @@ test('a 48-hour reservation gets one reminder at 24 hours left and one at 1 hour
   await age(HOUR + 60000); await sendDueReminders(); await sendDueReminders();
   const [first] = await queued('offer.reservation.reminder');
   assert.equal((await queued('offer.reservation.reminder')).length, 1, 'once only');
-  assert.match(first.text, /ends in about 24 hours/); assert.match(first.text, /https:\/\/website\.example\.test\/offer\/test-offer/);
+  assert.match(first.text, /Only about 24 hours left on your Reserved website reservation/); assert.match(first.text, /https:\/\/website\.example\.test\/offer\/test-offer/);
   assert.equal(emails, 1, 'Both: the email went too');
   await age(23 * HOUR); await sendDueReminders();
   const [last] = await queued('offer.reservation.lastHour');
-  assert.match(last.text, /This is the last hour: your reservation for Reserved website ends in about (59 minutes|1 hour)/);
+  assert.match(last.text, /Last hour! Your Reserved website reservation ends on/);
   assert.equal((await Reservation.findOne()).remindersSent.length, 2);
 });
 test('a missed run sends only the latest stage, and none after the deadline', async () => {
@@ -162,7 +162,7 @@ test('a project created on a paused reservation resumes the clock for the first 
   const left = row.extendedUntil - Date.now();
   assert.ok(left > 23.9 * HOUR && left <= 24 * HOUR, `24 hours, got ${left / HOUR}`);
   const lead = await Lead.findOne({ convertedToUserId: customer._id });
-  assert.match(lead.followUps.at(-1).note, /Project created on the start request/);
+  assert.ok(lead.followUps.some(line => /Project created on the start request/.test(line.note)));
 });
 test('the admin resumes with Extend deadline, shorter too; the customer may ask again', async () => {
   await reserve();
@@ -210,4 +210,114 @@ test('the new actions are system mail, start On, and go by Both; the team one is
     assert.equal(channelFor(key, null), 'both', key);
   }
   assert.equal(byKey.get('offer.start.request.admin').audience, 'team');
+});
+
+// --- Four reminders and the Reservation stage (owner decisions 8 Nov 2026) --------------------------------
+const Target = require('../models/offerTargetModel');
+const { systemTemplate } = require('../helpers/emailTemplates');
+const { definitions } = require('../helpers/emailDefinitions');
+const targetOf = async user => Target.findOne({ leadId: (await Lead.findOne({ $or: [{ convertedToUserId: user._id }, { reservationUserId: user._id }] }))._id }).lean();
+
+test('a 72-hour reservation gets four reminders, each once: 24 hours over, 24 hours, 6 hours and 1 hour left', async () => {
+  offer.reservationHoldHours = 72;
+  await reserve();
+  await age(23 * HOUR); await sendDueReminders();
+  assert.equal(await Queue.countDocuments({ event: /^offer\.reservation\./ }), 0, 'nothing in the first 24 hours');
+  await age(HOUR + 60000); await sendDueReminders(); await sendDueReminders();
+  const [day] = await queued('offer.reservation.dayPassed');
+  assert.equal((await queued('offer.reservation.dayPassed')).length, 1, 'once only');
+  assert.match(day.text, /The first 24 hours of your Reserved website reservation are over/);
+  assert.match(day.text, /Time left: about 48 hours/); assert.match(day.text, /\/offer\/test-offer/);
+  await age(24 * HOUR); await sendDueReminders();
+  assert.match((await queued('offer.reservation.reminder'))[0].text, /Only about 24 hours left/);
+  await age(18 * HOUR); await sendDueReminders();
+  const [six] = await queued('offer.reservation.sixHours');
+  assert.match(six.text, /Only about 6 hours left on your Reserved website reservation/);
+  await age(5 * HOUR); await sendDueReminders(); await sendDueReminders();
+  assert.equal((await queued('offer.reservation.lastHour')).length, 1);
+  assert.equal((await queued('offer.reservation.dayPassed')).length, 1, 'never a second 24-hours-over');
+  assert.deepEqual((await Reservation.findOne()).remindersSent.map(key => key.split(':')[0]).sort(), ['1h', '24h', '6h', 'day']);
+});
+test('no 24-hours-over reminder when it would come with the 24-hours-left one, after an extension, or while paused', async () => {
+  await reserve(); // 48 hours: both fall at the same time, only "24 hours left" goes
+  await age(24 * HOUR + 60000); await sendDueReminders();
+  assert.equal((await queued('offer.reservation.dayPassed')).length, 0);
+  assert.equal((await queued('offer.reservation.reminder')).length, 1);
+  await Reservation.deleteMany({}); await Queue.deleteMany({});
+  offer.reservationHoldHours = 72;
+  await reserve();
+  await extendReservation({ reservationId: (await Reservation.findOne())._id, actorId: admin._id, until: new Date(Date.now() + 100 * HOUR), reason: 'Customer asked' });
+  await age(25 * HOUR); await sendDueReminders();
+  assert.equal((await queued('offer.reservation.dayPassed')).length, 0, 'extended: the first countdown is gone');
+  await Reservation.deleteMany({}); await Queue.deleteMany({});
+  await reserve(); await start(); await age(30 * HOUR); await sendDueReminders();
+  assert.equal((await queued('offer.reservation.dayPassed')).length, 0, 'paused');
+});
+test('the two new reminders are system mail by Both, and edited templates keep their text', async () => {
+  for (const key of ['offer.reservation.dayPassed', 'offer.reservation.sixHours']) {
+    assert.equal(byKey.get(key).trigger, 'system', key);
+    assert.equal(channelFor(key, null), 'both', key);
+  }
+  // The reservation part 2 Standard wording still stored on production moves to the short text; an edited copy stays.
+  const old = definitions['offer.reserved'].replaces[1];
+  assert.match(old, /valid for 72 hours/);
+  await EmailTemplate.create({ event: 'offer.reserved', system: true, name: 'Standard', subject: 'Your offer is reserved', text: old });
+  assert.equal((await systemTemplate('offer.reserved')).text, definitions['offer.reserved'].text);
+  await EmailTemplate.updateOne({ event: 'offer.reserved', system: true }, { $set: { text: `${old}\nOur own line.` } });
+  assert.match((await systemTemplate('offer.reserved')).text, /Our own line/);
+});
+
+test('a member who reserves is in the Reservation stage, and so is that offer; a client keeps its behaviour', async () => {
+  await Lead.create({ phone: '9876500001', status: 'Wrong', source: 'Old' }); // owner: whoever reserves, Wrong too
+  await reserve();
+  const lead = await Lead.findOne({ reservationUserId: member._id }).lean();
+  assert.equal(lead.status, 'Reservation');
+  assert.match(lead.followUps.at(-1).note, /Reserved Reserved website\. The reservation ends on/);
+  assert.equal((await targetOf(member)).stage, 'Reservation');
+  const won = await Lead.create({ name: 'Client', phone: '+919876500002', email: 'client@example.test', status: 'Won', convertedToUserId: customer._id, clientBehaviour: 'Unhappy' });
+  await reserve(customer);
+  const saved = await Lead.findById(won._id).lean();
+  assert.equal(saved.status, 'Won'); assert.equal(saved.clientBehaviour, 'Unhappy', 'behaviour untouched');
+  assert.equal(saved.followUps.at(-1).offerSlug, 'test-offer');
+  assert.equal((await targetOf(customer)).stage, 'Reservation');
+});
+test('a lead in Reservation needs no name, as an account may have none (models/userModel.js)', async () => {
+  const lead = await Lead.create({ phone: '9876500009', status: 'Reservation', source: 'Offer reservation' });
+  lead.source = 'Edited'; await lead.save();
+  await assert.rejects(Lead.create({ phone: '9876500008', status: 'Contacted' }), /name/, 'Neutral still needs one');
+});
+test('no project by the deadline: the lead and the offer go Not Now, unless the admin moved them or another reservation runs', async () => {
+  await reserve();
+  await age(48 * HOUR + 60000); await closeDueReservations();
+  assert.equal((await Lead.findOne({ reservationUserId: member._id })).status, 'NotNow');
+  assert.equal((await targetOf(member)).stage, 'NotNow');
+  assert.equal((await queued('offer.reservation.expired')).length, 1);
+  assert.equal(await EmailDraft.countDocuments({ event: 'lead.finalMessage' }), 0, 'no Not Now review: the closing message went');
+
+  await Promise.all([Reservation, Lead, Target, Queue].map(model => model.deleteMany({})));
+  await reserve();
+  await Lead.updateOne({ reservationUserId: member._id }, { $set: { status: 'Positive' } });
+  await age(48 * HOUR + 60000); await closeDueReservations();
+  assert.equal((await Lead.findOne({ reservationUserId: member._id })).status, 'Positive', 'the admin choice stays');
+  assert.equal((await targetOf(member)).stage, 'NotNow');
+
+  await Promise.all([Reservation, Lead, Target, Queue].map(model => model.deleteMany({})));
+  await reserve();
+  offer.slug = 'second-offer'; await reserve(); offer.slug = 'test-offer';
+  await age(48 * HOUR + 60000); await closeDueReservations(); // age moves only the first reservation
+  assert.equal((await Lead.findOne({ reservationUserId: member._id })).status, 'Reservation', 'the second reservation still runs');
+  assert.equal((await Target.findOne({ offerSlug: 'test-offer' })).stage, 'NotNow');
+  assert.equal((await Target.findOne({ offerSlug: 'second-offer' })).stage, 'Reservation');
+});
+test('a project made on the reservation makes that offer Matured, and no closing message or Not Now follows', async () => {
+  await Lead.create({ name: 'Client', phone: '+919876500002', email: 'client@example.test', status: 'Won', convertedToUserId: customer._id });
+  await reserve(customer);
+  const res = await projectOn((await Reservation.findOne())._id);
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const target = await targetOf(customer);
+  assert.equal(target.stage, 'Won'); assert.ok(target.boughtAt);
+  assert.ok((await Lead.findOne({ convertedToUserId: customer._id })).followUps.some(line => /Bought Reserved website: a project was created on the reservation/.test(line.note)));
+  await age(100 * HOUR); await closeDueReservations();
+  assert.equal((await queued('offer.reservation.expired')).length, 0);
+  assert.equal((await targetOf(customer)).stage, 'Won');
 });

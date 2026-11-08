@@ -98,7 +98,8 @@ const updateLeadController = async (req, res) => {
       const clientFollowUp = Boolean(lead.convertedToUserId) && !target;
       const clientBefore = lead.clientBehaviour || DEFAULT_CLIENT_BEHAVIOUR;
       if (target) {
-        const allowed = target.stage === WON ? badge === WON : SELECTABLE_OFFER_STAGES.includes(badge);
+        // A note may keep the offer's current stage, also one only the system sets (Reservation, Not Now: reservationStage.js).
+        const allowed = target.stage === WON ? badge === WON : badge === target.stage || SELECTABLE_OFFER_STAGES.includes(badge);
         if (!allowed) return res.status(400).json({ message: "Please select a valid stage for this offer", error: true, success: false });
       } else if (clientFollowUp) {
         // Won comes from a page opened before this form showed the status: a note that keeps the status.

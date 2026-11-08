@@ -102,8 +102,8 @@ test('start message goes by WhatsApp only, with the hours, the deadline and the 
   assert.equal(emails, 0, 'no email by default');
   const [row] = await queued('offer.reserved');
   assert.equal(row.to, '919876500001');
-  assert.match(row.text, /lasts 48 hours/);
-  assert.match(row.text, /Get your project started before then/);
+  assert.match(row.text, /Your reservation for .* has started/); assert.match(row.text, /Duration: 48 hours/);
+  assert.match(row.text, /Start your project before it ends to keep the offer price/);
   assert.equal((await Reservation.findOne()).confirmationStatus, 'sent');
   await Reservation.updateOne({}, { $set: { confirmationStatus: 'pending', confirmationNextAttemptAt: new Date(0) } });
   await drainReservationConfirmations();
@@ -150,7 +150,7 @@ test('deadline passed with no project: one closing message with the offers page'
   await age(48 * HOUR + 60000);
   await closeDueReservations();
   const [row] = await queued('offer.reservation.expired');
-  assert.match(row.text, /offer has now expired/); assert.match(row.text, /https:\/\/website\.example\.test\/offers/); assert.match(row.text, /Better luck next time/);
+  assert.match(row.text, /reservation has ended and the offer has expired/); assert.match(row.text, /https:\/\/website\.example\.test\/offers/); assert.match(row.text, /Best wishes for your next project/);
   assert.equal((await Reservation.findOne()).closureStatus, 'sent');
   await Reservation.updateOne({}, { $set: { closureStatus: 'pending' } });
   await closeDueReservations();
@@ -224,8 +224,8 @@ test('the Reservation box counts running, used and expired reservations', async 
 test('every action has one route: customer WhatsApp, team Both, subscription Email', () => {
   const team = events.filter(row => row.audience === 'team').map(row => row.key);
   assert.equal(team.length, 13, 'with the package start request (helpers/packageStart.js)');
-  // Owner decision 7 Nov 2026: the reservation countdown and start-request messages to the customer go by Both.
-  const customerBoth = ['offer.reservation.reminder', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received'];
+  // Owner decisions 7 and 8 Nov 2026: the reservation countdown and start-request messages to the customer go by Both.
+  const customerBoth = ['offer.reservation.dayPassed', 'offer.reservation.reminder', 'offer.reservation.sixHours', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received'];
   for (const row of events) {
     const expected = row.key.startsWith('website.subscription.') ? 'email' : row.audience === 'team' || customerBoth.includes(row.key) ? 'both' : 'whatsapp';
     assert.equal(channelFor(row.key, null), expected, row.key);

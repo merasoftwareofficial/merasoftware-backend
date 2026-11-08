@@ -84,7 +84,7 @@ test('a member who wrote on WhatsApp: reserving turns the Inquiry into their lea
   assert.equal((await reserve()).reservation.status, 'reserved');
   assert.equal(await Lead.countDocuments(), 1);
   const lead = await Lead.findById(inquiry._id);
-  assert.equal(lead.status, 'Contacted');
+  assert.equal(lead.status, 'Reservation', 'owner, 8 Nov 2026: a reserving lead is in the Reservation stage');
   assert.equal(lead.name, 'Member');
   assert.equal(lead.reservationUserId.toString(), member._id.toString());
   assert.equal((await Reservation.findOne()).leadId.toString(), lead._id.toString());

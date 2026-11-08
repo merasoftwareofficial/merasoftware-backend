@@ -104,8 +104,9 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
   if (previous && (!periodEndsAt || periodEndsAt <= new Date(previous.periodEndsAt))) return { reservation: reservationView(previous), reused: true, serverNow: new Date() };
   const price = offer ? calculateBenefit(Number(offer.mainPrice), offer).finalPrice : null;
   let relinkedLeadId = null; // a lead whose main phone the link changed: its final message cycle is checked after the commit
+  let stagedLeadId = null; // a lead moved to Reservation (helpers/reservationStage.js): its final message cycle is checked too
   const result = await mongoose.connection.transaction(async session => {
-    relinkedLeadId = null;
+    relinkedLeadId = null; stagedLeadId = null;
     const user = await activeOwner(userId, session);
     // Serialize concurrent offers for one owner, so two requests cannot create two leads.
     await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
@@ -134,9 +135,13 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
     const [row] = await Reservation.create([{ userId, offerSlug, periodEndsAt, offerSnapshot: offer,
       regularPrice: Number(offer.mainPrice), reservedPrice: price, reservedAt: now,
       expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending', remindersEnabled: true }], { session });
+    // A lead goes to the Reservation stage and the offer's stage too; a client keeps its behaviour (owner, 8 Nov 2026).
+    stagedLeadId = await require('./reservationStage').onReserved(row, { session });
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
-  if (relinkedLeadId) await require('./finalMessageCycle').reconcileCycle(relinkedLeadId).catch(error => console.error('[reservation] final message check after relink:', error.message));
+  for (const leadId of new Set([relinkedLeadId, stagedLeadId].filter(Boolean).map(String))) {
+    await require('./finalMessageCycle').reconcileCycle(leadId).catch(error => console.error('[reservation] final message check after reserving:', error.message));
+  }
   return result;
 }
 // Called inside the existing project-creation transaction, never as a second commit.
@@ -174,6 +179,8 @@ async function attachProjectReservation({ order, offer, reservationId = null, se
   row.projectId = order._id;
   order.offerReservationId = row._id;
   await row.save({ session });
+  // The offer the project was made on is Matured for this client (helpers/reservationStage.js).
+  await require('./reservationStage').onProjectAttached(row, { session, actor: order.createdBy || null });
   return row;
 }
 async function confirmReservationPayment({ order, invoice, session }) {

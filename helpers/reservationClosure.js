@@ -49,6 +49,12 @@ async function closeDueReservations({ now = new Date(), limit = 20 } = {}) {
       closureNextAttemptAt: outcome.status === 'failed' ? new Date(now.getTime() + RETRY_MS) : null,
       closureDecidedAt: outcome.status === 'failed' ? null : now,
     } });
+    // Ended with no project: the offer, and the lead unless another reservation runs, go Not Now (helpers/reservationStage.js).
+    // The decision above is final, so this runs once; a failure here is logged and never undoes it.
+    if (!['used', 'failed'].includes(outcome.status)) {
+      try { outcome.stage = await require('./reservationStage').onExpired(row, { now }); }
+      catch (error) { console.error('[reservation closure] stage after expiry:', error.message); }
+    }
     results.push({ id: String(row._id), ...outcome });
   }
   return results;
