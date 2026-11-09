@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const StartRequest = require('../models/packageStartRequestModel');
 const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
-const { readPackages, fail } = require('./salesPackages');
+const { readPackages, fail, quotePackageChoice } = require('./salesPackages');
 const { parsePhone } = require('./phoneNumber');
 
 // "Start my project" on a package page without a running offer (merasoftware/src/docs/package-offers.md,
@@ -19,7 +19,8 @@ const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$
 
 const requestView = row => row && ({
   id: String(row._id), packageId: row.packageId, title: row.packageSnapshot?.name || row.packageId,
-  price: row.packageSnapshot?.price ?? null, requestedAt: row.requestedAt, closedAt: row.closedAt || null,
+  price: row.packageSnapshot?.price ?? null, category: row.packageSnapshot?.category || null, choice: row.packageSnapshot?.choice || null,
+  quote: row.packageSnapshot?.quote || null, requestedAt: row.requestedAt, closedAt: row.closedAt || null,
   closedReason: row.closedReason || null, projectId: row.projectId ? String(row.projectId) : null,
   status: row.closedAt ? 'closed' : 'requested',
 });
@@ -36,7 +37,12 @@ async function listPackageStarts(userId) {
   return { requests: rows.map(requestView), enabled: enabled() };
 }
 
-async function requestPackageStart({ userId, packageId, countryCode, phone }) {
+// The customer's choice on the customize page (package.md §3), as the request stores it.
+const choiceFromQuote = quote => (quote.billing === 'monthly'
+  ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths, files: quote.monthly.files, updates: quote.monthly.updatesPerMonth }
+  : { paymentOption: quote.paymentOption });
+
+async function requestPackageStart({ userId, packageId, choice, countryCode, phone }) {
   if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
   if (!safeId(packageId)) fail('Choose a package');
   const enteredPhone = phone ? parsePhone({ countryCode, phone }) : null;
@@ -46,7 +52,15 @@ async function requestPackageStart({ userId, packageId, countryCode, phone }) {
   if (open) return { request: requestView(open), requested: false };
   const item = (await readPackages()).find(row => row.id === packageId && row.status === 'published');
   if (!item) fail('This package is not available.', 404);
-  const price = item.discountedPrice ?? item.regularPrice;
+  // A package with purchase settings is asked for with the customer's choice, priced by the one choice
+  // quote (offer included). The price is a record of what the customer saw; the project is always priced
+  // from the live package when the team creates it (projectPricing.js). Older packages keep their price.
+  let quoted = null;
+  if (item.billing) {
+    if (!choice || typeof choice !== 'object') fail('Choose how you want to buy this package');
+    quoted = quotePackageChoice(item, (await require('./websiteOffers').fetchWebsiteCatalogue()).offers, choice);
+  }
+  const price = quoted ? quoted.finalPrice : item.discountedPrice ?? item.regularPrice;
   const { isClient, ensureWonLead } = require('./wonLead');
   let created, client = false;
   try {
@@ -69,7 +83,9 @@ async function requestPackageStart({ userId, packageId, countryCode, phone }) {
         if (lead && !lead.phone) { lead.phone = user.phone; await lead.save({ session }); }
       }
       [created] = await StartRequest.create([{ userId, packageId, requestedAt: new Date(), leadId: lead?._id || null,
-        packageSnapshot: { id: item.id, name: item.name, category: item.category, regularPrice: item.regularPrice, price } }], { session });
+        packageSnapshot: { id: item.id, name: item.name, category: item.category, regularPrice: item.regularPrice, price,
+          ...(quoted ? { billing: quoted.billing, choice: choiceFromQuote(quoted), quote: { finalPrice: quoted.finalPrice, dueNow: quoted.dueNow,
+            offerSlug: quoted.offer?.slug || null, ...(quoted.monthly ? { cyclePrice: quoted.monthly.cyclePrice, totalCycles: quoted.monthly.totalCycles } : {}) } } : {}) } }], { session });
     });
   } catch (error) {
     // Two clicks at once: the unique open request lets one win; the other returns it.

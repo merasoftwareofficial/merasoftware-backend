@@ -155,6 +155,12 @@ const buildContextPayload = async ({ order, kind }) => {
 
   if (kind === UPLOAD_KIND.PROJECT) {
     refusal = await assertProjectAcceptsUpload(order);
+    // A monthly package's own files per update and remaining updates (projectUploadGate.js).
+    const own = await require("../../helpers/projectUploadGate").projectUploadLimits(order);
+    if (own) {
+      maxFiles = own.maxFiles;
+      if (own.allowance) remainingUploads = own.allowance.remaining;
+    }
   } else {
     maxFiles = Number(snapshot.filesLimit || 0);
     if (order.servicePlanStatus !== "active") refusal = "This service is not active";

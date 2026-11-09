@@ -253,6 +253,13 @@ const installmentSchema = new mongoose.Schema({
         default: null,
         min: 0,
         max: 100
+    },
+    // 'date': a monthly package cycle (merasoftware/src/docs/package.md), due on dueDate and never by
+    // progress (projectDuePayment.js isInstallmentDue). Missing on every progress installment.
+    dueBy: {
+        type: String,
+        enum: ['date'],
+        default: undefined
     }
 });
 

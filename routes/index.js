@@ -211,7 +211,9 @@ router.patch('/admin/sales-packages', authToken, require('../controller/order/sa
 router.patch('/admin/sales-packages/drafts', authToken, require('../controller/order/salesPackagesController').adminDraft);
 router.patch('/admin/sales-packages/offer-links', authToken, require('../controller/order/salesPackagesController').adminLinkOffer);
 router.patch('/admin/sales-packages/page-unlink', authToken, require('../controller/order/salesPackagesController').adminUnlinkPage);
+router.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
 router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
+router.patch('/integration/sales-packages/quote', require('../controller/order/salesPackagesController').integrationQuote);
 // Flexible Plans: public plan catalogue + estimator quote for the website (bearer, helpers/integrationAuth.js).
 router.get('/integration/plan-catalogue', require('../controller/order/servicePlanQuote').integrationCatalogue);
 router.patch('/integration/plan-catalogue/quote', require('../controller/order/servicePlanQuote').integrationQuote);

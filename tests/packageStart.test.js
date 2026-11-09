@@ -23,7 +23,7 @@ const DAY = 24 * 3600000;
 const DESIGN = { eyebrow: 'YOUR BUSINESS, ONLINE', heading: 'Get your business', headingHighlight: 'noticed online.', supportingLine: '',
   subheading: "What's included", tagline: 'One-time package', badge: 'Most chosen', priceDescription: 'One-time payment.',
   ctaLabel: 'Enquire about this package', contactHref: 'mailto:contact@merasoftware.com' };
-const item = { name: 'Business Starter', description: 'A business website.', status: 'published', category: 'standard_websites',
+const item = { name: 'Business Starter', description: 'A business website.', status: 'published', category: 'standard_websites', billing: 'one_time', portalUploads: true, paymentOptions: ['full'],
   regularPrice: 15000, discountedPrice: 9999, offerExtraPrice: 0, offerSlug: '', inclusions: ['Website'], terms: [], linkedPlanIds: [], order: 0, pages: [] };
 let database, member, customer, admin, emails;
 const realFetch = global.fetch;
@@ -55,7 +55,7 @@ beforeEach(async () => {
   process.env.PACKAGE_START_REQUESTS_ENABLED = 'true';
 });
 const history = event => EmailHistory.find({ event }).lean();
-const ask = (user = member, packageId = 'business-starter') => start.requestPackageStart({ userId: user._id, packageId });
+const ask = (user = member, packageId = 'business-starter') => start.requestPackageStart({ userId: user._id, packageId, choice: { paymentOption: 'full' } });
 async function age(ms) {
   for (const row of await StartRequest.find().lean()) await StartRequest.collection.updateOne({ _id: row._id }, { $set: { requestedAt: new Date(row.requestedAt.getTime() - ms) } });
 }
@@ -103,7 +103,7 @@ test('switched off by its flag; only a published package; a phone is needed', as
   await assert.rejects(ask(member, 'draft-one'), /not available/);
   const noPhone = await User.create({ name: 'No phone', email: 'nophone@example.test', roles: ['member'] });
   await assert.rejects(ask(noPhone), error => error.statusCode === 428);
-  const result = await start.requestPackageStart({ userId: noPhone._id, packageId: 'business-starter', countryCode: '+91', phone: '9876500009' });
+  const result = await start.requestPackageStart({ userId: noPhone._id, packageId: 'business-starter', choice: { paymentOption: 'full' }, countryCode: '+91', phone: '9876500009' });
   assert.equal(result.requested, true);
   assert.equal((await User.findById(noPhone._id)).phone, '+919876500009');
 });

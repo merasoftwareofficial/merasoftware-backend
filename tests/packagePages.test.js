@@ -12,7 +12,7 @@ const { validatePackage, quotePackage, savePackage, readPackages, unlinkPackageP
 const { STARTER_PACKAGES, seedStarterPackages } = require('./fixtures/salesPackages');
 
 const PAGES = [{ slug: 'one-time-packages', title: 'One-Time Packages' }, { slug: 'monthly-packages', title: 'Monthly Packages' }];
-const draft = { ...STARTER_PACKAGES[0], offerSlug: '' };
+const draft = { ...STARTER_PACKAGES[0], offerSlug: '', billing: 'one_time', portalUploads: true, paymentOptions: ['full'] };
 let db, uri;
 
 before(async () => {

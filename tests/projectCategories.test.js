@@ -154,7 +154,7 @@ test('admin project in a new category freezes its label and starting node; archi
 
 test('packages need an active category; an archived package may stay in an archived one', async () => {
   await save({ creating: true, category: 'seo_services', label: 'SEO Services' });
-  const item = { ...STARTER_PACKAGES[0], id: 'seo-pack', category: 'seo_services', offerSlug: '' };
+  const item = { ...STARTER_PACKAGES[0], id: 'seo-pack', category: 'seo_services', offerSlug: '', billing: 'one_time', portalUploads: true, paymentOptions: ['full'] };
   await savePackage(item, true, []);
   await save({ category: 'seo_services', status: 'archived' });
   await assert.rejects(savePackage({ ...item, name: 'Renamed' }, false, []), /active project category/);

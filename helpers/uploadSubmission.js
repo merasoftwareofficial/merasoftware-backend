@@ -89,7 +89,9 @@ async function commitSubmission(req, { instructions, files, receipt = false }) {
       await assertUploadOrder(current, { fileCount: files.length, serviceOrderId: req.body.serviceOrderId });
       let remaining = null;
       if (kind === UPLOAD_KIND.PROJECT) {
-        const refusal = await assertProjectAcceptsUpload(current);
+        // Counted inside this transaction (monthly package updates, projectUploadGate.js); the
+        // uploadRevision touch below makes two uploads at once conflict, so one recounts.
+        const refusal = await assertProjectAcceptsUpload(current, { session });
         if (refusal) throw failure(refusal, 400);
         // Touch the order so competing order changes conflict with this commit.
         await Order.updateOne({ _id: current._id }, { $inc: { uploadRevision: 1, ...(current.paymentPolicy ? { paymentPolicyUploads: 1 } : {}) } }, { session });

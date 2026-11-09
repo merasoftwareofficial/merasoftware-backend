@@ -95,7 +95,8 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
     packageStarts: starts.map(row => {
       const user = users.find(item => String(item._id) === String(row.userId));
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '',
-        package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, requestedAt: row.requestedAt };
+        package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, choice: row.packageSnapshot?.choice || null,
+        billing: row.packageSnapshot?.billing || null, userId: String(row.userId), requestedAt: row.requestedAt };
     }),
   };
 }

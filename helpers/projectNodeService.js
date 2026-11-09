@@ -31,6 +31,13 @@ const getActiveProgress = (order) => {
 const syncActiveProjectProgress = (order, actorId = null) => {
   const previousProgress = Number(order.projectProgress) || 0;
   const progress = getActiveProgress(order);
+  // 100% completes a project and closes its uploads, so a monthly package project reaches it only
+  // after the term the client paid for (merasoftware/src/docs/package.md §5 item 13). Checked here
+  // because every node change (add, edit, restore) funnels through this function.
+  const term = order.projectSnapshot?.salesAgreement?.package?.monthly;
+  if (progress >= 100 && previousProgress < 100 && term?.endsAt && new Date(term.endsAt) > new Date()) {
+    throw new Error(`This monthly package runs until ${new Date(term.endsAt).toISOString().slice(0, 10)}; it can reach 100% only after that`);
+  }
   order.projectProgress = progress;
   if (progress >= 100) {
     order.status = "completed";

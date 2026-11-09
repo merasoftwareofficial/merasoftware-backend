@@ -6,8 +6,9 @@ const { paymentDueDate } = require('./offerPaymentPolicy');
 async function ensureOfferProjectInvoices() {
   const orders = await Order.find({ isWebsiteProject: true, isPartialPayment: true, paymentPolicy: { $ne: null }, orderVisibility: { $nin: ['cancelled', 'payment-rejected'] } });
   for (const order of orders) {
-    const target = order.installments.find(item => item.installmentNumber === order.currentInstallment && !item.paid);
-    if (!target || (target.progressThreshold != null && Number(order.projectProgress || 0) < target.progressThreshold)) continue;
+    // The one due rule (projectDuePayment.js).
+    const target = require('./projectDuePayment').dueInstallment(order);
+    if (!target) continue;
     if (await Invoice.exists({ orderId: order._id, invoiceType: 'project', installmentNumber: target.installmentNumber })) continue;
     try {
       await createProjectInvoice({ customerId: order.userId, orderId: order._id, amount: target.amount, lineItems: buildLineItemsFromOrder(order),

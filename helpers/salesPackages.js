@@ -3,6 +3,8 @@ const Catalogue = require('../models/salesCatalogueModel');
 const Product = require('../models/productModel');
 const Draft = require('../models/packageDraftModel');
 const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
+const { MAX_PROJECT_FILES_PER_UPLOAD } = require('../config/uploadLimits');
+const { buildInstallments } = require('./projectInstallments');
 
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -36,6 +38,61 @@ function validateDesign(raw) {
   if (!contactLink(design.contactHref)) fail('Use an HTTPS, email (mailto:) or telephone (tel:) contact link');
   return design;
 }
+// How a customer buys the package (merasoftware/src/docs/package.md, decision 7). Optional as a whole:
+// a package saved before these settings keeps its quote key and works as before until the admin
+// chooses them. They change what is sold, so unlike pages and design they are part of the quote key.
+const PACKAGE_BILLING = ['one_time', 'monthly'];
+const PACKAGE_PAYMENT_OPTIONS = ['full', 'installments_2', 'installments_3'];
+const INSTALLMENT_COUNT = { installments_2: 2, installments_3: 3 };
+// Monthly packages (package.md decision 9) are priced by the plan engine's tested rules
+// (servicePlanPricing.js), never copied: the package's price is the monthly price (fixed) or the
+// rate per file (per_file), and its billing cycles and lengths follow the plan rules.
+const MONTHLY_PRICING = ['fixed', 'per_file'];
+function monthlyPlanShape(monthly, unitPrice) {
+  const servicePlan = monthly.pricing === 'per_file'
+    ? { pricingMode: 'flexible', capability: 'upload_data', ratePerFile: unitPrice, files: monthly.files, updatesPerMonth: monthly.updatesPerMonth,
+      billingOptions: monthly.billingOptions, maxTenureMonths: monthly.maxTenureMonths, allowOneTime: false, releaseMode: 'monthly' }
+    : { pricingMode: 'fixed', monthlyReferencePrice: unitPrice, billingOptions: monthly.billingOptions, maxTenureMonths: monthly.maxTenureMonths };
+  return { sellingPrice: 0, servicePlan };
+}
+function validateMonthly(raw, portalUploads, unitPrice) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('Choose the monthly settings');
+  if (!MONTHLY_PRICING.includes(raw.pricing)) fail('Choose a fixed monthly price or a price per file');
+  const options = raw.billingOptions;
+  if (!Array.isArray(options) || !options.length || options.length > 4) fail('Choose at least one billing cycle');
+  const whole = value => (Number.isInteger(value) ? value : fail('Use whole numbers for the monthly settings'));
+  const monthly = {
+    pricing: raw.pricing,
+    billingOptions: options.map(option => ({ billingCycle: option?.billingCycle, discountPercent: Number(option?.discountPercent || 0) })),
+    maxTenureMonths: whole(raw.maxTenureMonths),
+    ...(raw.pricing === 'per_file' ? {
+      files: { min: whole(raw.files?.min), max: whole(raw.files?.max), step: whole(raw.files?.step ?? 1) },
+      updatesPerMonth: { min: whole(raw.updatesPerMonth?.min), max: whole(raw.updatesPerMonth?.max) },
+    } : {}),
+  };
+  if (monthly.pricing === 'per_file' && portalUploads !== true) fail('A price per file needs portal uploads');
+  if (monthly.pricing === 'per_file' && monthly.files.max > MAX_PROJECT_FILES_PER_UPLOAD) fail(`Files per update can be at most ${MAX_PROJECT_FILES_PER_UPLOAD}`);
+  // The plan's own config rules: unique cycles, discount 0–99, length 1–12, valid ranges.
+  require('./servicePlanPricing').assertPricingConfig(monthlyPlanShape(monthly, unitPrice));
+  return monthly;
+}
+function validatePurchase(raw) {
+  const given = ['billing', 'portalUploads', 'paymentOptions', 'monthly'].filter(key => raw[key] !== undefined && raw[key] !== null);
+  if (!given.length) return null;
+  if (raw.billing === 'monthly') {
+    if (typeof raw.portalUploads !== 'boolean') fail('Choose whether this package includes portal uploads');
+    if (raw.paymentOptions !== undefined && raw.paymentOptions !== null) fail('A monthly package is paid per billing cycle, without payment options');
+    if (Number(raw.offerExtraPrice || 0) !== 0) fail('A monthly package has no offer extras price');
+    return { billing: 'monthly', portalUploads: raw.portalUploads, monthly: validateMonthly(raw.monthly, raw.portalUploads, raw.discountedPrice) };
+  }
+  if (raw.monthly !== undefined && raw.monthly !== null) fail('Monthly settings belong to a monthly package');
+  if (given.length !== 3) fail('Choose the billing, portal uploads and payment options together');
+  if (!PACKAGE_BILLING.includes(raw.billing)) fail('Choose how this package is billed');
+  if (typeof raw.portalUploads !== 'boolean') fail('Choose whether this package includes portal uploads');
+  const options = raw.paymentOptions;
+  if (!Array.isArray(options) || !options.length || options.some(option => !PACKAGE_PAYMENT_OPTIONS.includes(option)) || new Set(options).size !== options.length) fail('Choose at least one payment option');
+  return { billing: raw.billing, portalUploads: raw.portalUploads, paymentOptions: PACKAGE_PAYMENT_OPTIONS.filter(option => options.includes(option)) };
+}
 // A new package's permanent ID comes from its name (owner decision 7 Nov 2026): "Business Starter" →
 // business-starter, then business-starter-2 while taken. Names without Latin letters get "package".
 function packageIdBase(name) {
@@ -67,6 +124,7 @@ function validatePackage(raw) {
   const discountedPrice = amount(raw.discountedPrice, 'discounted price');
   if (discountedPrice > regularPrice) fail('Discounted price cannot be more than the main price');
   const design = validateDesign(raw.design);
+  const purchase = validatePurchase(raw);
   return {
     id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 500, 'description'),
     category: raw.category, status: raw.status, regularPrice, discountedPrice,
@@ -74,6 +132,7 @@ function validatePackage(raw) {
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
     linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order, pages: [...new Set(pages)],
     ...(design ? { design } : {}),
+    ...(purchase || {}),
   };
 }
 // Which packages an offer applies to is stored only on the package (offerSlug), so one package
@@ -115,6 +174,42 @@ function quotePackage(item, offers, now = Date.now()) {
   const quoteKey = createHash('sha256').update(JSON.stringify({ item: priced, quote: signed })).digest('hex');
   return { ...item, quote, quoteKey };
 }
+// A monthly choice priced by the plan engine (servicePlanPricing.js quoteServicePlan) at one unit
+// price: the package's monthly price or rate per file, with or without the offer.
+function monthlyQuote(item, unitPrice, choice = {}) {
+  const { quoteServicePlan } = require('./servicePlanPricing');
+  const perFile = item.monthly.pricing === 'per_file';
+  const quote = quoteServicePlan(monthlyPlanShape(item.monthly, unitPrice), {
+    purchase: choice.billingCycle, tenureMonths: choice.tenureMonths,
+    ...(perFile ? { files: choice.files, updates: choice.updates } : {}),
+  });
+  return { billingCycle: quote.purchase, cycleMonths: quote.cycleMonths, tenureMonths: quote.tenureMonths, totalCycles: quote.totalCycles,
+    pricing: item.monthly.pricing, files: perFile ? quote.files : null, updatesPerMonth: perFile ? quote.updates : null,
+    perMonthPrice: quote.perMonthPrice, discountPercent: quote.discountPercent, cyclePrice: quote.cyclePrice, totalPrice: quote.totalPrice };
+}
+// The one price of a customer's choice (package.md §3): the customize page, the package request and the
+// project creation all ask this. One-time: a payment option and its installments (projectInstallments.js);
+// monthly: the cycle, length and (per file) files and updates. `quoted` is quotePackage's answer, or a
+// reservation's frozen-offer quote (projectPricing.js).
+function quoteChoice(item, quoted, choice = {}) {
+  if (!item.billing) fail('This package cannot be customized yet', 404);
+  const offer = quoted.quote.offer ? { slug: quoted.quote.offer.slug, title: quoted.quote.offer.title, endsAt: quoted.quote.offer.endsAt } : null;
+  const base = { packageId: item.id, quoteKey: quoted.quoteKey, billing: item.billing, offer };
+  if (item.billing === 'monthly') {
+    const charged = monthlyQuote(item, quoted.quote.finalPrice, choice);
+    const regular = monthlyQuote(item, quoted.quote.regularPrice, choice);
+    return { ...base, monthly: charged, regularPrice: regular.totalPrice, discountAmount: money(regular.totalPrice - charged.totalPrice),
+      finalPrice: charged.totalPrice, dueNow: charged.cyclePrice, unitPrice: quoted.quote.finalPrice, regularUnitPrice: quoted.quote.regularPrice };
+  }
+  const option = choice.paymentOption;
+  if (!item.paymentOptions.includes(option)) fail('Choose a way to pay that this package offers');
+  const finalPrice = quoted.quote.finalPrice;
+  const installments = INSTALLMENT_COUNT[option] ? buildInstallments(finalPrice, INSTALLMENT_COUNT[option])
+    .map(({ installmentNumber, percentage, amount, progressThreshold }) => ({ installmentNumber, percentage, amount, progressThreshold })) : [];
+  return { ...base, paymentOption: option, installments, regularPrice: quoted.quote.regularPrice, discountAmount: quoted.quote.discountAmount,
+    finalPrice, dueNow: installments[0]?.amount ?? finalPrice };
+}
+const quotePackageChoice = (item, offers, choice, now = Date.now()) => quoteChoice(item, quotePackage(item, offers, now), choice);
 async function catalogueWithQuotes(offers, admin = false) {
   const items = await readPackages();
   return items.filter(item => admin || item.status === 'published').map(item => quotePackage(item, offers));
@@ -130,6 +225,11 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set([...existing.map(row => row.id), ...await draftIds()]));
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
+  // package.md decision 15: a new package is published only with its purchase settings; once chosen
+  // they are never dropped again (older packages simply have none until the admin chooses them).
+  if (!item.billing && ((creating && item.status === 'published') || existing.find(row => row.id === item.id)?.billing)) {
+    fail('Choose the billing, portal uploads and payment options for this package');
+  }
   // An archived category keeps its old packages, but only an archived package may stay in it.
   const category = await getProjectCategory(item.category);
   if (!category || (category.status !== 'active' && item.status !== 'archived')) fail('Choose an active project category');
@@ -186,4 +286,4 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage };
+module.exports = { money, fail, readPackages, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };

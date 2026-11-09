@@ -8,7 +8,7 @@ const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
 const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
 const { sendProjectCreatedEmail } = require("../../helpers/emailService");
 const { resolveProjectPricing } = require('../../helpers/projectPricing');
-const { buildInstallments } = require('../../helpers/projectInstallments');
+const { buildInstallments, buildCycleInstallments } = require('../../helpers/projectInstallments');
 const { createHash } = require('node:crypto');
 
 const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
@@ -170,7 +170,17 @@ const adminCreateProjectOrderController = async (req, res) => {
       offer = commercial.agreement.offer;
     }
 
-    const isPartialPayment = !isFree && paymentType === "partial";
+    // A monthly package is paid per billing cycle (merasoftware/src/docs/package.md decision 9), never in
+    // full or in 2 / 3 installments; only a monthly package is.
+    const monthlyTerm = commercial?.monthly || null;
+    if (Boolean(monthlyTerm) !== (paymentType === "monthly")) {
+      return res.status(400).json({
+        message: monthlyTerm ? "This is a monthly package: it is paid per billing cycle" : "Only a monthly package is paid per billing cycle",
+        error: true,
+        success: false,
+      });
+    }
+    const isPartialPayment = !isFree && (paymentType === "partial" || Boolean(monthlyTerm));
     // A project order must never be born `approved` without a real payment recorded. When admin
     // defers payment ("Just Add Project, Let Client Pay the Bill"), the order stays
     // `pending-approval`; the same approveProjectOrder.js "record payment to approve" flow closes it out
@@ -213,7 +223,9 @@ const adminCreateProjectOrderController = async (req, res) => {
       ],
     };
 
-    if (isPartialPayment) {
+    if (monthlyTerm) {
+      orderData.installments = buildCycleInstallments(monthlyTerm.cyclePrice, monthlyTerm.totalCycles, monthlyTerm.cycleMonths, monthlyTerm.startsAt);
+    } else if (isPartialPayment) {
       orderData.installments = buildInstallments(finalPrice, installmentCount);
     }
 

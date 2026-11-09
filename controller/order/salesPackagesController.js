@@ -2,7 +2,7 @@ const User = require('../../models/userModel');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories } = require('../../helpers/projectCategories');
 const drafts = require('../../helpers/packageDrafts');
 
@@ -60,4 +60,32 @@ const integrationRead = handle(async (req, res) => {
   // Service references are admin-only; public packages never expose internal notes/IDs.
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, ...item }) => item), categories } });
 });
-module.exports = { adminRead, adminSave, adminDraft, adminLinkOffer, adminUnlinkPage, integrationRead };
+// PATCH /api/integration/sales-packages/quote (the website's package customize page, package.md §3):
+// { packageId, choice } -> the one choice quote. Nothing is bought here.
+const integrationQuote = handle(async (req, res) => {
+  requireIntegration(req);
+  const item = (await readPackages()).find(row => row.id === req.body?.packageId && row.status === 'published');
+  if (!item) fail('This package is not available.', 404);
+  const { offers } = await fetchWebsiteCatalogue();
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { quote: quotePackageChoice(item, offers, req.body?.choice || {}) } });
+});
+// PATCH /api/admin/sales-packages/quote: the same choice quote for the portal's create-project form, so a
+// monthly package project is priced as its creation prices it (projectPricing.js), with a customer's
+// reservation at the offer it froze. { packageId, choice, customerId?, offerReservationId? }
+const adminQuote = handle(async (req, res) => {
+  await requireAdmin(req);
+  const { quoteChoice } = require('../../helpers/salesPackages');
+  const { quotePackageForProject } = require('../../helpers/projectPricing');
+  const item = (await readPackages()).find(row => row.id === req.body?.packageId && row.status === 'published');
+  if (!item) fail('This package is not available.', 404);
+  let reserved = null;
+  if (req.body?.offerReservationId) {
+    const mongoose = require('mongoose');
+    if (!mongoose.isValidObjectId(req.body.offerReservationId) || !mongoose.isValidObjectId(req.body.customerId)) fail('Select a reserved offer for this customer');
+    reserved = await require('../../models/offerReservationModel').findOne({ _id: req.body.offerReservationId, userId: req.body.customerId }).lean();
+    if (!reserved || reserved.offerSnapshot?.packageId !== item.id) fail('This reservation belongs to another package', 409);
+  }
+  const offers = reserved ? [] : (await fetchWebsiteCatalogue()).offers;
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { quote: quoteChoice(item, quotePackageForProject(item, reserved, offers), req.body?.choice || {}) } });
+});
+module.exports = { adminRead, adminSave, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };

@@ -15,7 +15,8 @@ async function processOfferPaymentReminders(now = new Date()) {
     if (invoice.installmentNumber && invoice.installmentNumber !== order.currentInstallment) continue;
     if (invoice.installmentNumber) {
       const installment = order.installments.find(item => item.installmentNumber === invoice.installmentNumber);
-      if (installment?.progressThreshold != null && Number(order.projectProgress || 0) < installment.progressThreshold) continue;
+      // The one due rule (helpers/projectDuePayment.js).
+      if (installment && !require('../helpers/projectDuePayment').isInstallmentDue(order, installment)) continue;
     }
     if (new Date(invoice.dueDate) < now && invoice.status !== 'overdue') {
       await Invoice.updateOne({ _id: invoice._id, status: invoice.status }, { $set: { status: 'overdue' } });

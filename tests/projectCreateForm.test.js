@@ -296,7 +296,7 @@ test('no built-in packages: an empty catalogue lists nothing and the first save 
   await require('../models/salesCatalogueModel').deleteMany({});
   assert.deepEqual((await api('/admin/sales-packages', null, 'GET')).data.packages, []);
   const { STARTER_PACKAGES } = require('./fixtures/salesPackages');
-  const item = { ...STARTER_PACKAGES[0], id: 'own-package', offerSlug: '' };
+  const item = { ...STARTER_PACKAGES[0], id: 'own-package', offerSlug: '', billing: 'one_time', portalUploads: true, paymentOptions: ['full'] };
   assert.equal((await api('/admin/sales-packages', { item, creating: true }, 'PATCH')).status, 200);
   assert.deepEqual((await api('/admin/sales-packages', null, 'GET')).data.packages.map(row => row.id), ['own-package']);
 });

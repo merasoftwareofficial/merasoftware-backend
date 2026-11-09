@@ -6,20 +6,55 @@
 //
 // Project orders only — plans use monthlyInvoiceModel, a separate system, and must not
 // be run through this.
+
+// Partial orders created before progressThreshold existed have null on every installment.
+// They keep the portal's long-standing 40% / 75% rule for #2 / #3 (ProjectDetails.js), so the
+// server and the screen give one answer for them too.
+const LEGACY_THRESHOLDS = { 2: 40, 3: 75 };
+const installmentThreshold = (installment) =>
+  installment.progressThreshold ?? LEGACY_THRESHOLDS[installment.installmentNumber] ?? null;
+
+// Is this installment due right now? Read from the installment itself, never from whether its
+// invoice exists: a later installment's invoice is only created when it is paid
+// (installmentSettlement.js / projectPaymentSettlement.js), so "no invoice" must not mean
+// "nothing due" (merasoftware/src/docs/package.md, decision 17).
+function isInstallmentDue(order, installment, now = new Date()) {
+  if (!installment || installment.paid) return false;
+  // A monthly package cycle is due on its date; it must never fall into the 40% / 75% legacy rule below.
+  if (installment.dueBy === 'date') return !!installment.dueDate && new Date(installment.dueDate) <= now;
+  const threshold = installmentThreshold(installment);
+  return threshold == null || Number(order.projectProgress || 0) >= Number(threshold);
+}
+
+// The installment the customer has to pay now, or null.
+function dueInstallment(order) {
+  if (!Array.isArray(order?.installments) || !order.installments.length) return null;
+  const current = order.installments.find((installment) => installment.installmentNumber === order.currentInstallment);
+  return isInstallmentDue(order, current) ? current : null;
+}
+
 const getDueUnpaidInvoiceFilter = (order) => {
   const filter = { orderId: order._id, invoiceType: 'project', status: { $in: ['unpaid', 'partially_paid', 'overdue'] } };
 
   if (Array.isArray(order.installments) && order.installments.length > 0) {
-    const dueInstallment = order.installments.find(
+    const current = order.installments.find(
       (installment) => installment.installmentNumber === order.currentInstallment
     );
-    const isDue = !dueInstallment
-      || dueInstallment.progressThreshold == null
-      || Number(order.projectProgress || 0) >= Number(dueInstallment.progressThreshold);
+    const isDue = !current || isInstallmentDue(order, current);
     filter.installmentNumber = isDue ? order.currentInstallment : -1;
   }
 
   return filter;
 };
 
-module.exports = { getDueUnpaidInvoiceFilter };
+// Is a payment due on this project right now? A due, unpaid installment counts with or without
+// an invoice; otherwise an unpaid due invoice (a full-payment project's single bill) counts.
+async function isProjectPaymentDue(order, { session = null } = {}) {
+  if (dueInstallment(order)) return true;
+  const Invoice = require('../models/invoiceModel');
+  let query = Invoice.countDocuments(getDueUnpaidInvoiceFilter(order));
+  if (session) query = query.session(session);
+  return (await query.catch(() => 0)) > 0;
+}
+
+module.exports = { getDueUnpaidInvoiceFilter, isInstallmentDue, dueInstallment, isProjectPaymentDue };

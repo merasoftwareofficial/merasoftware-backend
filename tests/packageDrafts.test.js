@@ -11,7 +11,7 @@ const Category = require('../models/categoryBasePriceModel');
 const { savePackage, catalogueWithQuotes, unlinkPackagePage } = require('../helpers/salesPackages');
 const drafts = require('../helpers/packageDrafts');
 
-const item = { name: 'Business Starter', description: 'A business website.', status: 'published', category: 'standard_websites',
+const item = { name: 'Business Starter', description: 'A business website.', status: 'published', category: 'standard_websites', billing: 'one_time', portalUploads: true, paymentOptions: ['full'],
   regularPrice: 15000, discountedPrice: 9999, offerExtraPrice: 0, offerSlug: '', inclusions: ['Website'], terms: [], linkedPlanIds: [], order: 0, pages: ['one-time'] };
 const pages = [{ slug: 'one-time' }];
 let database;
