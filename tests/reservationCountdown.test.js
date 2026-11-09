@@ -223,7 +223,7 @@ test('the Reservation box counts running, used and expired reservations', async 
 // --- Send via -----------------------------------------------------------------------------------------
 test('every action has one route: customer WhatsApp, team Both, subscription Email', () => {
   const team = events.filter(row => row.audience === 'team').map(row => row.key);
-  assert.equal(team.length, 13, 'with the package start request (helpers/packageStart.js)');
+  assert.equal(team.length, 14, 'with the package start request (helpers/packageStart.js) and the package purchase notice (helpers/packagePurchase.js)');
   // Owner decisions 7 and 8 Nov 2026: the reservation countdown and start-request messages to the customer go by Both.
   const customerBoth = ['offer.reservation.dayPassed', 'offer.reservation.reminder', 'offer.reservation.sixHours', 'offer.reservation.lastHour', 'offer.start.request.received', 'offer.reservation.expired', 'package.start.request.received'];
   for (const row of events) {

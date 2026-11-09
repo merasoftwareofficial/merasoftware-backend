@@ -9,11 +9,16 @@ const { recordAdminProjectPaymentInSession } = require('./projectPaymentSettleme
 
 // External catalogue reads/validation happen before this short financial commit.
 // No network delivery or request-scoped email draft is created in a retryable callback.
-async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId }) {
+// A customer's own purchase (helpers/packagePurchase.js) runs the same transaction: `clientPurchase` makes the
+// customer the actor (they must be the project's owner, not an admin) and `purchasePayment` receives their
+// first payment inside it, so the project exists only together with its payment.
+async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId, clientPurchase = false, purchasePayment = null }) {
   const projectId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
-    if (!actor?.roles?.includes('admin') || actor.isActive === false || actor.deletedAt) throw Object.assign(new Error('Current portal admin access required'), { statusCode: 403 });
+    if (clientPurchase) {
+      if (!actor || String(actor._id) !== String(orderData.userId) || actor.isActive === false || actor.deletedAt) throw Object.assign(new Error('Current account access required'), { statusCode: 403 });
+    } else if (!actor?.roles?.includes('admin') || actor.isActive === false || actor.deletedAt) throw Object.assign(new Error('Current portal admin access required'), { statusCode: 403 });
     const client = await User.findById(orderData.userId).session(session);
     if (!client || client.isActive === false || client.deletedAt || client.isGuest) throw Object.assign(new Error('Client is unavailable'), { statusCode: 400 });
     if (orderData.projectCreationKey) {
@@ -42,7 +47,10 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
       await invoice.save({ session });
     }
     await require('./offerReservations').confirmReservationPayment({ order, invoice, session });
-    if (recordPayment) {
+    let purchase = null;
+    if (purchasePayment) {
+      purchase = await purchasePayment({ order, invoice, client, session });
+    } else if (recordPayment) {
       await recordAdminProjectPaymentInSession({ order, actorId, payment: recordPayment, preparedEvidence, session });
     } else {
       await order.save({ session });
@@ -50,7 +58,7 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
     }
     order.projectCreationComplete = true;
     await order.save({ session });
-    return { order, invoice, reused: false };
+    return { order, invoice, reused: false, purchase };
   });
 }
 

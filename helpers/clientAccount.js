@@ -55,9 +55,18 @@ const upgradeMemberToClient = async (user, { phone, session }) => {
   return user.save(session ? { session } : undefined);
 };
 
+// A member who pays for a project themselves becomes a client (owner decision 9 Nov 2026). Unlike
+// upgradeMemberToClient (an admin converting a lead), the person acts for themselves: they are signed in and
+// are paying, so the account keeps its own password and nothing is reset.
+const promoteMemberToClient = async (user, { session } = {}) => {
+  user.roles = ["customer"];
+  return user.save(session ? { session } : undefined);
+};
+
 module.exports = {
   CLIENT_DEFAULT_PASSWORD,
   isUpgradeableMember,
   createClientAccount,
   upgradeMemberToClient,
+  promoteMemberToClient,
 };

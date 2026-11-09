@@ -1480,6 +1480,34 @@ definitions['plan.purchase.admin'] = {
     } };
   },
 };
+// A customer bought a package project on the website and paid its first payment (helpers/packagePurchase.js).
+// To the team, once per project; the project already exists in the customer's portal.
+definitions['package.purchase.admin'] = {
+  subject: 'New package project - {{customerName}} - {{packageName}}',
+  text: lines('{{customerName}} ({{customerEmail}}) started a project on **{{packageName}}** from the website.', '',
+    '**Project price:** {{price}}', '**Due now:** {{dueNow}}', '**Paid from wallet:** {{walletPaid}}', '**UPI to approve:** {{upiAmount}}', '**UPI reference:** {{upiReference}}', '',
+    '{{action}}', '',
+    '**Client page:** {{clientLink}}', '', ...SYSTEM_SIGN_OFF),
+  variables: { customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, packageName: detail('Package', 'Business Starter'),
+    price: detail('Project price', '₹9,999'), dueNow: detail('Due now', '₹9,999', 'The first payment: all of it, the first installment or the first cycle'),
+    walletPaid: detail('Paid from wallet', '₹1,000', 'Empty when nothing came from the wallet'),
+    upiAmount: detail('UPI to approve', '₹8,999', 'Empty when the wallet paid everything'), upiReference: UPI_REFERENCE,
+    action: detail('What to do', 'Action needed: check the UPI payment and approve or reject it.'),
+    clientLink: detail('Client page', 'https://app.merasoftware.com/admin-panel/clients/123', 'The client in the admin panel') },
+  blocks: {},
+  build(purchase, user) {
+    if (!user?.email || !purchase) return null;
+    const upi = Number(purchase.upiPending || 0) > 0;
+    return { to: ADMIN_EMAILS, values: {
+      customerName: text(user.name), customerEmail: text(user.email), packageName: text(purchase.packageName), price: money(purchase.price),
+      dueNow: money(purchase.dueNow), walletPaid: purchase.walletPaid > 0 ? money(purchase.walletPaid) : '', upiAmount: upi ? money(purchase.upiPending) : '',
+      upiReference: text(purchase.upiReference),
+      action: upi ? 'Action needed: check the UPI payment and approve or reject it. The project starts when you approve.' : 'Paid from the wallet. The project is live in the client\'s portal.',
+      clientLink: adminLink(`/admin-panel/clients/${user._id}`),
+    } };
+  },
+};
+
 // Invoice wording shipped before 5 Nov 2026 promised an attached PDF; an unedited Standard copy moves to the link.
 definitions.sendMonthlyInvoiceEmail.replaces = [definitions.sendMonthlyInvoiceEmail.text
   .replace('- View or download your invoice: {{invoiceLink}}', '- The invoice PDF is attached to this email for your records.')];

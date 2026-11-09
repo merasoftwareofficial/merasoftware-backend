@@ -54,6 +54,7 @@ const events = [
   ['offer.start.request.received', 'Offers', 'Start project request received', 'Offer reservation'],
   ['package.start.request.admin', 'Offers', 'Package start request (admin)', 'Package start request'],
   ['package.start.request.received', 'Offers', 'Package start request received', 'Package start request'],
+  ['package.purchase.admin', 'Offers', 'Package project bought (admin)', 'Package start request'],
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation', 'Subscription'],
   ['website.subscription.manage', 'Website', 'Subscription management', 'Subscription'],
@@ -84,11 +85,13 @@ const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliver
   // Package Start requests (helpers/packageStart.js) are sent by its job, like the offer Start messages; the
   // whole feature stays behind PACKAGE_START_REQUESTS_ENABLED until it is tested on a real phone.
   'package.start.request.admin', 'package.start.request.received',
+  // A customer's own paid package purchase (helpers/packagePurchase.js) tells the team the moment it commits.
+  'package.purchase.admin',
   'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
 // Mail addressed to admins or a developer. Every other action reaches a customer or a lead.
 const TEAM = new Set(['plan.request.admin', 'sendUpdateRequestNotification', 'sendUploadDeliveryStuck', 'sendDeveloperAssignmentEmail',
   'sendAdminPurchaseConfirmationEmail', 'sendAdminUPIPendingNotification', 'sendContactRequestNotification', 'sendCallbackRequestNotification',
-  'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin', 'offer.start.request.admin', 'package.start.request.admin']);
+  'sendAdminAutoRenewalNotification', 'sendPlanClosureEmailToAdmin', 'plan.purchase.admin', 'offer.start.request.admin', 'package.start.request.admin', 'package.purchase.admin']);
 // Team mail addressed to the admins (not the developer): its recipients and WhatsApp numbers come from the
 // admins' own settings (helpers/teamContacts.js), whatever address its builder names.
 const ADMIN_RECIPIENT = new Set([...TEAM].filter(key => key !== 'sendDeveloperAssignmentEmail'));

@@ -41,6 +41,11 @@ const createPaymentTransaction = async ({
   sourceType,
   status = "pending",
   paymentStatus,
+  // Optional: write inside the caller's transaction (a package purchase creates the project, its invoice
+  // and this pending payment together), with the UPI evidence the caller already prepared. Both default
+  // to null/undefined, so every existing caller behaves exactly as before.
+  session = null,
+  preparedEvidence = undefined,
 }) => {
   if (!userId) throw new Error("userId is required to create a transaction");
   if (!transactionId) throw new Error("transactionId is required");
@@ -48,11 +53,11 @@ const createPaymentTransaction = async ({
 
   // Idempotency: an already-submitted transaction id is treated as success and its
   // existing document returned (same behaviour as verifyPaymentController.js).
-  const existing = await transactionModel.findOne({ transactionId });
+  const existing = await transactionModel.findOne({ transactionId }).session(session);
   if (existing) return existing;
 
   const paymentEvidence = paymentMethod === "upi"
-    ? await prepareUpiPaymentEvidence({ reference: upiTransactionId, transactionId, capturedVia: "customer" })
+    ? (preparedEvidence ?? await prepareUpiPaymentEvidence({ reference: upiTransactionId, transactionId, capturedVia: "customer" }))
     : undefined;
 
   // Wallet recharge = a customer top-up with no order behind it.
@@ -72,7 +77,7 @@ const createPaymentTransaction = async ({
       ? null
       : "pending-approval";
 
-  const user = await userModel.findById(userId).select("referredBy");
+  const user = await userModel.findById(userId).select("referredBy").session(session);
   const referredBy = user ? user.referredBy : null;
 
   const transaction = new transactionModel({
@@ -97,7 +102,7 @@ const createPaymentTransaction = async ({
     referredBy,
   });
 
-  await transaction.save();
+  await transaction.save({ session });
   return transaction;
 };
 

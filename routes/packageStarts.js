@@ -21,6 +21,22 @@ router.post('/', wrap(async req => {
   if (result.requested) setImmediate(() => start.deliverPackageStartNotices({ requestId: result.request.id }).catch(error => console.error('[package start notices]', error.message)));
   return result;
 }));
+// The customer pays for the package project and it is created with that payment (helpers/packagePurchase.js).
+router.get('/payment-info', wrap(req => require('../helpers/packagePurchase').paymentInfo(req.userId)));
+router.post('/purchase', async (req, res) => {
+  try {
+    sameSiteJson(req);
+    const body = req.body || {};
+    const result = await require('../helpers/packagePurchase').purchasePackage({ userId: req.userId, packageId: body.packageId, choice: body.choice,
+      quoteKey: body.quoteKey, dueNow: body.dueNow, creationKey: body.creationKey, countryCode: body.countryCode, phone: body.phone,
+      upiTransactionId: body.upiTransactionId });
+    // A member who just became a client keeps the same sign-in: the portal's /user-details renews an old
+    // member session into a client one on its first load (controller/user/userDetails.js).
+    return res.status(result.reused ? 200 : 201).json({ success: true, error: false, data: result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: true, message: error.message });
+  }
+});
 router.get('/user/:userId', wrap(async req => { await adminOnly(req); return start.listPackageStarts(req.params.userId); }));
 router.post('/:id/close', wrap(async req => { sameSiteJson(req); await adminOnly(req); return start.closeByTeam({ requestId: req.params.id, actorId: req.userId }); }));
 module.exports = router;

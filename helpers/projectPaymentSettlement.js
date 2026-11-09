@@ -6,7 +6,7 @@ const User = require('../models/userModel');
 const { markProjectInvoicePaid, createProjectInvoice, buildLineItemsFromOrder } = require('./paymentRecording');
 const { setOrderPaidAmount, getOrderTotal, getInvoiceAmountReceived, deriveInvoiceStatus } = require('./orderPaymentTotals');
 const { syncProjectFinalInvoice } = require('./projectFinalInvoice');
-const { deductWalletInstant, refundWalletInstant } = require('./transactionService');
+const { deductWalletInstant, refundWalletInstant, createPaymentTransaction } = require('./transactionService');
 const { markOrderApproved } = require('./orderLifecycle');
 const { logRejected, ACTOR_TYPE } = require('./orderLifecycleLog');
 
@@ -131,6 +131,32 @@ async function payProjectWallet(userId, body) {
   });
 }
 
+// A customer's first payment on a project the same request is creating (helpers/packagePurchase.js), inside
+// that request's transaction. The amount due is the project's first invoice; the wallet part is debited at
+// once and settles it as payProjectWallet does, and a UPI remainder is a pending payment the admin approves
+// (approveProjectPayment). A combined payment links both parts through one parent id, so a rejected UPI part
+// refunds the wallet part (rejectProjectPayment).
+async function receiveFirstPaymentInSession({ order, walletAmount, upiAmount, upiReference, transactionId, preparedEvidence, session }) {
+  const wallet = cents(walletAmount), upi = cents(upiAmount);
+  const { invoice, installment } = await dueInvoice(order, {}, session);
+  if (wallet < 0 || upi < 0 || wallet + upi !== cents(invoice.amount) - cents(invoice.amountPaid)) fail('The payment does not match the amount due');
+  const combined = wallet > 0 && upi > 0;
+  const installmentNumber = installment?.installmentNumber ?? null;
+  if (upi > 0) {
+    await createPaymentTransaction({ userId: order.userId, transactionId, amount: upi / 100, upiTransactionId: upiReference, paymentMethod: 'upi',
+      orderId: order._id, invoiceId: invoice._id, installmentNumber, isInstallmentPayment: Boolean(installment),
+      description: `${installment ? 'First installment' : 'Payment'} (UPI) for invoice ${invoice.invoiceNumber}`, session, preparedEvidence });
+  }
+  let result = { invoice, order };
+  if (wallet > 0) {
+    const { transaction } = await deductWalletInstant({ userId: order.userId, transactionId: combined ? `${transactionId}-W` : `WPAY${new mongoose.Types.ObjectId()}`,
+      amount: wallet / 100, orderId: order._id, installmentNumber, parentTransactionId: combined ? transactionId : null, sourceType: 'invoice',
+      description: `Payment (wallet) for invoice ${invoice.invoiceNumber}`, session });
+    result = await applyReceived(order, invoice, installment, transaction, session, ACTOR_TYPE.CUSTOMER, false, null);
+  }
+  return { ...result, walletPaid: wallet / 100, upiPending: upi / 100 };
+}
+
 async function rejectProjectPayment(transactionId, actorId, reason) {
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -234,5 +260,5 @@ async function rejectAdminProject({ orderId, actorId, reason }) {
   });
 }
 
-module.exports = { projectForTransaction, approveProjectPayment, payProjectWallet, rejectProjectPayment,
+module.exports = { projectForTransaction, approveProjectPayment, payProjectWallet, rejectProjectPayment, receiveFirstPaymentInSession,
   recordAdminProjectPayment, recordAdminProjectPaymentInSession, rejectAdminProject };
