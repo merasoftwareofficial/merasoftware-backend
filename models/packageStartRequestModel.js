@@ -9,6 +9,10 @@ const schema = new mongoose.Schema({
   // The package as the customer saw it when asking (name and price); the project uses the live package.
   packageSnapshot: { type: mongoose.Schema.Types.Mixed, required: true, immutable: true },
   requestedAt: { type: Date, required: true, immutable: true },
+  // What the person asked for: buy = they started paying on the customize page (the team is told, the customer
+  // is not); callback = they asked the team to contact them (the team and the customer are told). Rows made
+  // before this field behave as callback, the way they always did.
+  kind: { type: String, enum: ['buy', 'callback'], default: 'callback', immutable: true },
   leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'lead', default: null },
   // Messages: sent once (noticesAt), retried after a failure; the team is reminded once a day, at most 3 times.
   noticesAt: { type: Date, default: null },

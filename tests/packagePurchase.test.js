@@ -102,6 +102,8 @@ test('a member pays in full from the wallet: a client keeps their own password, 
   assert.equal(String(request.projectId), String(order._id));
   assert.ok(await Lead.findOne({ convertedToUserId: member._id, status: 'Won' }), 'the new client has a Won lead');
   assert.equal(await EmailHistory.countDocuments({ event: 'package.purchase.admin' }), 1, 'one team notice');
+  assert.equal(await EmailHistory.countDocuments({ event: 'package.purchase.received' }), 1, 'the customer is told once their project is created');
+  assert.equal(await EmailHistory.countDocuments({ event: 'sendProjectCreatedEmail' }), 0, 'not the admin form mail that says work has begun');
 });
 
 test('a client with no wallet money pays by UPI: the project waits for the admin, who approves it', async () => {
@@ -137,6 +139,12 @@ test('a wallet that covers only part pays that part at once; a rejected UPI part
   assert.equal((await Invoice.findById(result.invoiceId).lean()).status, 'partially_paid');
   const pending = await Transaction.findOne({ orderId: result.orderId, status: 'pending' });
   assert.equal(pending.amount, 6000);
+  const told = await EmailDraft.findOne({ event: 'package.purchase.received' }).lean();
+  assert.match(told.text, /Once it is approved, your work will start within 4 to 24 hours/);
+  assert.match(told.text, /Paid from your wallet:\*\* ₹4,000/);
+  assert.match(told.text, /Paid by UPI \(our team will verify it\):\*\* ₹6,000/);
+  assert.match(told.text, /One-time payment of ₹10,000/);
+  assert.match(told.text, /https:\/\/portal\.example\.test\/project-details\//);
   await rejectProjectPayment(pending.transactionId, admin._id, 'Payment not received');
   assert.equal(await wallet(customer), 4000, 'the wallet part comes back');
   assert.equal((await Order.findById(result.orderId).lean()).orderVisibility, 'payment-rejected');

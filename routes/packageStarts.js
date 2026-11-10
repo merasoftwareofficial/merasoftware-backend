@@ -17,7 +17,7 @@ const adminOnly = async req => {
 router.get('/', wrap(req => start.listPackageStarts(req.userId)));
 router.post('/', wrap(async req => {
   sameSiteJson(req);
-  const result = await start.requestPackageStart({ userId: req.userId, packageId: req.body?.packageId, choice: req.body?.choice, countryCode: req.body?.countryCode, phone: req.body?.phone });
+  const result = await start.requestPackageStart({ userId: req.userId, packageId: req.body?.packageId, choice: req.body?.choice, countryCode: req.body?.countryCode, phone: req.body?.phone, kind: req.body?.kind });
   if (result.requested) setImmediate(() => start.deliverPackageStartNotices({ requestId: result.request.id }).catch(error => console.error('[package start notices]', error.message)));
   return result;
 }));

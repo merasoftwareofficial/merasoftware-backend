@@ -133,7 +133,9 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   const fresh = await User.findById(userId);
   const after = async (label, work) => { try { await work(); } catch (error) { console.error(`[package purchase] ${label}:`, error.message); } };
   if (promoted) await after('Won lead', () => require('./wonLead').ensureWonLead(fresh));
-  await after('project mail', () => require('./emailService').sendProjectCreatedEmail(fresh, order, invoice));
+  // The customer's mail is the package purchase one (it says what happens next), not the admin form's "work has begun".
+  await after('project mail', () => require('./emailController').sendReservationMail('package.purchase.received', { packageName: commercial.agreement.package?.name,
+    order, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending, invoiceNumber: invoice?.invoiceNumber }, fresh, `package-purchase-received:${order._id}`));
   await after('team notice', () => require('./emailController').sendReservationMail('package.purchase.admin', { packageName: commercial.agreement.package?.name,
     price: finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending,
     upiReference: purchase.upiPending > 0 ? upiReference : '' }, fresh, `package-purchase:${order._id}`));

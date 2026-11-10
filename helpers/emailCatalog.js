@@ -55,6 +55,7 @@ const events = [
   ['package.start.request.admin', 'Offers', 'Package start request (admin)', 'Package start request'],
   ['package.start.request.received', 'Offers', 'Package start request received', 'Package start request'],
   ['package.purchase.admin', 'Offers', 'Package project bought (admin)', 'Package start request'],
+  ['package.purchase.received', 'Offers', 'Package project created (customer)', 'Package start request'],
   ['auth.otp', 'Account', 'Login OTP'],
   ['website.subscription.confirm', 'Website', 'Subscription confirmation', 'Subscription'],
   ['website.subscription.manage', 'Website', 'Subscription management', 'Subscription'],
@@ -87,6 +88,8 @@ const SYSTEM_TRIGGERED = new Set(['lead.finalMessageExpired', 'sendUploadDeliver
   'package.start.request.admin', 'package.start.request.received',
   // A customer's own paid package purchase (helpers/packagePurchase.js) tells the team the moment it commits.
   'package.purchase.admin',
+  // ...and tells the customer their project is created (WhatsApp unless an admin changes Send via).
+  'package.purchase.received',
   'plan.started', 'plan.payment.received', 'plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected', 'plan.work_update']);
 // Mail addressed to admins or a developer. Every other action reaches a customer or a lead.
 const TEAM = new Set(['plan.request.admin', 'sendUpdateRequestNotification', 'sendUploadDeliveryStuck', 'sendDeveloperAssignmentEmail',

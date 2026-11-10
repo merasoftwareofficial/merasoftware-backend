@@ -7,18 +7,23 @@ const { parsePhone } = require('./phoneNumber');
 
 // "Start my project" on a package page without a running offer (merasoftware/src/docs/package-offers.md,
 // owner decisions 7 Nov 2026). The same steps as the offer card's Start (reservationStart.js), without a
-// reservation: the person's one lead gets a follow-up line, the team and the customer get a message, and
-// the team is reminded once a day (at most 3 times) until it creates the project or closes the request.
+// reservation: the person's one lead gets a follow-up line, the team gets a message, and the team is reminded
+// once a day (at most 3 times) until it creates the project or closes the request. Two kinds (model `kind`):
+// a callback also tells the customer that the team will contact them; a buy (the customize page's "Get this
+// package", which goes on to the payment popup) tells the team only, and the customer hears when the project is
+// created (packagePurchase.js).
 // Behind PACKAGE_START_REQUESTS_ENABLED until it is tested on a real phone.
 const DAY = 24 * 3600000;
 const MAX_ALERTS = 3;
 const LOCK_MS = 2 * 60 * 1000;
 const RETRY_MS = 5 * 60 * 1000;
+const KINDS = ['buy', 'callback'];
 const enabled = () => process.env.PACKAGE_START_REQUESTS_ENABLED === 'true';
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
 
 const requestView = row => row && ({
   id: String(row._id), packageId: row.packageId, title: row.packageSnapshot?.name || row.packageId,
+  kind: row.kind || 'callback',
   price: row.packageSnapshot?.price ?? null, category: row.packageSnapshot?.category || null, choice: row.packageSnapshot?.choice || null,
   quote: row.packageSnapshot?.quote || null, requestedAt: row.requestedAt, closedAt: row.closedAt || null,
   closedReason: row.closedReason || null, projectId: row.projectId ? String(row.projectId) : null,
@@ -42,9 +47,10 @@ const choiceFromQuote = quote => (quote.billing === 'monthly'
   ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths, files: quote.monthly.files, updates: quote.monthly.updatesPerMonth }
   : { paymentOption: quote.paymentOption });
 
-async function requestPackageStart({ userId, packageId, choice, countryCode, phone }) {
+async function requestPackageStart({ userId, packageId, choice, countryCode, phone, kind = 'callback' }) {
   if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
   if (!safeId(packageId)) fail('Choose a package');
+  if (!KINDS.includes(kind)) fail('Choose how you want to start this package');
   const enteredPhone = phone ? parsePhone({ countryCode, phone }) : null;
   await activeOwner(userId);
   // A repeat click returns the open request; it never sends its messages again.
@@ -82,7 +88,7 @@ async function requestPackageStart({ userId, packageId, choice, countryCode, pho
         lead = (await require('./personLead').linkPersonLead(user, { session, source: 'Package start request' })).lead;
         if (lead && !lead.phone) { lead.phone = user.phone; await lead.save({ session }); }
       }
-      [created] = await StartRequest.create([{ userId, packageId, requestedAt: new Date(), leadId: lead?._id || null,
+      [created] = await StartRequest.create([{ userId, packageId, kind, requestedAt: new Date(), leadId: lead?._id || null,
         packageSnapshot: { id: item.id, name: item.name, category: item.category, regularPrice: item.regularPrice, price,
           ...(quoted ? { billing: quoted.billing, choice: choiceFromQuote(quoted), quote: { finalPrice: quoted.finalPrice, dueNow: quoted.dueNow,
             offerSlug: quoted.offer?.slug || null, ...(quoted.monthly ? { cyclePrice: quoted.monthly.cyclePrice, totalCycles: quoted.monthly.totalCycles } : {}) } } : {}) } }], { session });
@@ -99,7 +105,8 @@ async function requestPackageStart({ userId, packageId, choice, countryCode, pho
     const lead = client ? await ensureWonLead(await User.findById(userId)) : await Lead.findById(created.leadId);
     if (lead) {
       const now = new Date();
-      await Lead.updateOne({ _id: lead._id }, { $push: { followUps: { note: `Wants to start the project on the package ${item.name} `
+      const wording = kind === 'buy' ? 'Started buying the package' : 'Wants to start the project on the package';
+      await Lead.updateOne({ _id: lead._id }, { $push: { followUps: { note: `${wording} ${item.name} `
         + `(₹${Number(price).toLocaleString('en-IN')}). Requested from the package page.`, badge: lead.status, date: now, createdAt: now } } });
       if (!created.leadId) await StartRequest.updateOne({ _id: created._id }, { $set: { leadId: lead._id } });
     }
@@ -113,7 +120,8 @@ async function messageContext(row, extra = {}) {
   return { user, request: { ...row, leadId: fresh?.leadId || row.leadId, isClient: require('./wonLead').isClient(user), ...extra } };
 }
 
-// Sends each request's two messages once (dedupe keys). Called right after the request and by the job.
+// Sends each request's messages once (dedupe keys): the team's always, the customer's only for a callback.
+// Called right after the request and by the job.
 async function deliverPackageStartNotices({ requestId = null, now = new Date(), limit = 10 } = {}) {
   if (!enabled()) return [];
   const rows = await StartRequest.find({ ...(requestId ? { _id: requestId } : {}), noticesAt: null,
@@ -128,7 +136,7 @@ async function deliverPackageStartNotices({ requestId = null, now = new Date(), 
       const { user, request } = await messageContext(row);
       const send = require('./emailController').sendReservationMail;
       const team = await send('package.start.request.admin', request, user, `package-start-request:${row._id}`);
-      const customer = user && !user.deletedAt && user.isActive !== false
+      const customer = row.kind !== 'buy' && user && !user.deletedAt && user.isActive !== false
         ? await send('package.start.request.received', request, user, `package-start-received:${row._id}`) : 'not-sent';
       await StartRequest.updateOne({ _id: row._id }, { $set: { noticesAt: new Date(), noticeFailure: '' } });
       results.push({ id: String(row._id), team, customer });

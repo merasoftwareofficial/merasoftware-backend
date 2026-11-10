@@ -68,6 +68,15 @@ function upgradeMail(user, order) {
   if (!user?.email && !user?.phone) return null;
   return { to: user.email ? [user.email] : [], phone: user.phone, values: { name: text(user.name), project: getOrderDisplayName(order, 'project'), link: projectPage(order) } };
 }
+// How a project is paid, in one sentence (free, one-time or installments): the project-created mail and the
+// package purchase mail say it the same way.
+function projectPaymentPlan(order) {
+  const total = Number(order.totalAmount || order.price || 0);
+  if (total === 0) return 'This project is FREE — nothing is due.';
+  const installments = Array.isArray(order.installments) ? order.installments : [];
+  if (order.isPartialPayment && installments.length) return `Payable in ${installments.length} installments: ${installments.map(item => money(item.amount)).join(' + ')}.`;
+  return `One-time payment of ${money(total)}.`;
+}
 
 const definitions = {
   // --- Leads ------------------------------------------------------------------------------
@@ -668,11 +677,8 @@ const definitions = {
       if (!user?.email) return null;
       const total = Number(order.totalAmount || order.price || 0);
       const isFree = total === 0;
-      const installments = Array.isArray(order.installments) ? order.installments : [];
       const paidNow = Number(order.paidAmount || 0);
-      let paymentPlan = `One-time payment of ${money(total)}.`;
-      if (isFree) paymentPlan = 'This project is FREE — nothing is due.';
-      else if (order.isPartialPayment && installments.length) paymentPlan = `Payable in ${installments.length} installments: ${installments.map(item => money(item.amount)).join(' + ')}.`;
+      const paymentPlan = projectPaymentPlan(order);
       const due = `${money(invoice?.amount ?? total)}${invoice?.invoiceNumber ? ` (invoice ${invoice.invoiceNumber})` : ''}`;
       return { to: [user.email], values: {
         name: user.name || 'Customer', project: getOrderDisplayName(order), price: isFree ? 'FREE' : money(total),
@@ -1242,18 +1248,43 @@ definitions['offer.start.request.received'] = {
 
 // "Start my project" on a package page without an offer (helpers/packageStart.js). No price is held.
 const packagePageLink = request => link(process.env.PORTFOLIO_WEBSITE_URL, `/package/${encodeURIComponent(request.packageId)}`);
+// What the customer chose on the customize page, in words, from the request's saved choice (packageStart.js).
+const PACKAGE_PAYMENT_WORDS = { full: 'Full payment', installments_2: '2 installments (50% + 50%)', installments_3: '3 installments (30% + 30% + 40%)' };
+function packageChoiceWords(snapshot) {
+  const choice = snapshot?.choice;
+  if (!choice) return '';
+  if (choice.paymentOption) return PACKAGE_PAYMENT_WORDS[choice.paymentOption] || '';
+  const length = choice.tenureMonths ? `for ${choice.tenureMonths} month${choice.tenureMonths === 1 ? '' : 's'}` : '';
+  const files = choice.files && choice.updates ? `${choice.files} files × ${choice.updates} update${choice.updates === 1 ? '' : 's'} a month` : '';
+  return [CYCLE_WORDS[choice.billingCycle], length, files].filter(Boolean).join(', ');
+}
 // To the team, once per request, and again after each full day nobody acted (at most 3 times).
+const PACKAGE_START_INTRO = {
+  buy: 'A customer started a package from the website. If they complete the payment, the project is created by itself. '
+    + 'Otherwise follow up, create the project on this package in the portal, or close the request in their Reserved offers.',
+  callback: 'A customer wants to start their project on a package. Create the project on this package in the portal, '
+    + 'or close the request in their Reserved offers.',
+};
+const PACKAGE_START_ADMIN_BEFORE_CHOICE = lines('A customer wants to start their project on a package. Create the project on this package in the portal,',
+  'or close the request in their Reserved offers.', '',
+  '{{waiting}}', '',
+  '**Customer:** {{customerName}}', '**Phone:** {{phone}}', '**Email:** {{customerEmail}}', '**Account:** {{account}}', '',
+  '**Package:** {{packageName}}', '**Package price:** {{price}}', '**Requested on:** {{requestedAt}}', '',
+  '**Open the lead:** {{leadLink}}', '', ...SYSTEM_SIGN_OFF);
 definitions['package.start.request.admin'] = {
   subject: 'Start project request - {{packageName}}',
-  text: lines('A customer wants to start their project on a package. Create the project on this package in the portal,',
-    'or close the request in their Reserved offers.', '',
+  text: lines('{{intro}}', '',
     '{{waiting}}', '',
     '**Customer:** {{customerName}}', '**Phone:** {{phone}}', '**Email:** {{customerEmail}}', '**Account:** {{account}}', '',
-    '**Package:** {{packageName}}', '**Package price:** {{price}}', '**Requested on:** {{requestedAt}}', '',
+    '**Package:** {{packageName}}', '**Package price:** {{price}}', '**Their choice:** {{choice}}', '**To pay first:** {{dueNow}}', '**Requested on:** {{requestedAt}}', '',
     '**Open the lead:** {{leadLink}}', '', ...SYSTEM_SIGN_OFF),
+  replaces: [PACKAGE_START_ADMIN_BEFORE_CHOICE],
   variables: { customerName: CUSTOMER_NAME, customerEmail: CUSTOMER_EMAIL, phone: detail('Phone', '+919876543210'),
     account: detail('Account', 'Client', 'Client, or Member (needs a client account before the project)'),
     packageName: detail('Package', 'Business Starter'), price: detail('Package price', '₹9,999'),
+    intro: detail('Introduction', PACKAGE_START_INTRO.buy, 'Says whether the customer started buying the package or asked the team to start it for them'),
+    choice: detail('Their choice', '2 installments (50% + 50%)', 'How they chose to buy: payment option, or billing cycle, length, files and updates; empty on an older request'),
+    dueNow: detail('To pay first', '₹5,000', 'The first payment of their choice; empty on an older request'),
     requestedAt: detail('Requested on', '7 Nov 2026, 10:19 am IST'),
     leadLink: detail('Lead link', 'https://portal.example.com/admin-panel/leads/123', "The person's lead in the admin Leads list") },
   blocks: { waiting: { label: 'Still waiting', hint: 'Only in the daily reminder: how long the request has waited.',
@@ -1265,6 +1296,9 @@ definitions['package.start.request.admin'] = {
       customerName: text(user.name), customerEmail: text(user.email), phone: text(user.phone),
       account: request.isClient ? 'Client' : 'Member (needs a client account before the project)',
       packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price),
+      intro: PACKAGE_START_INTRO[request.kind === 'buy' ? 'buy' : 'callback'],
+      choice: packageChoiceWords(request.packageSnapshot),
+      dueNow: request.packageSnapshot?.quote?.dueNow > 0 ? money(request.packageSnapshot.quote.dueNow) : '',
       requestedAt: moment(request.requestedAt),
       leadLink: adminLink(request.leadId ? `/admin-panel/leads/${request.leadId}` : '/admin-panel/leads'),
     }, blocks: { waiting: days ? noteBlock(`This request has been waiting ${days} day${days === 1 ? '' : 's'}.`) : { html: '', text: '' } } };
@@ -1283,6 +1317,36 @@ definitions['package.start.request.received'] = {
     const href = packagePageLink(request);
     return { to: [user.email], requiredLinks: [href], values: {
       name: text(user.name), packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price), link: href,
+    } };
+  },
+};
+// To the customer who bought a package project on the website and paid its first payment (helpers/packagePurchase.js),
+// once per project. The project exists but is approved only by money: the wallet part at once, a UPI part by the
+// team, so this says what happens next instead of "work has begun".
+definitions['package.purchase.received'] = {
+  subject: 'Your project has been created - {{packageName}}',
+  text: lines('Hello {{name}},', '',
+    'Your project on {{packageName}} has been created. Once it is approved, your work will start within 4 to 24 hours.', '',
+    '## Project Details',
+    '**Project:** {{project}}', '**Price:** {{price}}', '**Offer:** {{offer}}', '',
+    '## Payment',
+    '{{paymentPlan}}', '**Paid from your wallet:** {{walletPaid}}', '**Paid by UPI (our team will verify it):** {{upiAmount}}', '**Invoice:** {{invoiceNumber}}', '',
+    "You can follow your project's progress here: {{projectLink}}", '', ...SIGN_OFF),
+  variables: { name: NAME, packageName: detail('Package', 'Business Starter'), project: PROJECT,
+    price: detail('Price', '₹9,999', 'The project price'), offer: detail('Offer title', 'Diwali Offer', 'Empty when the project has no offer'),
+    paymentPlan: detail('Payment plan', 'Payable in 2 installments: ₹5,000 + ₹4,999.', 'One sentence: one-time or installments'),
+    walletPaid: detail('Paid from wallet', '₹1,000', 'Empty when nothing came from the wallet'),
+    upiAmount: detail('Paid by UPI', '₹4,000', 'Empty when the wallet paid everything'),
+    invoiceNumber: INVOICE_NUMBER, projectLink: UPGRADE_LINK },
+  blocks: {},
+  build(purchase, user) {
+    if (!purchase?.order || (!user?.email && !user?.phone)) return null;
+    const { order } = purchase;
+    return { to: user.email ? [user.email] : [], phone: user.phone, values: {
+      name: text(user.name), packageName: text(purchase.packageName), project: getOrderDisplayName(order), price: money(order.totalAmount || order.price),
+      offer: text(order.projectSnapshot?.offer?.title), paymentPlan: projectPaymentPlan(order),
+      walletPaid: purchase.walletPaid > 0 ? money(purchase.walletPaid) : '', upiAmount: purchase.upiPending > 0 ? money(purchase.upiPending) : '',
+      invoiceNumber: text(purchase.invoiceNumber), projectLink: projectPage(order),
     } };
   },
 };

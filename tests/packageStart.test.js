@@ -125,6 +125,38 @@ test('member: one open request, lead follow-up, team and customer told once', as
   assert.equal(byKey.get('package.start.request.admin').audience, 'team');
   assert.equal(channelFor('package.start.request.received'), 'both');
 });
+test('a buy (Get this package) tells the team with the full choice and never tells the customer; a callback tells both', async () => {
+  await savePackage({ ...item, id: '', paymentOptions: ['full', 'installments_2'] }, true, []);
+  const choice = { paymentOption: 'installments_2' };
+  await assert.rejects(start.requestPackageStart({ userId: member._id, packageId: 'business-starter', choice, kind: 'other' }), /Choose how you want to start/);
+  const bought = await start.requestPackageStart({ userId: member._id, packageId: 'business-starter', choice, kind: 'buy' });
+  assert.equal(bought.requested, true); assert.equal(bought.request.kind, 'buy');
+  assert.equal((await StartRequest.findOne()).kind, 'buy');
+  await start.deliverPackageStartNotices(); await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.admin')).length, 1, 'the team is told once');
+  assert.equal((await history('package.start.request.received')).length, 0, 'the customer is not told');
+  assert.equal(await Queue.countDocuments({ event: 'package.start.request.received' }), 0);
+  const [team] = await Queue.find({ event: 'package.start.request.admin' }).lean();
+  assert.match(team.text, /A customer started a package from the website/);
+  assert.match(team.text, /2 installments \(50% \+ 50%\)/);
+  assert.match(team.text, /Business Starter/);
+  const lead = await Lead.findOne({ reservationUserId: member._id });
+  assert.match(lead.followUps.at(-1).note, /Started buying the package Business Starter/);
+  // Without a kind the request is a callback, as it always was: the customer is told too.
+  const called = await start.requestPackageStart({ userId: customer._id, packageId: 'business-starter', choice });
+  assert.equal(called.request.kind, 'callback');
+  await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.received')).length, 1);
+  const [callTeam] = (await Queue.find({ event: 'package.start.request.admin' }).lean()).slice(-1);
+  assert.match(callTeam.text, /A customer wants to start their project on a package/);
+  // The customer's "project created" mail goes by WhatsApp unless an admin changes Send via; the team's by both.
+  assert.equal(channelFor('package.purchase.received'), 'whatsapp');
+  assert.equal(byKey.get('package.purchase.received').trigger, 'system');
+  assert.equal(byKey.get('package.purchase.received').audience, 'customer');
+  // The daily reminder reaches the team for a buy as well.
+  await age(DAY + 60000); await start.alertPendingPackageStarts();
+  assert.equal((await history('package.start.request.admin')).length, 4, '2 first messages and 2 reminders');
+});
 test('an admin can switch each of the two mails Off in Communication', async () => {
   await savePackage({ ...item, id: '' }, true, []);
   await EmailPolicy.create([{ event: 'package.start.request.admin', mode: 'off' }, { event: 'package.start.request.received', mode: 'off' }]);
