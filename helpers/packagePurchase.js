@@ -73,7 +73,8 @@ async function catalogueForCustomer(userId) {
         mainPrice: item.regularPrice, price: quote.finalPrice, discountAmount: quote.discountAmount,
         offer: quote.offer ? { title: quote.offer.title, endsAt: quote.offer.endsAt } : null };
     });
-  return { enabled: true, packages };
+  // `serverNow`: the portal's offer countdown runs on this clock, not on the visitor's device (as MyOffers does).
+  return { enabled: true, serverNow: new Date().toISOString(), packages };
 }
 
 // The price of one choice on one package: the quote the purchase checks (quoteKey and dueNow come from here).

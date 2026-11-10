@@ -230,3 +230,28 @@ test('choice quote: the very quoteKey and dueNow the purchase accepts', async ()
   process.env.PACKAGE_START_REQUESTS_ENABLED = 'false';
   await assert.rejects(quoteForCustomer(member._id, saved.id, { paymentOption: 'full' }), /not enabled yet/);
 });
+
+// The offer on a card (owner decision 10 Nov 2026): the list carries the offer's end and the server clock, and the
+// offer leaves the list by itself when it ends, so a refreshed list shows the normal price.
+test('catalogue: a running offer shows its price, end and the server clock; once it ends the list has the normal price', async () => {
+  const { catalogueForCustomer } = require('../helpers/packagePurchase');
+  const endsAt = new Date(Date.now() + 1500).toISOString();
+  const offer = { slug: 'summer', title: 'Summer offer', status: 'published', endsAt, applicableCategories: ['standard_websites'], pricingRule: 'fixed_price',
+    offerPrice: 7000, resolvedTerms: ['Offer terms'] };
+  const withOffer = await savePackage({ ...base, name: 'Offer Pack', id: '', offerSlug: 'summer' }, true, [offer]);
+  const live = global.fetch;
+  global.fetch = async url => String(url).includes('/api/offers/live') ? { ok: true, json: async () => ({ offers: [offer], catalogueOffers: [offer], packagePages: [] }) } : live(url);
+  try {
+    const before = await catalogueForCustomer(customer._id);
+    const running = before.packages.find(row => row.id === withOffer.id);
+    assert.equal(running.price, 7000);
+    assert.equal(running.mainPrice, 15000);
+    assert.deepEqual(running.offer, { title: 'Summer offer', endsAt });
+    assert.ok(Math.abs(Date.parse(before.serverNow) - Date.now()) < 5000, 'the server clock is sent');
+    assert.equal(before.packages.find(row => row.id === saved.id).offer, null, 'a package without an offer has none');
+    await new Promise(resolve => setTimeout(resolve, 1700));
+    const after = (await catalogueForCustomer(customer._id)).packages.find(row => row.id === withOffer.id);
+    assert.equal(after.offer, null, 'an ended offer is gone');
+    assert.equal(after.price, 10000, 'the normal price again');
+  } finally { global.fetch = live; }
+});
