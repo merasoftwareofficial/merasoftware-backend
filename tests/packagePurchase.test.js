@@ -197,3 +197,36 @@ test('payment info: the wallet balance and the UPI payee, for an active account 
 test('staff without a client or member role cannot buy', async () => {
   await assert.rejects(buy(admin), /client account/);
 });
+
+// The portal's "Start a Project" list and choice quote (owner decision 10 Nov 2026): the same prices the purchase charges.
+test('catalogue: published one-time packages with the purchase price, nothing internal; empty while the system is off', async () => {
+  await savePackage({ ...MONTHLY, id: '' }, true, []);
+  await savePackage({ ...base, name: 'Hidden Draft', status: 'draft', id: '' }, true, []);
+  const { catalogueForCustomer } = require('../helpers/packagePurchase');
+  const list = await catalogueForCustomer(customer._id);
+  assert.equal(list.enabled, true);
+  assert.deepEqual(list.packages.map(row => row.id), [saved.id], 'only the published one-time package');
+  const row = list.packages[0];
+  assert.equal(row.price, 10000);
+  assert.equal(row.mainPrice, 15000);
+  assert.deepEqual(row.paymentOptions, ['full', 'installments_2']);
+  for (const key of ['linkedPlanIds', 'pricing', 'design', 'pages', 'quoteKey']) assert.ok(!(key in row), `${key} is not sent`);
+  process.env.PACKAGE_START_REQUESTS_ENABLED = 'false';
+  assert.deepEqual(await catalogueForCustomer(customer._id), { enabled: false, packages: [] });
+  await User.updateOne({ _id: customer._id }, { isActive: false });
+  await assert.rejects(catalogueForCustomer(customer._id), /active permanent account/);
+});
+
+test('choice quote: the very quoteKey and dueNow the purchase accepts', async () => {
+  const { quoteForCustomer } = require('../helpers/packagePurchase');
+  const priced = await quoteForCustomer(member._id, saved.id, { paymentOption: 'installments_2' });
+  assert.equal(priced.finalPrice, 10000);
+  assert.equal(priced.dueNow, 5000);
+  const result = await purchasePackage({ userId: member._id, packageId: saved.id, choice: { paymentOption: 'installments_2' }, quoteKey: priced.quoteKey,
+    dueNow: priced.dueNow, creationKey: `purchase-key-${++key}-abcdefghij` });
+  assert.equal(result.dueNow, 5000);
+  await assert.rejects(quoteForCustomer(member._id, saved.id, { paymentOption: 'nope' }), /way to pay/);
+  await assert.rejects(quoteForCustomer(member._id, 'nothing-here', {}), /not available/);
+  process.env.PACKAGE_START_REQUESTS_ENABLED = 'false';
+  await assert.rejects(quoteForCustomer(member._id, saved.id, { paymentOption: 'full' }), /not enabled yet/);
+});

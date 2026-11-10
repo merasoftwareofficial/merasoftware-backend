@@ -29,9 +29,14 @@ const DEFAULT_STARTING_NODE_TITLE = 'Project Started';
 // The UPI payee the website shows for the remainder; the portal's pages hold the same account.
 const payee = () => ({ upiId: process.env.UPI_PAYEE_ID || 'vacomputers.com@okhdfcbank', payeeName: process.env.UPI_PAYEE_NAME || 'VA Computer' });
 
-async function paymentInfo(userId) {
-  const user = await User.findById(userId).select('walletBalance isGuest isActive deletedAt').lean();
+async function activeAccount(userId, select = 'isGuest isActive deletedAt') {
+  const user = await User.findById(userId).select(select).lean();
   if (!user || user.isGuest || user.isActive === false || user.deletedAt) fail('An active permanent account is required', 403);
+  return user;
+}
+
+async function paymentInfo(userId) {
+  const user = await activeAccount(userId, 'walletBalance isGuest isActive deletedAt');
   return { walletBalance: Number(user.walletBalance || 0), ...payee(), enabled: enabled() };
 }
 
@@ -41,6 +46,42 @@ async function quoteForPurchase(item, choice) {
   const quoted = quotePackage(item, offers);
   const priced = quoteChoice(item, quoted, choice || {});
   return { quoted, priced };
+}
+
+const publishedPackage = async packageId => {
+  if (!safeId(packageId)) fail('Choose a package');
+  const item = (await readPackages()).find(row => row.id === packageId && row.status === 'published');
+  if (!item) fail('This package is not available.', 404);
+  return item;
+};
+
+// The portal's "Start a Project" list (owner decision 10 Nov 2026): the published one-time packages a signed-in
+// customer can buy, each with the price the purchase would charge. It reads the same quote as the purchase, so
+// the list, the choice quote and the payment can never disagree. Nothing internal (service references, frozen
+// add-on pricing, page design) is sent. While the package start system is off the list is empty, and the portal
+// shows only its call-back form.
+async function catalogueForCustomer(userId) {
+  await activeAccount(userId);
+  if (!enabled()) return { enabled: false, packages: [] };
+  const offers = (await fetchWebsiteCatalogue()).offers;
+  const packages = (await readPackages())
+    .filter(item => item.status === 'published' && item.billing === 'one_time')
+    .map(item => {
+      const { quote } = quotePackage(item, offers);
+      return { id: item.id, name: item.name, description: item.description, category: item.category, billing: item.billing,
+        portalUploads: item.portalUploads, paymentOptions: item.paymentOptions, inclusions: item.inclusions, terms: quote.terms,
+        mainPrice: item.regularPrice, price: quote.finalPrice, discountAmount: quote.discountAmount,
+        offer: quote.offer ? { title: quote.offer.title, endsAt: quote.offer.endsAt } : null };
+    });
+  return { enabled: true, packages };
+}
+
+// The price of one choice on one package: the quote the purchase checks (quoteKey and dueNow come from here).
+async function quoteForCustomer(userId, packageId, choice) {
+  await activeAccount(userId);
+  if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
+  const item = await publishedPackage(packageId);
+  return (await quoteForPurchase(item, choice)).priced;
 }
 
 async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, creationKey, countryCode, phone, upiTransactionId }) {
@@ -143,4 +184,4 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
     finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending };
 }
 
-module.exports = { purchasePackage, paymentInfo, quoteForPurchase };
+module.exports = { purchasePackage, paymentInfo, quoteForPurchase, catalogueForCustomer, quoteForCustomer };

@@ -21,6 +21,12 @@ router.post('/', wrap(async req => {
   if (result.requested) setImmediate(() => start.deliverPackageStartNotices({ requestId: result.request.id }).catch(error => console.error('[package start notices]', error.message)));
   return result;
 }));
+// The portal's package list and the price of one choice (helpers/packagePurchase.js). Read-only.
+router.get('/catalogue', wrap(req => require('../helpers/packagePurchase').catalogueForCustomer(req.userId)));
+router.patch('/quote', wrap(req => {
+  sameSiteJson(req);
+  return require('../helpers/packagePurchase').quoteForCustomer(req.userId, req.body?.packageId, req.body?.choice);
+}));
 // The customer pays for the package project and it is created with that payment (helpers/packagePurchase.js).
 router.get('/payment-info', wrap(req => require('../helpers/packagePurchase').paymentInfo(req.userId)));
 router.post('/purchase', async (req, res) => {
