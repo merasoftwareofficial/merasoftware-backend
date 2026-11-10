@@ -1304,19 +1304,26 @@ definitions['package.start.request.admin'] = {
     }, blocks: { waiting: days ? noteBlock(`This request has been waiting ${days} day${days === 1 ? '' : 's'}.`) : { html: '', text: '' } } };
   },
 };
+// To the customer who asked for a callback ("Arrange a callback"), once per request. Never repeated: only the team is reminded.
+const PACKAGE_START_RECEIVED_BEFORE_CALLBACK = lines('Hello {{name}},', '', 'We have received your request to start your project on {{packageName}}.', '',
+  'Our team will contact you shortly to set up your project.', '',
+  '**Package price:** {{price}}', '', '**Your package:** {{link}}', '', ...SIGN_OFF);
 definitions['package.start.request.received'] = {
   subject: 'We have received your request to start your project',
-  text: lines('Hello {{name}},', '', 'We have received your request to start your project on {{packageName}}.', '',
-    'Our team will contact you shortly to set up your project.', '',
-    '**Package price:** {{price}}', '', '**Your package:** {{link}}', '', ...SIGN_OFF),
+  text: lines('Hello {{name}},', '', 'We have received your callback request for {{packageName}}.', '',
+    'Our team will call you shortly to help you start your project.', '',
+    '**Package price:** {{price}}', '**Your choice:** {{choice}}', '', '**Your package:** {{link}}', '', ...SIGN_OFF),
+  replaces: [PACKAGE_START_RECEIVED_BEFORE_CALLBACK],
   variables: { name: detail('Name', 'Client'), packageName: detail('Package', 'Business Starter'), price: detail('Package price', '₹9,999'),
+    choice: detail('Your choice', '2 installments (50% + 50%)', 'How they chose to buy: payment option, or billing cycle, length, files and updates; empty on an older request'),
     link: detail('Package page', 'https://www.merasoftware.com/package/business-starter', 'The package page') },
   blocks: {},
   build(request, user) {
     if (!user?.email || !process.env.PORTFOLIO_WEBSITE_URL) return null;
     const href = packagePageLink(request);
     return { to: [user.email], requiredLinks: [href], values: {
-      name: text(user.name), packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price), link: href,
+      name: text(user.name), packageName: text(request.packageSnapshot?.name), price: money(request.packageSnapshot?.price),
+      choice: packageChoiceWords(request.packageSnapshot), link: href,
     } };
   },
 };

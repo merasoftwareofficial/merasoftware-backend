@@ -47,15 +47,17 @@ const choiceFromQuote = quote => (quote.billing === 'monthly'
   ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths, files: quote.monthly.files, updates: quote.monthly.updatesPerMonth }
   : { paymentOption: quote.paymentOption });
 
-async function requestPackageStart({ userId, packageId, choice, countryCode, phone, kind = 'callback' }) {
+async function requestPackageStart(input, retry = true) {
+  const { userId, packageId, choice, countryCode, phone, kind = 'callback' } = input;
   if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
   if (!safeId(packageId)) fail('Choose a package');
   if (!KINDS.includes(kind)) fail('Choose how you want to start this package');
   const enteredPhone = phone ? parsePhone({ countryCode, phone }) : null;
   await activeOwner(userId);
-  // A repeat click returns the open request; it never sends its messages again.
+  // A repeat click returns the open request; it never sends its messages again. The one exception: a callback
+  // asked for while a buy is open replaces it (below), because the customer now wants the team to contact them.
   const open = await StartRequest.findOne({ userId, packageId, closedAt: null }).lean();
-  if (open) return { request: requestView(open), requested: false };
+  if (open && !(open.kind === 'buy' && kind === 'callback')) return { request: requestView(open), requested: false };
   const item = (await readPackages()).find(row => row.id === packageId && row.status === 'published');
   if (!item) fail('This package is not available.', 404);
   // A package with purchase settings is asked for with the customer's choice, priced by the one choice
@@ -81,6 +83,11 @@ async function requestPackageStart({ userId, packageId, choice, countryCode, pho
       }
       // Serialize concurrent requests for one owner, so two requests cannot create two leads.
       await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
+      // A callback closes the person's open buy on this package and is made as a new request below, so its
+      // messages, reminders and lead note all start fresh. If the new request fails, this close is undone.
+      if (kind === 'callback') {
+        await StartRequest.updateOne({ userId, packageId, closedAt: null, kind: 'buy' }, { $set: { closedAt: new Date(), closedReason: 'callback_requested' } }, { session });
+      }
       client = isClient(user);
       // A member's one lead (helpers/personLead.js), as an offer reservation links it; a client's is set after the commit.
       let lead = null;
@@ -94,10 +101,12 @@ async function requestPackageStart({ userId, packageId, choice, countryCode, pho
             offerSlug: quoted.offer?.slug || null, ...(quoted.monthly ? { cyclePrice: quoted.monthly.cyclePrice, totalCycles: quoted.monthly.totalCycles } : {}) } } : {}) } }], { session });
     });
   } catch (error) {
-    // Two clicks at once: the unique open request lets one win; the other returns it.
+    // Two clicks at once: the unique open request lets one win; the other returns it. A callback that lost to a
+    // buy is asked again once, so it replaces that buy instead of vanishing.
     if (error.code !== 11000) throw error;
     const row = await StartRequest.findOne({ userId, packageId, closedAt: null }).lean();
     if (!row) throw error;
+    if (retry && kind === 'callback' && row.kind === 'buy') return requestPackageStart(input, false);
     return { request: requestView(row), requested: false };
   }
   try {

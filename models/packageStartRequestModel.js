@@ -21,7 +21,8 @@ const schema = new mongoose.Schema({
   alerts: { type: Number, default: 0 },
   // Closed when the team creates a project on this package for this person, or closes it by hand.
   closedAt: { type: Date, default: null },
-  closedReason: { type: String, enum: ['project_created', 'closed_by_team', null], default: null },
+  // callback_requested: an open buy that the customer replaced by asking for a callback.
+  closedReason: { type: String, enum: ['project_created', 'closed_by_team', 'callback_requested', null], default: null },
   closedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', default: null },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'order', default: null },
 }, { timestamps: true });

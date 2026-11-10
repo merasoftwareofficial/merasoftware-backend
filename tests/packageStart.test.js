@@ -117,7 +117,8 @@ test('member: one open request, lead follow-up, team and customer told once', as
   await start.deliverPackageStartNotices(); await start.deliverPackageStartNotices();
   assert.equal((await history('package.start.request.admin')).length, 1);
   const [told] = await Queue.find({ event: 'package.start.request.received' }).lean();
-  assert.match(told.text, /We have received your request to start your project on Business Starter/);
+  assert.match(told.text, /We have received your callback request for Business Starter/);
+  assert.match(told.text, /Our team will call you shortly/);
   assert.match(told.text, /https:\/\/website\.example\.test\/package\/business-starter/);
   const lead = await Lead.findOne({ reservationUserId: member._id });
   assert.match(lead.followUps.at(-1).note, /Wants to start the project on the package Business Starter \(₹9,999\)/);
@@ -156,6 +157,61 @@ test('a buy (Get this package) tells the team with the full choice and never tel
   // The daily reminder reaches the team for a buy as well.
   await age(DAY + 60000); await start.alertPendingPackageStarts();
   assert.equal((await history('package.start.request.admin')).length, 4, '2 first messages and 2 reminders');
+});
+const askAs = (user, kind, packageId = 'business-starter') => start.requestPackageStart({ userId: user._id, packageId, kind, choice: { paymentOption: 'full' } });
+test('a callback asked for while a buy is open replaces it: the team and the customer are told, reminders start again', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  const bought = await askAs(member, 'buy');
+  await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.received')).length, 0);
+  const called = await askAs(member, 'callback');
+  assert.equal(called.requested, true); assert.equal(called.request.kind, 'callback');
+  assert.notEqual(called.request.id, bought.request.id, 'a new request');
+  const old = await StartRequest.findById(bought.request.id).lean();
+  assert.equal(old.closedReason, 'callback_requested'); assert.ok(old.closedAt);
+  assert.equal(await StartRequest.countDocuments({ closedAt: null }), 1, 'one open request');
+  await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.admin')).length, 2, 'the buy message and the callback message');
+  assert.equal((await history('package.start.request.received')).length, 1, 'the customer is told once, for the callback');
+  const lead = await Lead.findOne({ reservationUserId: member._id });
+  assert.match(lead.followUps.at(-1).note, /Wants to start the project on the package Business Starter/);
+  // The new request has its own clock: no reminder before a full day after the callback.
+  await start.alertPendingPackageStarts();
+  assert.equal((await StartRequest.findById(called.request.id)).alerts, 0);
+});
+test('a buy asked for while a callback is open changes nothing; a repeated callback changes nothing', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  const called = await askAs(member, 'callback');
+  await start.deliverPackageStartNotices();
+  const again = await askAs(member, 'buy');
+  assert.equal(again.requested, false); assert.equal(again.request.id, called.request.id); assert.equal(again.request.kind, 'callback');
+  assert.equal((await askAs(member, 'callback')).requested, false);
+  await start.deliverPackageStartNotices();
+  assert.equal(await StartRequest.countDocuments(), 1);
+  assert.equal((await history('package.start.request.admin')).length, 1);
+  assert.equal((await history('package.start.request.received')).length, 1);
+});
+test('a buy and a callback at the same moment end as one open callback, told once', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  await Promise.all([askAs(customer, 'buy'), askAs(customer, 'callback')]);
+  const open = await StartRequest.find({ closedAt: null }).lean();
+  assert.equal(open.length, 1); assert.equal(open[0].kind, 'callback');
+  await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.received')).length, 1);
+});
+test('the customer hears once; every reminder goes to the team only', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  await askAs(customer, 'callback'); await start.deliverPackageStartNotices();
+  for (let day = 1; day <= 5; day++) { await age(DAY + 60000); await start.alertPendingPackageStarts(); }
+  const mine = '919876500002';
+  const toCustomer = await Queue.find({ to: mine, event: /package\.start/ }).lean();
+  assert.deepEqual(toCustomer.map(row => row.event), ['package.start.request.received'], 'one WhatsApp, no reminders');
+  const sent = await history('package.start.request.received');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].to, ['client@example.test']);
+  const reminders = (await history('package.start.request.admin')).filter(row => /package-start-pending/.test(row.dedupeKey));
+  assert.equal(reminders.length, 3, 'at most 3 reminders');
+  assert.ok(reminders.every(row => !row.to.includes('client@example.test')), 'to the team, never the customer');
 });
 test('an admin can switch each of the two mails Off in Communication', async () => {
   await savePackage({ ...item, id: '' }, true, []);

@@ -74,7 +74,7 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
   ]);
   // Open "Start my project" requests on packages without an offer (helpers/packageStart.js), oldest first.
   const starts = await require('../models/packageStartRequestModel').find({ closedAt: null }).sort({ requestedAt: 1 }).limit(limit)
-    .select('userId packageSnapshot requestedAt').lean();
+    .select('userId packageSnapshot requestedAt kind').lean();
   const users = await User.find({ _id: { $in: [...running, ...starts].map(row => row.userId) } }).select('name email phone').lean();
   const runningCount = running.length < limit ? running.length
     : await Reservation.countDocuments(runningQuery);
@@ -96,7 +96,7 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
       const user = users.find(item => String(item._id) === String(row.userId));
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '',
         package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, choice: row.packageSnapshot?.choice || null,
-        billing: row.packageSnapshot?.billing || null, userId: String(row.userId), requestedAt: row.requestedAt };
+        billing: row.packageSnapshot?.billing || null, kind: row.kind || 'callback', userId: String(row.userId), requestedAt: row.requestedAt };
     }),
   };
 }
