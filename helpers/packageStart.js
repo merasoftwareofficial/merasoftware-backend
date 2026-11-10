@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const StartRequest = require('../models/packageStartRequestModel');
 const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
-const { readPackages, fail, quotePackageChoice } = require('./salesPackages');
+const { readPackages, fail, quotePackage, quotePackageChoice } = require('./salesPackages');
 const { parsePhone } = require('./phoneNumber');
 
 // "Start my project" on a package page without a running offer (merasoftware/src/docs/package-offers.md,
@@ -63,12 +63,19 @@ async function requestPackageStart(input, retry = true) {
   // A package with purchase settings is asked for with the customer's choice, priced by the one choice
   // quote (offer included). The price is a record of what the customer saw; the project is always priced
   // from the live package when the team creates it (projectPricing.js). Older packages keep their price.
+  // A callback asked for on the package or offer page carries no choice (the customer chose nothing yet): it is
+  // recorded at the package's price now, with the running offer when there is one. Only a buy needs the choice.
   let quoted = null;
-  if (item.billing) {
-    if (!choice || typeof choice !== 'object') fail('Choose how you want to buy this package');
+  let price = item.discountedPrice ?? item.regularPrice;
+  const hasChoice = !!choice && typeof choice === 'object';
+  if (item.billing && (hasChoice || kind === 'buy')) {
+    if (!hasChoice) fail('Choose how you want to buy this package');
     quoted = quotePackageChoice(item, (await require('./websiteOffers').fetchWebsiteCatalogue()).offers, choice);
+    price = quoted.finalPrice;
+  } else if (item.billing) {
+    // The website being unreachable never stops a callback: the package's normal price is recorded then.
+    try { price = quotePackage(item, (await require('./websiteOffers').fetchWebsiteCatalogue()).offers).quote.finalPrice; } catch { /* normal price */ }
   }
-  const price = quoted ? quoted.finalPrice : item.discountedPrice ?? item.regularPrice;
   const { isClient, ensureWonLead } = require('./wonLead');
   let created, client = false;
   try {

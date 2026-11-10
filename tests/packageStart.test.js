@@ -258,3 +258,48 @@ test('creating the project on the package closes the open request', async () => 
   assert.ok(row.projectId);
   assert.equal((await start.listPackageStarts(customer._id)).requests[0].status, 'closed');
 });
+
+// --- A callback from the package or offer page carries no choice (owner decision 10 Nov 2026) ---------------------
+// The page's "Arrange a callback" sends only the package: the customer has chosen nothing yet. Only a buy needs the choice.
+const callbackOnly = (user, packageId = 'business-starter') => start.requestPackageStart({ userId: user._id, packageId, kind: 'callback' });
+test('a callback without a choice is recorded and tells the team and the customer, on a package with purchase settings', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  const called = await callbackOnly(member);
+  assert.equal(called.requested, true); assert.equal(called.request.kind, 'callback');
+  assert.equal(called.request.price, 9999, 'the package price without an offer');
+  assert.equal(called.request.choice, null); assert.equal(called.request.quote, null);
+  await start.deliverPackageStartNotices();
+  assert.equal((await history('package.start.request.admin')).length, 1, 'the team is told');
+  assert.equal((await history('package.start.request.received')).length, 1, 'the customer is told');
+  const lead = await Lead.findOne({ reservationUserId: member._id });
+  assert.match(lead.followUps.at(-1).note, /Wants to start the project on the package Business Starter \(₹9,999\)/);
+});
+test('a callback without a choice on a package with a running offer is recorded at the offer price', async () => {
+  const offer = { slug: 'summer', title: 'Summer offer', status: 'published', endsAt: new Date(Date.now() + 5 * DAY).toISOString(), applicableCategories: ['standard_websites'],
+    pricingRule: 'fixed_price', offerPrice: 7999, resolvedTerms: [] };
+  await savePackage({ ...item, id: '', offerSlug: 'summer' }, true, [offer]);
+  const live = global.fetch;
+  global.fetch = async url => String(url).includes('/api/offers/live') ? { ok: true, json: async () => ({ offers: [offer], catalogueOffers: [offer], packagePages: [] }) } : live(url);
+  try {
+    const called = await callbackOnly(member);
+    assert.equal(called.request.price, 7999, 'the offer price');
+    await start.deliverPackageStartNotices();
+    assert.equal((await history('package.start.request.admin')).length, 1);
+  } finally { global.fetch = live; }
+});
+test('a callback without a choice is still recorded when the website cannot be reached', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  const live = global.fetch;
+  global.fetch = async url => { if (String(url).includes('/api/offers/live')) throw new Error('offline'); return live(url); };
+  try {
+    const called = await callbackOnly(member);
+    assert.equal(called.requested, true); assert.equal(called.request.price, 9999, 'the normal price');
+  } finally { global.fetch = live; }
+});
+test('a buy still needs the choice; a callback with a bad choice is still refused', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  await assert.rejects(start.requestPackageStart({ userId: member._id, packageId: 'business-starter', kind: 'buy' }), /Choose how you want to buy this package/);
+  await assert.rejects(start.requestPackageStart({ userId: member._id, packageId: 'business-starter', kind: 'buy', choice: null }), /Choose how you want to buy this package/);
+  await assert.rejects(start.requestPackageStart({ userId: member._id, packageId: 'business-starter', kind: 'callback', choice: { paymentOption: 'nope' } }), /Choose a way to pay/);
+  assert.equal(await StartRequest.countDocuments(), 0);
+});
