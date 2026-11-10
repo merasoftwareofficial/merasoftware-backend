@@ -4,7 +4,7 @@ const productModel = require("../../models/productModel");
 const orderModel = require("../../models/orderProductModel");
 const { requireCategoryForNewProject } = require("../../helpers/projectCategories");
 const { persistAdminProject } = require('../../helpers/adminProjectCreation');
-const { featureCatalogueFilter } = require("../../helpers/featureCatalogue");
+const { sellableFeatureFilter, featureLines } = require("../../helpers/featureCatalogue");
 const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
 const { sendProjectCreatedEmail } = require("../../helpers/emailService");
 const { resolveProjectPricing } = require('../../helpers/projectPricing');
@@ -136,7 +136,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     // directly, not only through the admin form that applies the same filter client-side.
     const featureDocs = requestedIds.length
       ? await productModel
-          .find({ _id: { $in: requestedIds }, isHidden: { $ne: true }, retiredAt: null, archivedAt: null, ...featureCatalogueFilter(category) })
+          .find({ _id: { $in: requestedIds }, ...sellableFeatureFilter(category) })
           .select("serviceName sellingPrice price isQuantityBased compatibleWith")
           .lean()
       : [];
@@ -146,20 +146,7 @@ const adminCreateProjectOrderController = async (req, res) => {
 
     // Only a quantity-based feature may be bought more than once — decided by the
     // catalogue flag the admin sets in the Features form, never by the feature's name.
-    const clientProjectFeatures = featureDocs.map((feature) => {
-      const unitPrice = feature.sellingPrice ?? feature.price ?? 0;
-      const rawQuantity = featureQuantities[String(feature._id)];
-      const requestedQuantity = rawQuantity === undefined ? 1 : Number(rawQuantity);
-      if (feature.isQuantityBased && (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 1000)) throw Object.assign(new Error('Feature quantity must be a whole number between 1 and 1000'), { statusCode: 400 });
-      const quantity = feature.isQuantityBased ? Math.max(1, requestedQuantity) : 1;
-      return {
-        featureId: feature._id,
-        name: feature.serviceName,
-        unitPrice,
-        price: Math.round(unitPrice * quantity * 100) / 100,
-        quantity,
-      };
-    });
+    const clientProjectFeatures = featureLines(featureDocs, featureQuantities);
     const featuresTotal = clientProjectFeatures.reduce((sum, feature) => sum + (feature.price || 0), 0);
     let referenceTotal = basePrice + featuresTotal;
     const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal, userId: client._id });

@@ -3,6 +3,7 @@ const Catalogue = require('../models/salesCatalogueModel');
 const Product = require('../models/productModel');
 const Draft = require('../models/packageDraftModel');
 const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
+const { sellableFeatureFilter, featureLines } = require('./featureCatalogue');
 const { MAX_PROJECT_FILES_PER_UPLOAD } = require('../config/uploadLimits');
 const { buildInstallments } = require('./projectInstallments');
 
@@ -214,6 +215,53 @@ async function catalogueWithQuotes(offers, admin = false) {
   const items = await readPackages();
   return items.filter(item => admin || item.status === 'published').map(item => quotePackage(item, offers));
 }
+// Packages priced from their category and add-ons (owner decision 10 Nov 2026). The main price is the
+// category's base price plus the chosen add-ons, the same parts a custom project is built from
+// (featureCatalogue.js is the one rule). It is frozen in `pricing` when the package is saved: a later
+// change of the category or of an add-on never reaches a saved package. The client sends only which
+// add-ons and how many; every price is read here, never taken from the request.
+const MAX_PACKAGE_SERVICES = 40;
+function parseServiceSelection(raw) {
+  if (raw.services === undefined || raw.services === null) return undefined;
+  if (!Array.isArray(raw.services) || raw.services.length > MAX_PACKAGE_SERVICES) fail(`Choose at most ${MAX_PACKAGE_SERVICES} add-on services`);
+  const seen = new Set();
+  return raw.services.map(row => {
+    if (!row || typeof row.featureId !== 'string' || !/^[a-f\d]{24}$/i.test(row.featureId)) fail('Choose valid add-on services');
+    if (seen.has(row.featureId)) fail('An add-on service is chosen twice');
+    seen.add(row.featureId);
+    const quantity = row.quantity === undefined ? 1 : row.quantity;
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) fail('Feature quantity must be a whole number between 1 and 1000');
+    return { featureId: row.featureId, quantity };
+  });
+}
+// A saved service keeps the price it was saved with (only its quantity may change). A new one takes the
+// current catalogue price. A different category, or an explicit refresh, takes every price afresh.
+async function priceFromCatalogue({ category, selection, previous, refresh }) {
+  const reuse = !!previous?.pricing && previous.category === category.category && !refresh;
+  let categoryBasePrice;
+  if (reuse) categoryBasePrice = previous.pricing.categoryBasePrice;
+  else {
+    if (category.basePrice === null || category.basePrice === undefined) fail('This category has no base price yet. Set its base price first.');
+    categoryBasePrice = category.basePrice;
+  }
+  const frozen = new Map(reuse ? previous.pricing.services.map(row => [row.featureId, row]) : []);
+  const wanted = selection.filter(row => !frozen.has(row.featureId));
+  const docs = wanted.length ? await Product.find({ _id: { $in: wanted.map(row => row.featureId) }, ...sellableFeatureFilter(category.category) }).select('serviceName sellingPrice price isQuantityBased').lean() : [];
+  const live = new Map(docs.map(doc => [String(doc._id), doc]));
+  const services = selection.map(row => {
+    const kept = frozen.get(row.featureId);
+    if (kept) return { featureId: row.featureId, name: kept.name, unitPrice: kept.unitPrice, isQuantityBased: !!kept.isQuantityBased, quantity: kept.isQuantityBased ? row.quantity : 1 };
+    const doc = live.get(row.featureId);
+    if (!doc) {
+      const old = previous?.pricing?.services?.find(service => service.featureId === row.featureId);
+      fail(old ? `${old.name} is no longer offered; remove it` : 'An add-on service is unavailable for this category. Refresh the list.');
+    }
+    const [line] = featureLines([doc], { [row.featureId]: row.quantity });
+    return { featureId: row.featureId, name: line.name, unitPrice: line.unitPrice, isQuantityBased: !!doc.isQuantityBased, quantity: line.quantity };
+  });
+  const total = money(categoryBasePrice + services.reduce((sum, row) => sum + money(row.unitPrice * row.quantity), 0));
+  return { total, snapshot: { categoryBasePrice, services } };
+}
 async function savePackage(raw, creating, offers, packagePages = []) {
   // A new package without an ID gets one from its name; an ID is never typed or changed by the admin.
   const autoId = creating && (raw?.id === undefined || raw?.id === '');
@@ -233,6 +281,20 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   // An archived category keeps its old packages, but only an archived package may stay in it.
   const category = await getProjectCategory(item.category);
   if (!category || (category.status !== 'active' && item.status !== 'archived')) fail('Choose an active project category');
+  // A one-time package is priced either from its category and add-ons (above) or by hand (typed main and discount price),
+  // chosen when it is made. A saved package keeps the way its price was set (owner decision 10 Nov 2026): neither way can
+  // be switched on a saved package; a copy (Duplicate) can be made the other way. Monthly packages are always typed.
+  const selection = parseServiceSelection(raw);
+  const previous = creating ? undefined : existing.find(row => row.id === item.id);
+  if (selection !== undefined) {
+    if (item.billing !== 'one_time') fail('A price from the category and add-ons is for one-time packages');
+    if (previous && !previous.pricing) fail('This package was priced by hand and keeps it. Duplicate it to price a copy from its category and add-ons.');
+    const priced = await priceFromCatalogue({ category, selection, previous, refresh: raw.repriceFromCurrent === true });
+    if (money(item.regularPrice) !== priced.total) fail('The main price changed. Review the current category and add-on prices.', 409);
+    item.pricing = priced.snapshot;
+  } else if (previous?.pricing) {
+    fail(item.billing === 'one_time' ? 'This package is priced from its category and add-ons and keeps it. Send its services, or duplicate it to make a copy with typed prices.' : 'A package priced from its category and add-ons stays one-time');
+  }
   if (item.linkedPlanIds.length) {
     const count = await Product.countDocuments({ _id: { $in: item.linkedPlanIds }, category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null });
     if (count !== item.linkedPlanIds.length) fail('A referenced service is unavailable. Select active portal services.');
