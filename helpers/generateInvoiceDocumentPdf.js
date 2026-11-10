@@ -140,7 +140,7 @@ const drawHeader = (doc, title, number) => {
 const label = (doc, text, x, y) => doc.font("Helvetica-Bold").fontSize(7.5).fillColor(COLOR.muted).text(String(text).toUpperCase(), x, y, { lineBreak: false, characterSpacing: 0.8 });
 
 // Bill to (left) and the dates and status (right). Returns the y below the taller side.
-const drawMeta = (doc, y, { customer, project, pairs }) => {
+const drawMeta = (doc, y, { customer, project, projectLabel = "Project", pairs }) => {
   label(doc, "Bill to", LEFT, y);
   doc.font("Helvetica-Bold").fontSize(11).fillColor(COLOR.ink).text(customer?.name || "Customer", LEFT, y + 13, { width: 270, lineBreak: false });
   let left = y + 29;
@@ -148,7 +148,7 @@ const drawMeta = (doc, y, { customer, project, pairs }) => {
   if (customer?.email) { doc.text(customer.email, LEFT, left, { width: 270, lineBreak: false }); left += 14; }
   if (project) {
     left += 6;
-    label(doc, "Project", LEFT, left);
+    label(doc, projectLabel, LEFT, left);
     doc.font("Helvetica").fontSize(10).fillColor(COLOR.ink).text(project, LEFT, left + 12, { width: 270, lineBreak: false });
     left += 28;
   }
@@ -243,10 +243,13 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
   const balance = Math.max(0, total - paid);
   const isService = invoice.invoiceType === "service_statement";
 
-  let y = drawHeader(doc, isService ? "SERVICE STATEMENT" : "FINAL PROJECT INVOICE", invoice.invoiceNumber);
+  // A plan of one cycle is a single payment: its statement is the plan's invoice (the portal calls it the same).
+  const singleCycle = !(Number(order?.serviceTotalCycles) > 1);
+  let y = drawHeader(doc, isService ? (singleCycle ? "PLAN INVOICE" : "PLAN STATEMENT") : "FINAL PROJECT INVOICE", invoice.invoiceNumber);
   y = drawMeta(doc, y, {
     customer,
     project: getOrderDisplayName(order, isService ? "Service" : "Project"),
+    projectLabel: isService ? "Plan" : "Project",
     pairs: [
       { label: "Issued", value: date(invoice.invoiceDate) },
       { label: "Status", value: statusText(invoice.status), color: statusColor(invoice.status) },
@@ -254,7 +257,7 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
   });
   y = drawRows(doc, y, buildInvoiceRows({ invoice, order, targetTotal: total }));
   y = drawTotals(doc, y, [
-    { label: isService ? "Contracted total" : "Project total", value: totalText(total), strong: true, line: true },
+    { label: isService ? "Plan total" : "Project total", value: totalText(total), strong: true, line: true },
     { label: "Received", value: money(paid), color: COLOR.ok },
     { label: balance ? "Outstanding" : "Balance", value: money(balance), color: balance ? COLOR.due : COLOR.ok },
   ]);
@@ -290,6 +293,7 @@ const renderInvoice = (doc, { invoice, order, customer }) => {
   y = drawMeta(doc, y, {
     customer,
     project: getOrderDisplayName(order, "Service"),
+    projectLabel: order?.isServicePlan ? "Plan" : "Project",
     pairs: [
       { label: "Issued", value: date(invoice.invoiceDate) },
       { label: "Due", value: date(invoice.dueDate) },

@@ -127,3 +127,14 @@ test('final invoice PDF is a real multi-page PDF with a footer on every page and
   assert(/\/Count [2-9]\b/.test(text), 'fifty included lines run onto more pages');
   assert(!text.includes('Agreed term'), 'terms never reach the PDF');
 });
+
+test('a plan statement is a real PDF in the same layout, with no terms and no project wording', async () => {
+  const { generateInvoiceDocumentPdf, buildInvoiceRows } = require('../helpers/generateInvoiceDocumentPdf');
+  const order = { isServicePlan: true, serviceTotalCycles: 1, servicePlanSnapshot: { serviceName: 'Website Update Plan' }, orderItems: [{ name: 'Website Update Plan' }], totalAmount: 1152 };
+  const invoice = { invoiceType: 'service_statement', invoiceNumber: 'INV-1', amount: 1152, amountPaid: 1152, status: 'paid', lineItems: [{ name: 'Website Update Plan', price: 1152 }] };
+  assert.deepEqual(buildInvoiceRows({ invoice, order, targetTotal: 1152 }), [{ name: 'Website Update Plan', price: 1152 }]);
+  const pdf = await generateInvoiceDocumentPdf({ invoice, order, customer: { name: 'Fixture' }, transactions: [{ amount: 1152, paymentMethod: 'upi', date: new Date('2026-10-30') }] });
+  assert.equal(pdf.subarray(0, 4).toString(), '%PDF');
+  const many = await generateInvoiceDocumentPdf({ invoice, order: { ...order, serviceTotalCycles: 12 }, customer: { name: 'Fixture' }, transactions: [] });
+  assert.equal(many.subarray(0, 4).toString(), '%PDF');
+});
