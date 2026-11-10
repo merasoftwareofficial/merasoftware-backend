@@ -80,6 +80,9 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     agreement: {
       version: 2, agreedAt: now, currency: 'INR',
       package: packageItem ? { id: packageItem.id, name: packageItem.name, category: packageItem.category, description: packageItem.description, linkedPlanIds: packageItem.linkedPlanIds, quoteKey: packageQuoteKey,
+        // A package priced from its category and add-ons: the parts it was sold with, frozen here so the invoice can
+        // list them whatever the package or the catalogue becomes later (helpers/generateInvoiceDocumentPdf.js).
+        ...(packageItem.pricing ? { pricing: JSON.parse(JSON.stringify(packageItem.pricing)) } : {}),
         // How it was sold, frozen for this project (package.md decision 7); projectUploadGate.js reads portalUploads.
         ...(packageItem.billing ? { billing: packageItem.billing, portalUploads: packageItem.portalUploads,
           ...(packageItem.paymentOptions ? { paymentOptions: [...packageItem.paymentOptions] } : {}),

@@ -181,3 +181,19 @@ test('adminRead gives the form the base prices, add-ons and category usage; the 
   assert.equal(publicRead.statusCode, 200, JSON.stringify(publicRead.body));
   assert.equal(publicRead.body.data.packages.some(row => 'pricing' in row), false);
 });
+
+test('a project made from a priced package freezes its parts, and its invoice lists them even after prices change', async () => {
+  const saved = await make();
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+  await createProject({ userId: admin._id, userRole: 'admin', params: { customerId: String(customer._id) },
+    body: { category: 'standard_websites', projectName: 'From package', totalPages: 5, packageId: saved.id, packageQuoteKey: quotePackage(saved, []).quoteKey, sellingPrice: saved.discountedPrice, featureIds: [], paymentType: 'full' } }, res);
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  await Product.updateOne({ _id: seo._id }, { price: 9000, sellingPrice: 9000 });
+  await Category.updateOne({ category: 'standard_websites' }, { basePrice: 50000 });
+  const order = await Order.findById(res.body.data._id).lean();
+  const frozen = order.projectSnapshot.salesAgreement.package.pricing;
+  assert.deepEqual(frozen, saved.pricing, 'the parts the package was sold with');
+  const { buildInvoiceRows } = require('../helpers/generateInvoiceDocumentPdf');
+  const rows = buildInvoiceRows({ invoice: { amount: order.totalAmount }, order, targetTotal: order.totalAmount });
+  assert.deepEqual(rows.map(row => [row.name, row.price]), [['Business Starter', undefined], ['Standard Website base price', 10000], ['SEO setup', 3000], ['Package discount', -1000]]);
+});

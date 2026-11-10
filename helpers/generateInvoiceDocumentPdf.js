@@ -5,19 +5,39 @@ const { getOrderDisplayName } = require("./orderPresentation");
 // SINGLE invoice-PDF generator for the whole app — customer and admin alike.
 //
 // What a document looks like is decided by the INVOICE'S TYPE, never by who is asking for it.
-// Before this, an admin route rendered project_final one way (totals + payment history) while
-// the customer route rendered the very same invoice another way (line items, no history), so
-// one invoice produced two different papers depending on the viewer. The statement layout
-// below is the admin one, kept as-is, now served to both.
 //
-// Two shapes:
-//   statement (project_final / service_statement) — a summary of an order that is billed
-//     elsewhere: totals, what came in, what is outstanding, and the payments behind it.
-//   invoice (project / plan_renewal / anything else) — one amount actually being collected:
-//     line items and the balance on this invoice alone.
-// complimentary_upgrade has its own small layout below: ₹0, nothing due, no payment terms.
+// Three shapes:
+//   statement (project_final / service_statement) — the document a customer actually receives for a
+//     project: what was bought, the total, what came in, what is outstanding and the payments behind it.
+//   invoice (project / plan_renewal / anything else) — one amount being collected.
+//   complimentary_upgrade — a ₹0 record of free work, with its own small layout below.
+//
+// What was bought is listed from the order's frozen agreement, never from the live catalogue:
+//   · a package typed by hand: its name and the "included" lines typed when it was made;
+//   · a package priced from its category and add-ons: the category, its base price and every add-on
+//     with its own price (agreement.package.pricing, frozen by helpers/projectPricing.js).
+// Terms and conditions are never printed here; the footer names the page that holds them.
 
 const STATEMENT_TYPES = new Set(["project_final", "service_statement"]);
+
+const COMPANY = {
+  name: "Mera Software",
+  tagline: "Digital Solutions",
+  address: "VA Computers, Near New Bus Stand, Majitha 143601",
+  contact: "contact@merasoftware.com  ·  +91 92565 37003",
+  website: "www.merasoftware.com",
+  websiteUrl: "https://www.merasoftware.com",
+  terms: "www.merasoftware.com/terms",
+  termsUrl: "https://www.merasoftware.com/terms",
+};
+
+const COLOR = { accent: "#0b5f66", ink: "#17212b", muted: "#4a5763", rule: "#d9dee3", tint: "#f3f6f8", ok: "#0b6b3a", due: "#a15c00" };
+const LEFT = 48;
+const RIGHT = 547;
+const WIDTH = RIGHT - LEFT;
+const AMOUNT_W = 110;
+const DESC_W = WIDTH - AMOUNT_W - 16;
+const PAGE_BOTTOM = 752; // the footer owns everything below this
 
 // A negative amount is a discount line (helpers/paymentRecording.js buildLineItemsFromOrder).
 const money = (value) => {
@@ -31,6 +51,7 @@ const ordinal = (value) => {
   const labels = ["1st", "2nd", "3rd"];
   return labels[Number(value) - 1] || `${value}th`;
 };
+const round2 = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
 const isStatementInvoice = (invoice) => STATEMENT_TYPES.has(invoice?.invoiceType);
 
@@ -44,133 +65,252 @@ const STATUS_TEXT = {
   cancelled: "CANCELLED",
 };
 const statusText = (status) => STATUS_TEXT[status] || "DUE";
+const statusColor = (status) => (status === "paid" ? COLOR.ok : status === "cancelled" ? COLOR.muted : COLOR.due);
 
-const renderSalesAgreement = (doc, order, initialY) => {
+const humanize = (key) => String(key || "").split("_").filter(Boolean).map((word) => word[0].toUpperCase() + word.slice(1)).join(" ");
+
+// ---------------------------------------------------------------------------------------------
+// What the invoice lists. Pure: the rows are decided here and drawn below, so the content can be
+// tested without a PDF.
+//   row: { name, detail?, bullets?, price }   or a group heading { group: true, name, detail? }
+// ---------------------------------------------------------------------------------------------
+const agreementRows = (order) => {
   const agreement = order?.projectSnapshot?.salesAgreement;
-  if (!agreement) return initialY;
-  let y = initialY;
-  const line = (text, bold = false) => {
-    const options = { width: 500 };
-    doc.fontSize(bold ? 11 : 10).fillColor(bold ? '#0f172a' : '#475569');
-    const height = doc.heightOfString(String(text), options) + 6;
-    if (y + height > 710) { doc.addPage(); y = 48; }
-    doc.text(String(text), 48, y, options); y += height;
-  };
-  line(agreement.package?.name || 'Agreed project scope', true);
-  if (agreement.offer) line(`Offer applied: ${agreement.offer.title}`);
-  line(`Regular scope: ${money(agreement.regularPrice)}`);
-  if (agreement.offerDiscount > 0) line(`Offer benefit: - ${money(agreement.offerDiscount)}`);
-  for (const item of agreement.extras || []) line(`${item.name}${item.quantity > 1 ? ` x ${item.quantity}` : ''}: ${money(item.price)}`);
-  if (agreement.adminDiscount > 0) line(`Additional admin discount: - ${money(agreement.adminDiscount)} (${agreement.discountReason})`);
-  if (agreement.priceAdjustment) line(`${agreement.adjustmentLabel}: ${agreement.priceAdjustment < 0 ? '- ' : '+ '}${money(Math.abs(agreement.priceAdjustment))}`);
-  line('Included work', true);
-  for (const item of agreement.scope || []) line(`- ${item}`);
-  if (agreement.terms?.length) {
-    line('Agreed terms', true);
-    for (const item of agreement.terms) line(`- ${item}`);
+  if (!agreement || ![1, 2].includes(agreement.version)) return null;
+  const rows = [];
+  const pkg = agreement.package;
+  const title = pkg?.name || agreement.offer?.title || "Project scope";
+  const pricing = pkg?.pricing;
+  if (pricing && Array.isArray(pricing.services)) {
+    const category = order.projectSnapshot.categoryLabel || humanize(pkg.category);
+    rows.push({ group: true, name: title, detail: category });
+    rows.push({ name: `${category || "Category"} base price`, price: Number(pricing.categoryBasePrice) });
+    for (const service of pricing.services) {
+      const quantity = service.isQuantityBased ? Number(service.quantity) || 1 : 1;
+      rows.push({ name: service.name, detail: quantity > 1 ? `${quantity} x ${money(service.unitPrice)}` : "", price: round2(Number(service.unitPrice) * quantity) });
+    }
+    const parts = rows.reduce((sum, row) => sum + (row.price || 0), 0);
+    const difference = round2(Number(agreement.regularPrice) - parts);
+    // The package's normal price can differ from the sum of its parts (a typed discount); the table still adds up.
+    if (difference) rows.push({ name: difference < 0 ? "Package discount" : "Package price adjustment", price: difference });
+  } else {
+    rows.push({ name: title, bullets: (agreement.scope || []).filter((line) => String(line).trim()), price: Number(agreement.regularPrice) });
   }
-  if (y > 570) { doc.addPage(); y = 48; }
-  return y + 12;
+  if (agreement.offerDiscount > 0) rows.push({ name: `Offer benefit (${agreement.offer?.title || "Offer"})`, price: -Number(agreement.offerDiscount) });
+  for (const extra of agreement.extras || []) {
+    rows.push({ name: extra.name, detail: extra.quantity > 1 ? `${extra.quantity} x ${money(extra.unitPrice)}` : "", price: Number(extra.price) });
+  }
+  if (agreement.adminDiscount > 0) rows.push({ name: `Additional discount: ${agreement.discountReason}`, price: -Number(agreement.adminDiscount) });
+  if (agreement.priceAdjustment) rows.push({ name: agreement.adjustmentLabel, price: Number(agreement.priceAdjustment) });
+  return rows;
 };
 
-// Statement layout — carried over verbatim from the admin-only generator this replaces, so
-// the document an admin has always downloaded is unchanged. Only its reach is new.
+const buildInvoiceRows = ({ invoice, order, targetTotal }) => {
+  const rows = agreementRows(order);
+  if (rows) {
+    // Whatever the agreement lines add up to, the table ends at the amount the customer owes.
+    const sum = round2(rows.reduce((total, row) => total + (row.price || 0), 0));
+    const target = Number(targetTotal);
+    if (Number.isFinite(target) && round2(target - sum) !== 0) rows.push({ name: "Agreed price adjustment", price: round2(target - sum) });
+    return rows;
+  }
+  const items = Array.isArray(invoice.lineItems) && invoice.lineItems.length
+    ? invoice.lineItems
+    : [{ name: getOrderDisplayName(order, "Service"), price: invoice.amount }];
+  return items.map((item) => ({ name: String(item.name || "Item"), price: Number(item.price) }));
+};
+
+// ---------------------------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------------------------
+const drawHeader = (doc, title, number) => {
+  doc.roundedRect(LEFT, 48, 34, 34, 6).fill(COLOR.accent);
+  doc.font("Helvetica-Bold").fontSize(16).fillColor("#ffffff").text("M", LEFT, 57, { width: 34, align: "center", lineBreak: false });
+  doc.font("Helvetica-Bold").fontSize(14).fillColor(COLOR.ink).text(COMPANY.name, LEFT + 44, 48, { lineBreak: false });
+  doc.font("Helvetica").fontSize(8.5).fillColor(COLOR.muted);
+  doc.text(COMPANY.tagline, LEFT + 44, 65, { lineBreak: false });
+  doc.text(COMPANY.address, LEFT + 44, 76, { lineBreak: false });
+  doc.text(COMPANY.contact, LEFT + 44, 87, { lineBreak: false });
+  doc.font("Helvetica-Bold").fontSize(title.length > 14 ? 15 : 20).fillColor(COLOR.accent).text(title, LEFT + 260, 50, { width: WIDTH - 260, align: "right", lineBreak: false });
+  if (number) doc.font("Helvetica").fontSize(10).fillColor(COLOR.muted).text(number, LEFT + 260, 76, { width: WIDTH - 260, align: "right", lineBreak: false });
+  doc.moveTo(LEFT, 106).lineTo(RIGHT, 106).lineWidth(2).strokeColor(COLOR.accent).stroke();
+  return 124;
+};
+
+const label = (doc, text, x, y) => doc.font("Helvetica-Bold").fontSize(7.5).fillColor(COLOR.muted).text(String(text).toUpperCase(), x, y, { lineBreak: false, characterSpacing: 0.8 });
+
+// Bill to (left) and the dates and status (right). Returns the y below the taller side.
+const drawMeta = (doc, y, { customer, project, pairs }) => {
+  label(doc, "Bill to", LEFT, y);
+  doc.font("Helvetica-Bold").fontSize(11).fillColor(COLOR.ink).text(customer?.name || "Customer", LEFT, y + 13, { width: 270, lineBreak: false });
+  let left = y + 29;
+  doc.font("Helvetica").fontSize(9.5).fillColor(COLOR.muted);
+  if (customer?.email) { doc.text(customer.email, LEFT, left, { width: 270, lineBreak: false }); left += 14; }
+  if (project) {
+    left += 6;
+    label(doc, "Project", LEFT, left);
+    doc.font("Helvetica").fontSize(10).fillColor(COLOR.ink).text(project, LEFT, left + 12, { width: 270, lineBreak: false });
+    left += 28;
+  }
+  let right = y;
+  for (const pair of pairs) {
+    doc.font("Helvetica").fontSize(9.5).fillColor(COLOR.muted).text(pair.label, 340, right, { lineBreak: false });
+    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(pair.color || COLOR.ink).text(pair.value, 340, right, { width: RIGHT - 340, align: "right", lineBreak: false });
+    right += 17;
+  }
+  return Math.max(left, right) + 14;
+};
+
+const ensure = (doc, y, need) => {
+  if (y + need <= PAGE_BOTTOM) return y;
+  doc.addPage();
+  return 48;
+};
+
+const tableHead = (doc, y, left, right) => {
+  doc.rect(LEFT, y, WIDTH, 22).fill(COLOR.tint);
+  doc.font("Helvetica-Bold").fontSize(8).fillColor(COLOR.muted);
+  doc.text(left.toUpperCase(), LEFT + 8, y + 7, { lineBreak: false, characterSpacing: 0.8 });
+  doc.text(right.toUpperCase(), RIGHT - AMOUNT_W - 8, y + 7, { width: AMOUNT_W, align: "right", lineBreak: false, characterSpacing: 0.8 });
+  doc.moveTo(LEFT, y + 22).lineTo(RIGHT, y + 22).lineWidth(0.5).strokeColor(COLOR.rule).stroke();
+  return y + 22;
+};
+
+const rule = (doc, y) => doc.moveTo(LEFT, y).lineTo(RIGHT, y).lineWidth(0.5).strokeColor(COLOR.rule).stroke();
+
+const drawRows = (doc, startY, rows) => {
+  let y = ensure(doc, startY, 60);
+  y = tableHead(doc, y, "Description", "Amount");
+  for (const row of rows) {
+    const bold = row.group || row.bullets;
+    doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(10);
+    const nameHeight = doc.heightOfString(row.name, { width: DESC_W });
+    const detailHeight = row.detail ? 12 : 0;
+    const firstBullet = row.bullets?.length ? 14 : 0;
+    y = ensure(doc, y, nameHeight + detailHeight + firstBullet + 14);
+    const top = y + 8;
+    doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(10).fillColor(row.price < 0 ? COLOR.ok : COLOR.ink).text(row.name, LEFT + 8, top, { width: DESC_W });
+    if (row.price !== undefined) doc.font("Helvetica").fontSize(10).fillColor(row.price < 0 ? COLOR.ok : COLOR.ink).text(money(row.price), RIGHT - AMOUNT_W - 8, top, { width: AMOUNT_W, align: "right", lineBreak: false });
+    y = top + nameHeight;
+    if (row.detail) { doc.font("Helvetica").fontSize(8.5).fillColor(COLOR.muted).text(row.detail, LEFT + 8, y + 1, { width: DESC_W, lineBreak: false }); y += detailHeight; }
+    for (const bullet of row.bullets || []) {
+      doc.font("Helvetica").fontSize(9);
+      const height = doc.heightOfString(bullet, { width: DESC_W - 16 });
+      y = ensure(doc, y, height + 4);
+      doc.fillColor(COLOR.muted).text("-", LEFT + 12, y + 3, { lineBreak: false });
+      doc.text(bullet, LEFT + 24, y + 3, { width: DESC_W - 16 });
+      y += height + 3;
+    }
+    y += 8;
+    rule(doc, y);
+  }
+  return y;
+};
+
+// Right-hand totals block: [{ label, value, strong?, color?, line? }]
+const drawTotals = (doc, startY, lines) => {
+  let y = ensure(doc, startY + 14, lines.length * 22 + 10);
+  for (const line of lines) {
+    if (line.line) { doc.moveTo(330, y).lineTo(RIGHT, y).lineWidth(1.5).strokeColor(COLOR.ink).stroke(); y += 6; }
+    doc.font(line.strong ? "Helvetica-Bold" : "Helvetica").fontSize(line.strong ? 12 : 10).fillColor(line.color || COLOR.ink);
+    doc.text(line.label, 338, y, { lineBreak: false });
+    doc.text(line.value, 338, y, { width: RIGHT - 338 - 8, align: "right", lineBreak: false });
+    y += line.strong ? 24 : 19;
+  }
+  return y;
+};
+
+const drawFooters = (doc) => {
+  const { start, count } = doc.bufferedPageRange();
+  for (let index = 0; index < count; index += 1) {
+    doc.switchToPage(start + index);
+    // Text below the bottom margin would start a new page; the footer sits there on purpose.
+    const bottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    doc.moveTo(LEFT, 772).lineTo(RIGHT, 772).lineWidth(0.5).strokeColor(COLOR.rule).stroke();
+    doc.font("Helvetica").fontSize(9).fillColor(COLOR.muted);
+    doc.text(`Package details: ${COMPANY.website}`, LEFT, 780, { width: WIDTH, align: "center", lineBreak: false, link: COMPANY.websiteUrl });
+    doc.text(`Terms & Conditions: ${COMPANY.terms}`, LEFT, 793, { width: WIDTH, align: "center", lineBreak: false, link: COMPANY.termsUrl });
+    doc.fontSize(8).text(`This is a computer-generated invoice.  ·  Page ${index + 1} of ${count}`, LEFT, 808, { width: WIDTH, align: "center", lineBreak: false });
+    doc.page.margins.bottom = bottom;
+  }
+};
+
+// Statement layout — the project's whole story: what was bought, the total, what is paid and owed, and each payment.
 const renderStatement = (doc, { invoice, order, customer, transactions }) => {
   const total = Number(invoice.amount || 0);
   const paid = Number(invoice.amountPaid || 0);
   const balance = Math.max(0, total - paid);
   const isService = invoice.invoiceType === "service_statement";
 
-  let y = 48;
-  doc.fontSize(20).fillColor("#0f172a").text(isService ? "SERVICE BILLING STATEMENT" : "FINAL PROJECT INVOICE", 48, y);
-  y += 32;
-  doc.fontSize(10).fillColor("#475569").text(`Updated: ${date(invoice.updatedAt || invoice.invoiceDate)}`, 48, y);
-  y += 28;
-  doc.fillColor("#0f172a").fontSize(11).text(`${isService ? "Service" : "Project"}: ${getOrderDisplayName(order, isService ? "Service" : "Project")}`, 48, y);
-  y += 17;
-  doc.fontSize(10).fillColor("#475569").text(`Customer: ${customer?.name || "Customer"} · ${customer?.email || ""}`, 48, y);
-  y += 34;
-  y = renderSalesAgreement(doc, order, y);
-  if (!order?.projectSnapshot?.salesAgreement && order?.projectSnapshot?.offer?.title) {
-    doc.fontSize(10).text(`Offer: ${order.projectSnapshot.offer.title}`, 48, y); y += 22;
-  }
-  doc.fillColor("#0f172a").fontSize(12).text(isService ? "Contracted total" : "Project total", 48, y).text(totalText(total), 420, y, { align: "right" });
-  y += 22;
-  doc.fillColor("#047857").text("Received", 48, y).text(money(paid), 420, y, { align: "right" });
-  y += 22;
-  doc.fillColor(balance ? "#b45309" : "#047857").text(balance ? "Outstanding" : "Balance", 48, y).text(money(balance), 420, y, { align: "right" });
-  y += 38;
-  doc.fillColor("#0f172a").fontSize(12).text("Payment history", 48, y);
-  y += 22;
+  let y = drawHeader(doc, isService ? "SERVICE STATEMENT" : "FINAL PROJECT INVOICE", invoice.invoiceNumber);
+  y = drawMeta(doc, y, {
+    customer,
+    project: getOrderDisplayName(order, isService ? "Service" : "Project"),
+    pairs: [
+      { label: "Issued", value: date(invoice.invoiceDate) },
+      { label: "Status", value: statusText(invoice.status), color: statusColor(invoice.status) },
+    ],
+  });
+  y = drawRows(doc, y, buildInvoiceRows({ invoice, order, targetTotal: total }));
+  y = drawTotals(doc, y, [
+    { label: isService ? "Contracted total" : "Project total", value: totalText(total), strong: true, line: true },
+    { label: "Received", value: money(paid), color: COLOR.ok },
+    { label: balance ? "Outstanding" : "Balance", value: money(balance), color: balance ? COLOR.due : COLOR.ok },
+  ]);
 
+  y = ensure(doc, y + 20, 70);
+  y = tableHead(doc, y, "Payment history", "Amount");
   const history = Array.isArray(transactions) ? transactions : [];
   if (!history.length) {
-    doc.fontSize(10).fillColor("#64748b").text(total === 0 ? "No payment is due — this project is free." : "No completed payment has been recorded yet.", 48, y);
-    y += 19;
-  } else {
-    history.forEach((transaction) => {
-      if (y > 700) { doc.addPage(); y = 48; }
-      const label = transaction.installmentNumber
-        ? `${ordinal(transaction.installmentNumber)} Installment · ${String(transaction.paymentMethod || "payment").toUpperCase()}`
-        : `Full Payment · ${String(transaction.paymentMethod || "payment").toUpperCase()}`;
-      doc.fontSize(10).fillColor("#0f172a").text(label, 48, y);
-      doc.text(money(transaction.amount), 420, y, { align: "right" });
-      y += 15;
-      doc.fontSize(8).fillColor("#64748b").text(date(transaction.date || transaction.createdAt), 48, y);
-      y += 19;
-    });
+    doc.font("Helvetica").fontSize(9.5).fillColor(COLOR.muted).text(total === 0 ? "No payment is due — this project is free." : "No completed payment has been recorded yet.", LEFT + 8, y + 9, { width: WIDTH - 16 });
+    return;
   }
-
-  y += 16;
-  if (y > 700) { doc.addPage(); y = 48; }
-  doc.fontSize(9).fillColor("#64748b").text(
-    invoice.notes
-      || (balance
-        ? "This is a live payment summary. The outstanding balance remains payable."
-        : "Payment complete. This document confirms the full project payment."),
-    48,
-    y,
-    { width: 500 }
-  );
+  for (const transaction of history) {
+    y = ensure(doc, y, 36);
+    const text = transaction.installmentNumber
+      ? `${ordinal(transaction.installmentNumber)} Installment · ${String(transaction.paymentMethod || "payment").toUpperCase()}`
+      : `Full Payment · ${String(transaction.paymentMethod || "payment").toUpperCase()}`;
+    doc.font("Helvetica").fontSize(10).fillColor(COLOR.ink).text(text, LEFT + 8, y + 8, { width: DESC_W, lineBreak: false });
+    doc.text(money(transaction.amount), RIGHT - AMOUNT_W - 8, y + 8, { width: AMOUNT_W, align: "right", lineBreak: false });
+    doc.font("Helvetica").fontSize(8.5).fillColor(COLOR.muted).text(date(transaction.date || transaction.createdAt), LEFT + 8, y + 21, { lineBreak: false });
+    y += 34;
+    rule(doc, y);
+  }
 };
 
-// Invoice layout — one amount being collected. Kept from the existing customer-facing
-// generator, so a plan/renewal invoice still reads exactly as it did.
+// Invoice layout — one amount being collected.
 const renderInvoice = (doc, { invoice, order, customer }) => {
   const paid = Number(invoice.amountPaid || 0);
   const amount = Number(invoice.amount || 0);
   const balance = Math.max(0, amount - paid);
-  const items = Array.isArray(invoice.lineItems) && invoice.lineItems.length
-    ? invoice.lineItems
-    : [{ name: getOrderDisplayName(order, "Service"), price: amount }];
+  const orderTotal = Number(order?.totalAmount);
 
-  doc.fontSize(22).fillColor("#111827").text("INVOICE", { align: "center" });
-  doc.moveDown(1.4);
-  doc.fontSize(10).fillColor("#374151");
-  doc.text(`Issued: ${date(invoice.invoiceDate)}`);
-  doc.text(`Due: ${date(invoice.dueDate)}`);
-  doc.text(`Status: ${statusText(invoice.status)}`);
-  if (invoice.installmentNumber) doc.text(`Installment: ${ordinal(invoice.installmentNumber)}`);
-  doc.moveDown();
-  doc.fontSize(12).fillColor("#111827").text("Bill To");
-  doc.fontSize(10).fillColor("#374151").text(customer?.name || "Customer");
-  if (customer?.email) doc.text(customer.email);
-  doc.moveDown();
-  doc.fontSize(12).fillColor("#111827").text(getOrderDisplayName(order, "Service"));
-  doc.moveDown(0.5);
-  doc.fontSize(10).fillColor("#374151");
-  items.forEach((item) => {
-    doc.text(String(item.name || "Item"), 48, doc.y, { continued: true });
-    doc.text(money(item.price), { align: "right" });
+  let y = drawHeader(doc, "INVOICE", invoice.invoiceNumber);
+  y = drawMeta(doc, y, {
+    customer,
+    project: getOrderDisplayName(order, "Service"),
+    pairs: [
+      { label: "Issued", value: date(invoice.invoiceDate) },
+      { label: "Due", value: date(invoice.dueDate) },
+      { label: "Status", value: statusText(invoice.status), color: statusColor(invoice.status) },
+      ...(invoice.installmentNumber ? [{ label: "Installment", value: ordinal(invoice.installmentNumber) }] : []),
+    ],
   });
-  doc.moveDown();
-  doc.fontSize(11).fillColor("#111827");
-  doc.text(`Invoice amount: ${totalText(amount)}`, { align: "right" });
-  doc.text(`Paid: ${money(paid)}`, { align: "right" });
-  doc.text(`Balance: ${money(balance)}`, { align: "right" });
+  const rows = buildInvoiceRows({ invoice, order, targetTotal: invoice.installmentNumber && Number.isFinite(orderTotal) ? orderTotal : amount });
+  y = drawRows(doc, y, rows);
+  const rowsTotal = round2(rows.reduce((sum, row) => sum + (row.price || 0), 0));
+  const lines = [];
+  // An installment invoice lists the whole project but collects only its own part.
+  const partial = round2(rowsTotal - amount) !== 0;
+  if (partial) lines.push({ label: "Project total", value: totalText(rowsTotal), line: true });
+  lines.push({ label: invoice.installmentNumber ? `${ordinal(invoice.installmentNumber)} installment` : "Invoice total", value: totalText(amount), strong: true, line: !partial });
+  lines.push({ label: "Paid", value: money(paid), color: COLOR.ok });
+  lines.push({ label: "Balance due", value: money(balance), color: balance ? COLOR.due : COLOR.ok });
+  y = drawTotals(doc, y, lines);
   if (invoice.notes) {
-    doc.moveDown();
-    doc.fontSize(9).fillColor("#4b5563").text(invoice.notes);
+    y = ensure(doc, y + 14, 30);
+    doc.font("Helvetica").fontSize(9).fillColor(COLOR.muted).text(invoice.notes, LEFT, y + 10, { width: WIDTH });
   }
 };
 
@@ -207,29 +347,25 @@ const renderComplimentary = (doc, { invoice, order, customer }) => {
 
 const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [] }) =>
   new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 48, size: "A4" });
+    const doc = new PDFDocument({ margin: 48, size: "A4", bufferPages: true });
     const chunks = [];
     doc.on("data", (chunk) => chunks.push(chunk));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    if (isComplimentaryInvoice(invoice)) {
-      renderComplimentary(doc, { invoice, order, customer });
+    try {
+      if (isComplimentaryInvoice(invoice)) {
+        renderComplimentary(doc, { invoice, order, customer });
+        doc.end();
+        return;
+      }
+      if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions });
+      else renderInvoice(doc, { invoice, order, customer });
+      drawFooters(doc);
       doc.end();
-      return;
+    } catch (error) {
+      reject(error);
     }
-    if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions });
-    else renderInvoice(doc, { invoice, order, customer });
-
-    const paymentLines = order?.paymentPolicy ? require('./offerPaymentPolicy').policyLines(order) : [];
-    if (paymentLines.length) {
-      doc.moveDown();
-      doc.fontSize(11).fillColor('#111827').text('Agreed payment terms');
-      doc.fontSize(10).fillColor('#374151');
-      for (const line of paymentLines) doc.text(line, { width: 500 });
-    }
-
-    doc.end();
   });
 
-module.exports = { generateInvoiceDocumentPdf, isStatementInvoice, isComplimentaryInvoice };
+module.exports = { generateInvoiceDocumentPdf, isStatementInvoice, isComplimentaryInvoice, buildInvoiceRows };
