@@ -58,6 +58,22 @@ test('main price = category base + chosen add-ons, read here; the services are f
   assert.deepEqual(none.pricing, { categoryBasePrice: 10000, categoryTerms: [], services: [] });
 });
 
+test('the included work shows the saved number of each quantity add-on: "4 × name"; other lines stay as written', async () => {
+  // A package saved before numbers existed: bare names. Publishing it again, with nothing changed, adds the number.
+  const old = await make({ name: 'Old', regularPrice: 15000, inclusions: ['SEO setup', 'Extra page', 'Website Update'], services: sel([seo], [pages, 4]) });
+  assert.deepEqual(old.inclusions, ['SEO setup', '4 × Extra page', 'Website Update']);
+  const again = await savePackage({ ...base, id: old.id, regularPrice: 15000, discountedPrice: 12000, inclusions: ['SEO setup', 'Extra page', 'Website Update'], services: sel([seo], [pages, 4]) }, false, []);
+  assert.deepEqual(again.inclusions, ['SEO setup', '4 × Extra page', 'Website Update']);
+  // A new quantity replaces an older number; a line written differently and a non-quantity add-on stay as they are.
+  const changed = await savePackage({ ...base, id: old.id, regularPrice: 13500, discountedPrice: 12000, inclusions: ['SEO setup', '4 × Extra page', 'Extra pages within 20km'], services: sel([seo], [pages, 1]) }, false, []);
+  assert.deepEqual(changed.inclusions, ['SEO setup', '1 × Extra page', 'Extra pages within 20km']);
+  // The price and the frozen services (what invoices read) are unchanged by this.
+  assert.deepEqual(changed.pricing.services.map(row => [row.name, row.quantity, row.unitPrice]), [['SEO setup', 1, 3000], ['Extra page', 1, 500]]);
+  // A package with a typed price has no services: its lines are never touched.
+  const typed = await savePackage({ ...base, id: '', name: 'Typed', regularPrice: 9000, discountedPrice: 9000, inclusions: ['Extra page'] }, true, []);
+  assert.deepEqual(typed.inclusions, ['Extra page']);
+});
+
 test('add-on and category terms are merged into the package terms automatically; the admin lines stay', async () => {
   await Category.updateOne({ category: 'standard_websites' }, { terms: ['Category term A', 'Category term B'] });
   await Product.updateOne({ _id: seo._id }, { terms: ['SEO term 1', 'SEO term 2'] });

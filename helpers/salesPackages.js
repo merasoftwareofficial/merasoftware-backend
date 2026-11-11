@@ -288,6 +288,19 @@ async function priceFromCatalogue({ category, selection, previous, refresh }) {
 }
 // The terms a package gets automatically from its category and add-ons (frozen in pricing), in order, without repeats.
 const automaticTerms = (pricing) => pricing ? [...new Set([...(pricing.categoryTerms || []), ...pricing.services.flatMap(row => row.terms || [])])] : [];
+// The included work shows how many of each quantity add-on the package has: its line ("Reels", or "N × Reels"
+// with an older number) becomes "4 × Reels" from the saved quantity. The same line rule as the website form
+// (src/lib/package-pricing.ts addOnLine / isAddOnLine). A line written differently is the admin's own and is
+// left alone; no line is added. Invoices read `pricing`, not these lines.
+const isAddOnLine = (line, name) => {
+  const text = line.trim();
+  const tail = ` × ${name}`;
+  return text === name || (text.endsWith(tail) && /^\d+$/.test(text.slice(0, text.length - tail.length)));
+};
+const withAddOnNumbers = (inclusions, services) => inclusions.map(line => {
+  const service = services.find(row => row.isQuantityBased && isAddOnLine(line, row.name));
+  return service ? `${service.quantity} × ${service.name}` : line;
+});
 async function savePackage(raw, creating, offers, packagePages = []) {
   // A new package without an ID gets one from its name; an ID is never typed or changed by the admin.
   const autoId = creating && (raw?.id === undefined || raw?.id === '');
@@ -323,6 +336,7 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     const typed = item.terms.filter(line => !automaticTerms(previous?.pricing).includes(line));
     item.pricing = priced.snapshot;
     item.terms = [...new Set([...typed, ...automaticTerms(item.pricing)])];
+    item.inclusions = withAddOnNumbers(item.inclusions, item.pricing.services);
     if (item.terms.length > 50) fail('The package terms are more than 50 lines. Shorten them or remove an add-on.');
   } else if (previous?.pricing) {
     fail('This package is priced from its category and add-ons and keeps it. Send its services, or duplicate it to make a copy with typed prices.');
