@@ -12,7 +12,8 @@ const { recordAdminProjectPaymentInSession } = require('./projectPaymentSettleme
 // A customer's own purchase (helpers/packagePurchase.js) runs the same transaction: `clientPurchase` makes the
 // customer the actor (they must be the project's owner, not an admin) and `purchasePayment` receives their
 // first payment inside it, so the project exists only together with its payment.
-async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId, clientPurchase = false, purchasePayment = null }) {
+// `beforeCreate` (optional) runs inside the transaction after the same request was ruled out, before anything is written.
+async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId, clientPurchase = false, purchasePayment = null, beforeCreate = null }) {
   const projectId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -28,6 +29,7 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
         return { order: existing, reused: true };
       }
     }
+    if (beforeCreate) await beforeCreate({ client, session });
     const order = new Order({ ...orderData, _id: projectId });
     await require('./offerReservations').attachProjectReservation({ order, offer: sourceOffer, reservationId: sourceReservationId, session });
     // A project on a package closes that person's open package Start request (helpers/packageStart.js).

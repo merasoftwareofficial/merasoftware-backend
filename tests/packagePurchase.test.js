@@ -55,8 +55,8 @@ beforeEach(async () => {
   process.env.PACKAGE_START_REQUESTS_ENABLED = 'true';
 });
 const quoteKey = pkg => quotePackage(pkg, []).quoteKey;
-const buy = (user, extra = {}) => purchasePackage({ userId: user._id, packageId: saved.id, choice: { paymentOption: 'full' }, quoteKey: quoteKey(saved),
-  creationKey: `purchase-key-${++key}-abcdefghij`, ...extra });
+const buy = (user, extra = {}, options) => purchasePackage({ userId: user._id, packageId: saved.id, choice: { paymentOption: 'full' }, quoteKey: quoteKey(saved),
+  creationKey: `purchase-key-${++key}-abcdefghij`, ...extra }, options);
 const wallet = async user => (await User.findById(user._id).lean()).walletBalance;
 
 test('switched off by its flag; a stale price, an unknown package or no UPI reference writes nothing', async () => {
@@ -121,7 +121,7 @@ test('a client with no wallet money pays by UPI: the project waits for the admin
   assert.equal(pending.amount, 10000);
   assert.equal(String(pending.invoiceId), result.invoiceId);
   assert.equal((await Invoice.findById(result.invoiceId).lean()).status, 'unpaid');
-  await assert.rejects(buy(customer, { upiTransactionId: '123456789012' }), /already recorded/, 'one UPI reference pays once');
+  await assert.rejects(buy(customer, { upiTransactionId: '123456789012', confirmRepeat: true }), /already recorded/, 'one UPI reference pays once');
   await approveProjectPayment(pending.transactionId, admin._id);
   order = await Order.findById(result.orderId).lean();
   assert.equal(order.orderVisibility, 'approved');
@@ -286,4 +286,53 @@ test('a member buys an offer package by UPI: becomes a client and the project is
       assert.equal((await Transaction.findOne({ orderId: order._id }).lean()).status, 'pending');
     }
   } finally { global.fetch = live; delete process.env.OFFER_RESERVATIONS_ENABLED; }
+});
+
+// Buying a package again (owner decision 11 Nov 2026): while its project runs, a second purchase needs the customer's
+// own "yes"; the same request sent again (a retry after a slow answer) is answered with its project, never refused.
+test('a package bought already: asked before a second one, a retry of the same request is answered, a "yes" buys another', async () => {
+  const first = await buy(customer, { upiTransactionId: '100850359714', creationKey: 'first-click-abcdefghijk' });
+  const again = await buy(customer, { upiTransactionId: '100850359714', creationKey: 'first-click-abcdefghijk' });
+  assert.equal(again.reused, true, 'the retry with the same UPI reference is the same purchase, not "already recorded"');
+  assert.equal(again.orderId, first.orderId);
+  const asked = await buy(customer, { upiTransactionId: '100850359799' }).catch(error => error);
+  assert.equal(asked.statusCode, 409);
+  assert.equal(asked.code, 'package_already_bought');
+  assert.equal(asked.details.project.orderId, first.orderId);
+  assert.equal(asked.details.project.packageId, saved.id);
+  assert.equal(await Order.countDocuments(), 1, 'nothing more was made');
+  assert.equal(await Transaction.countDocuments({ type: 'payment' }), 1);
+  // "Proceed to pay" asks the same question and makes no new request.
+  const startAsked = await start.requestPackageStart({ userId: customer._id, packageId: saved.id, choice: { paymentOption: 'full' }, kind: 'buy' }).catch(error => error);
+  assert.equal(startAsked.code, 'package_already_bought');
+  assert.equal(await StartRequest.countDocuments({ kind: 'buy' }), 0);
+  const callback = await start.requestPackageStart({ userId: customer._id, packageId: saved.id, kind: 'callback' });
+  assert.equal(callback.requested, true, 'a callback is never stopped');
+  const list = await start.listPackageStarts(customer._id);
+  assert.deepEqual(list.activeProjects.map(row => row.orderId), [first.orderId]);
+  // The customer says yes: a second project.
+  await start.requestPackageStart({ userId: customer._id, packageId: saved.id, choice: { paymentOption: 'full' }, kind: 'buy', confirmRepeat: true });
+  const second = await buy(customer, { upiTransactionId: '100850359799', confirmRepeat: true });
+  assert.notEqual(second.orderId, first.orderId);
+  assert.equal(await Order.countDocuments({ userId: customer._id }), 2);
+});
+
+test('a cancelled, rejected or completed project does not stop buying the package again', async () => {
+  for (const [field, value] of [['orderVisibility', 'cancelled'], ['orderVisibility', 'payment-rejected'], ['status', 'completed']]) {
+    await Order.deleteMany({});
+    await User.updateOne({ _id: member._id }, { walletBalance: 20000 });
+    const first = await buy(member);
+    await Order.updateOne({ _id: first.orderId }, { [field]: value });
+    const next = await buy(member);
+    assert.notEqual(next.orderId, first.orderId, `${field}=${value} lets the customer buy again`);
+  }
+});
+
+test('the answer does not wait for the mails: the route runs them after it', async () => {
+  let later = null;
+  const result = await buy(customer, { upiTransactionId: '100850359714' }, { schedule: work => { later = work; } });
+  assert.ok(result.orderId, 'the project is answered');
+  assert.equal(await EmailHistory.countDocuments({ event: 'package.purchase.admin' }), 0, 'no mail yet');
+  await later();
+  assert.equal(await EmailHistory.countDocuments({ event: 'package.purchase.admin' }), 1, 'the team notice follows');
 });

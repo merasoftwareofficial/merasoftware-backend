@@ -39,7 +39,9 @@ async function activeOwner(userId, session = null) {
 async function listPackageStarts(userId) {
   await activeOwner(userId);
   const rows = await StartRequest.find({ userId }).sort({ requestedAt: -1 }).lean();
-  return { requests: rows.map(requestView), enabled: enabled() };
+  // The running package projects (helpers/packagePurchase.js), so the page asks before a second purchase.
+  const activeProjects = await require('./packagePurchase').activePackageProjects(userId);
+  return { requests: rows.map(requestView), activeProjects, enabled: enabled() };
 }
 
 // The customer's choice on the customize page (package.md §3), as the request stores it.
@@ -48,12 +50,19 @@ const choiceFromQuote = quote => (quote.billing === 'monthly'
   : { paymentOption: quote.paymentOption });
 
 async function requestPackageStart(input, retry = true) {
-  const { userId, packageId, choice, countryCode, phone, kind = 'callback' } = input;
+  const { userId, packageId, choice, countryCode, phone, kind = 'callback', confirmRepeat = false } = input;
   if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
   if (!safeId(packageId)) fail('Choose a package');
   if (!KINDS.includes(kind)) fail('Choose how you want to start this package');
   const enteredPhone = phone ? parsePhone({ countryCode, phone }) : null;
   await activeOwner(userId);
+  // "Proceed to pay" on a package whose project is still running asks the customer first (helpers/packagePurchase.js):
+  // no new request and no team notice until they confirm a second one. A callback is never stopped.
+  if (kind === 'buy' && confirmRepeat !== true) {
+    const { activePackageProject, alreadyBought } = require('./packagePurchase');
+    const running = await activePackageProject(userId, packageId);
+    if (running) throw alreadyBought(running);
+  }
   // A repeat click returns the open request; it never sends its messages again. The one exception: a callback
   // asked for while a buy is open replaces it (below), because the customer now wants the team to contact them.
   const open = await StartRequest.findOne({ userId, packageId, closedAt: null }).lean();

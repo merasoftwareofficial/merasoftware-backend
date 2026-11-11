@@ -26,6 +26,32 @@ const cents = value => Math.round(Number(value) * 100);
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
 const DEFAULT_STARTING_NODE_TITLE = 'Project Started';
 
+// A package the customer already bought (owner decision 11 Nov 2026): while a project from it is still running, buying
+// it again needs the customer's own "yes, a second one" (confirmRepeat), so a confused repeat click never makes a
+// second project. Running = not cancelled, not payment-rejected, not completed; a deleted project is gone from Orders.
+// One rule for the purchase, the "Proceed to pay" start request and the page that asks before paying.
+const ACTIVE_PACKAGE_PROJECT = packageId => ({ 'projectSnapshot.salesAgreement.package.id': packageId,
+  orderVisibility: { $nin: ['cancelled', 'payment-rejected'] }, status: { $ne: 'completed' } });
+const projectView = order => ({ orderId: String(order._id), packageId: order.projectSnapshot?.salesAgreement?.package?.id || null,
+  name: order.projectSnapshot?.displayName || order.projectSnapshot?.salesAgreement?.package?.name || 'Project',
+  boughtAt: order.createdAt || null, approved: order.orderVisibility === 'approved' });
+async function activePackageProject(userId, packageId, session = null) {
+  const order = await Order.findOne({ userId, ...ACTIVE_PACKAGE_PROJECT(packageId) }).sort({ createdAt: -1 })
+    .select('projectSnapshot orderVisibility createdAt').session(session).lean();
+  return order ? projectView(order) : null;
+}
+// The customer's running package projects, one per package (the newest), for the page to ask before paying.
+async function activePackageProjects(userId) {
+  const orders = await Order.find({ userId, 'projectSnapshot.salesAgreement.package.id': { $type: 'string' },
+    orderVisibility: { $nin: ['cancelled', 'payment-rejected'] }, status: { $ne: 'completed' } })
+    .sort({ createdAt: -1 }).select('projectSnapshot orderVisibility createdAt').lean();
+  const seen = new Set();
+  return orders.map(projectView).filter(row => row.packageId && !seen.has(row.packageId) && seen.add(row.packageId));
+}
+const alreadyBought = project => Object.assign(
+  new Error(`You already bought ${project.name}. Buying it again makes a second project; open your project in the portal, or confirm to buy another one.`),
+  { statusCode: 409, code: 'package_already_bought', details: { project } });
+
 // The UPI payee the website shows for the remainder; the portal's pages hold the same account.
 const payee = () => ({ upiId: process.env.UPI_PAYEE_ID || 'vacomputers.com@okhdfcbank', payeeName: process.env.UPI_PAYEE_NAME || 'VA Computer' });
 
@@ -85,7 +111,11 @@ async function quoteForCustomer(userId, packageId, choice) {
   return (await quoteForPurchase(item, choice)).priced;
 }
 
-async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, creationKey, countryCode, phone, upiTransactionId }) {
+// `schedule` runs the after-commit work (Won lead, customer mail, team notice). The route sends the answer first and
+// runs it right after (routes/packageStarts.js), so a slow mail never makes the customer's payment look failed;
+// by default (tests, scripts) it is awaited here.
+async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, creationKey, countryCode, phone, upiTransactionId, confirmRepeat = false },
+  { schedule = work => work() } = {}) {
   if (!enabled()) fail('Starting a project from a package is not enabled yet', 503);
   if (!safeId(packageId)) fail('Choose a package');
   if (typeof creationKey !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(creationKey)) fail('Invalid purchase request key');
@@ -128,11 +158,21 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   const needsUpi = cents(balanceBefore) < cents(priced.dueNow);
   if (needsUpi && !upiReference) fail('UPI transaction ID is required for the amount not covered by the wallet');
   const transactionId = `PKG${new mongoose.Types.ObjectId()}`;
-  const preparedEvidence = needsUpi ? await prepareUpiPaymentEvidence({ reference: upiReference, transactionId, capturedVia: 'customer' }) : null;
+  // The same request sent again (a retry after a slow answer) is answered with its project below, so its UPI
+  // reference, recorded the first time, is not checked again as a new one.
+  const projectCreationKey = `${userId}:${creationKey}`;
+  const sameRequest = await Order.exists({ projectCreationKey });
+  // A package already running for this customer: asked before the UPI reference is checked, so the customer sees the
+  // question, not "already recorded". Checked again inside the transaction, where it is final.
+  if (!sameRequest && !confirmRepeat) {
+    const running = await activePackageProject(userId, packageId);
+    if (running) throw alreadyBought(running);
+  }
+  const preparedEvidence = needsUpi && !sameRequest ? await prepareUpiPaymentEvidence({ reference: upiReference, transactionId, capturedVia: 'customer' }) : null;
 
   const orderData = {
     paymentPolicy: commercial.paymentPolicy || null,
-    projectCreationKey: `${userId}:${creationKey}`, projectCreationHash: creationHash,
+    projectCreationKey, projectCreationHash: creationHash,
     userId, price: finalPrice, totalAmount: finalPrice,
     // A customer's purchase is approved only by money: the wallet part at once, a UPI part by the admin.
     orderVisibility: 'pending-approval', status: 'pending',
@@ -153,6 +193,14 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   const { order, invoice, reused, purchase } = await persistAdminProject({
     orderData, startingNodeTitle, actorId: userId, clientPurchase: true,
     sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
+    // One purchase at a time per customer (the lock other package and offer requests use), then the final check.
+    async beforeCreate({ session }) {
+      await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
+      if (!confirmRepeat) {
+        const running = await activePackageProject(userId, packageId, session);
+        if (running) throw alreadyBought(running);
+      }
+    },
     async purchasePayment({ order: created, invoice: first, client, session }) {
       if (!client.phone) { client.phone = enteredPhone; client.phoneVerified = false; }
       // Paying for a project makes a member a client, in this same transaction (clientAccount.js).
@@ -172,17 +220,19 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
 
   // After the commit: the new client's Won lead, the customer's project mail and the team's notice. A failure
   // here never undoes a payment that is already recorded.
-  const fresh = await User.findById(userId);
   const after = async (label, work) => { try { await work(); } catch (error) { console.error(`[package purchase] ${label}:`, error.message); } };
-  if (promoted) await after('Won lead', () => require('./wonLead').ensureWonLead(fresh));
-  // The customer's mail is the package purchase one (it says what happens next), not the admin form's "work has begun".
-  await after('project mail', () => require('./emailController').sendReservationMail('package.purchase.received', { packageName: commercial.agreement.package?.name,
-    order, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending, invoiceNumber: invoice?.invoiceNumber }, fresh, `package-purchase-received:${order._id}`));
-  await after('team notice', () => require('./emailController').sendReservationMail('package.purchase.admin', { packageName: commercial.agreement.package?.name,
-    price: finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending,
-    upiReference: purchase.upiPending > 0 ? upiReference : '' }, fresh, `package-purchase:${order._id}`));
+  await schedule(async () => {
+    const fresh = await User.findById(userId);
+    if (promoted) await after('Won lead', () => require('./wonLead').ensureWonLead(fresh));
+    // The customer's mail is the package purchase one (it says what happens next), not the admin form's "work has begun".
+    await after('project mail', () => require('./emailController').sendReservationMail('package.purchase.received', { packageName: commercial.agreement.package?.name,
+      order, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending, invoiceNumber: invoice?.invoiceNumber }, fresh, `package-purchase-received:${order._id}`));
+    await after('team notice', () => require('./emailController').sendReservationMail('package.purchase.admin', { packageName: commercial.agreement.package?.name,
+      price: finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending,
+      upiReference: purchase.upiPending > 0 ? upiReference : '' }, fresh, `package-purchase:${order._id}`));
+  });
   return { orderId: String(order._id), invoiceId: String(invoice._id), approved: order.orderVisibility === 'approved', reused: false, promoted,
     finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending };
 }
 
-module.exports = { purchasePackage, paymentInfo, quoteForPurchase, catalogueForCustomer, quoteForCustomer };
+module.exports = { purchasePackage, paymentInfo, quoteForPurchase, catalogueForCustomer, quoteForCustomer, activePackageProject, activePackageProjects, alreadyBought };
