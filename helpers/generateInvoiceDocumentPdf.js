@@ -1,6 +1,7 @@
 const { formatIndiaDate } = require('./dateTime');
 const PDFDocument = require("pdfkit");
 const { getOrderDisplayName } = require("./orderPresentation");
+const { getInvoiceProfile } = require('./invoiceProfile');
 
 // SINGLE invoice-PDF generator for the whole app — customer and admin alike.
 //
@@ -20,16 +21,16 @@ const { getOrderDisplayName } = require("./orderPresentation");
 
 const STATEMENT_TYPES = new Set(["project_final", "service_statement"]);
 
-const COMPANY = {
-  name: "Mera Software",
-  tagline: "Digital Solutions",
-  address: "VA Computers, Near New Bus Stand, Majitha 143601",
-  contact: "contact@merasoftware.com  ·  +91 92565 37003",
-  website: "www.merasoftware.com",
-  websiteUrl: "https://www.merasoftware.com",
-  terms: "www.merasoftware.com/terms",
-  termsUrl: "https://www.merasoftware.com/terms",
-};
+const companyView = profile => ({
+  name: profile.businessName,
+  tagline: profile.tagline,
+  address: profile.addressLines.join(', '),
+  contact: `${profile.email}  ·  ${profile.phone}`,
+  website: profile.websiteUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+  websiteUrl: profile.websiteUrl,
+  terms: profile.termsUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+  termsUrl: profile.termsUrl,
+});
 
 const COLOR = { accent: "#0b5f66", ink: "#17212b", muted: "#4a5763", rule: "#d9dee3", tint: "#f3f6f8", ok: "#0b6b3a", due: "#a15c00" };
 const LEFT = 48;
@@ -123,14 +124,14 @@ const buildInvoiceRows = ({ invoice, order, targetTotal }) => {
 // ---------------------------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------------------------
-const drawHeader = (doc, title, number) => {
+const drawHeader = (doc, company, title, number) => {
   doc.roundedRect(LEFT, 48, 34, 34, 6).fill(COLOR.accent);
   doc.font("Helvetica-Bold").fontSize(16).fillColor("#ffffff").text("M", LEFT, 57, { width: 34, align: "center", lineBreak: false });
-  doc.font("Helvetica-Bold").fontSize(14).fillColor(COLOR.ink).text(COMPANY.name, LEFT + 44, 48, { lineBreak: false });
+  doc.font("Helvetica-Bold").fontSize(14).fillColor(COLOR.ink).text(company.name, LEFT + 44, 48, { lineBreak: false });
   doc.font("Helvetica").fontSize(8.5).fillColor(COLOR.muted);
-  doc.text(COMPANY.tagline, LEFT + 44, 65, { lineBreak: false });
-  doc.text(COMPANY.address, LEFT + 44, 76, { lineBreak: false });
-  doc.text(COMPANY.contact, LEFT + 44, 87, { lineBreak: false });
+  doc.text(company.tagline, LEFT + 44, 65, { lineBreak: false });
+  doc.text(company.address, LEFT + 44, 76, { lineBreak: false });
+  doc.text(company.contact, LEFT + 44, 87, { lineBreak: false });
   doc.font("Helvetica-Bold").fontSize(title.length > 14 ? 15 : 20).fillColor(COLOR.accent).text(title, LEFT + 260, 50, { width: WIDTH - 260, align: "right", lineBreak: false });
   if (number) doc.font("Helvetica").fontSize(10).fillColor(COLOR.muted).text(number, LEFT + 260, 76, { width: WIDTH - 260, align: "right", lineBreak: false });
   doc.moveTo(LEFT, 106).lineTo(RIGHT, 106).lineWidth(2).strokeColor(COLOR.accent).stroke();
@@ -220,7 +221,7 @@ const drawTotals = (doc, startY, lines) => {
   return y;
 };
 
-const drawFooters = (doc) => {
+const drawFooters = (doc, company) => {
   const { start, count } = doc.bufferedPageRange();
   for (let index = 0; index < count; index += 1) {
     doc.switchToPage(start + index);
@@ -229,15 +230,15 @@ const drawFooters = (doc) => {
     doc.page.margins.bottom = 0;
     doc.moveTo(LEFT, 772).lineTo(RIGHT, 772).lineWidth(0.5).strokeColor(COLOR.rule).stroke();
     doc.font("Helvetica").fontSize(9).fillColor(COLOR.muted);
-    doc.text(`Package details: ${COMPANY.website}`, LEFT, 780, { width: WIDTH, align: "center", lineBreak: false, link: COMPANY.websiteUrl });
-    doc.text(`Terms & Conditions: ${COMPANY.terms}`, LEFT, 793, { width: WIDTH, align: "center", lineBreak: false, link: COMPANY.termsUrl });
+    doc.text(`Package details: ${company.website}`, LEFT, 780, { width: WIDTH, align: "center", lineBreak: false, link: company.websiteUrl });
+    doc.text(`Terms & Conditions: ${company.terms}`, LEFT, 793, { width: WIDTH, align: "center", lineBreak: false, link: company.termsUrl });
     doc.fontSize(8).text(`This is a computer-generated invoice.  ·  Page ${index + 1} of ${count}`, LEFT, 808, { width: WIDTH, align: "center", lineBreak: false });
     doc.page.margins.bottom = bottom;
   }
 };
 
 // Statement layout — the project's whole story: what was bought, the total, what is paid and owed, and each payment.
-const renderStatement = (doc, { invoice, order, customer, transactions }) => {
+const renderStatement = (doc, { invoice, order, customer, transactions, company }) => {
   const total = Number(invoice.amount || 0);
   const paid = Number(invoice.amountPaid || 0);
   const balance = Math.max(0, total - paid);
@@ -245,7 +246,7 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
 
   // A plan of one cycle is a single payment: its statement is the plan's invoice (the portal calls it the same).
   const singleCycle = !(Number(order?.serviceTotalCycles) > 1);
-  let y = drawHeader(doc, isService ? (singleCycle ? "PLAN INVOICE" : "PLAN STATEMENT") : "FINAL PROJECT INVOICE", invoice.invoiceNumber);
+  let y = drawHeader(doc, company, isService ? (singleCycle ? "PLAN INVOICE" : "PLAN STATEMENT") : "FINAL PROJECT INVOICE", invoice.invoiceNumber);
   y = drawMeta(doc, y, {
     customer,
     project: getOrderDisplayName(order, isService ? "Service" : "Project"),
@@ -283,13 +284,13 @@ const renderStatement = (doc, { invoice, order, customer, transactions }) => {
 };
 
 // Invoice layout — one amount being collected.
-const renderInvoice = (doc, { invoice, order, customer }) => {
+const renderInvoice = (doc, { invoice, order, customer, company }) => {
   const paid = Number(invoice.amountPaid || 0);
   const amount = Number(invoice.amount || 0);
   const balance = Math.max(0, amount - paid);
   const orderTotal = Number(order?.totalAmount);
 
-  let y = drawHeader(doc, "INVOICE", invoice.invoiceNumber);
+  let y = drawHeader(doc, company, "INVOICE", invoice.invoiceNumber);
   y = drawMeta(doc, y, {
     customer,
     project: getOrderDisplayName(order, "Service"),
@@ -322,7 +323,12 @@ const isComplimentaryInvoice = (invoice) => invoice?.invoiceType === "compliment
 
 // Complimentary layout — a ₹0 record of free work (helpers/complimentaryUpgrade.js). Nothing was
 // ever due, so it has no due date, no paid/balance lines and none of the project's payment terms.
-const renderComplimentary = (doc, { invoice, order, customer }) => {
+const renderComplimentary = (doc, { invoice, order, customer, company }) => {
+  doc.fontSize(15).fillColor("#17212b").text(company.name, { align: "center" });
+  if (company.tagline) doc.fontSize(9).fillColor("#4a5763").text(company.tagline, { align: "center" });
+  doc.fontSize(9).text(company.address, { align: "center" });
+  doc.text(company.contact, { align: "center" });
+  doc.moveDown(1);
   doc.fontSize(22).fillColor("#111827").text("COMPLIMENTARY INVOICE", { align: "center" });
   doc.moveDown(1.4);
   doc.fontSize(10).fillColor("#374151");
@@ -349,7 +355,7 @@ const renderComplimentary = (doc, { invoice, order, customer }) => {
   }
 };
 
-const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [] }) =>
+const generateInvoiceDocumentPdf = async ({ invoice, order, customer, transactions = [] }) =>
   new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 48, size: "A4", bufferPages: true });
     const chunks = [];
@@ -357,19 +363,18 @@ const generateInvoiceDocumentPdf = ({ invoice, order, customer, transactions = [
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    try {
+    getInvoiceProfile().then(profile => {
+      const company = companyView(profile);
       if (isComplimentaryInvoice(invoice)) {
-        renderComplimentary(doc, { invoice, order, customer });
+        renderComplimentary(doc, { invoice, order, customer, company });
         doc.end();
         return;
       }
-      if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions });
-      else renderInvoice(doc, { invoice, order, customer });
-      drawFooters(doc);
+      if (isStatementInvoice(invoice)) renderStatement(doc, { invoice, order, customer, transactions, company });
+      else renderInvoice(doc, { invoice, order, customer, company });
+      drawFooters(doc, company);
       doc.end();
-    } catch (error) {
-      reject(error);
-    }
+    }).catch(reject);
   });
 
 module.exports = { generateInvoiceDocumentPdf, isStatementInvoice, isComplimentaryInvoice, buildInvoiceRows };

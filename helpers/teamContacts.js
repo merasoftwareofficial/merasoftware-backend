@@ -8,10 +8,10 @@ const User = require('../models/userModel');
 //   - contact email, else the admin's login email when only numbers are saved
 //   - up to two WhatsApp numbers each; an admin with no saved numbers keeps the account phone (savedPhoneFor)
 //   - an admin who saved nothing gets no team mail
-// FALLBACK (owner decision 7 Nov 2026) is used only while no active admin has saved anything, so team mail
-// never stops silently.
-const FALLBACK = { email: 'syncvap@gmail.com', numbers: ['+919256537003', '+919356393094'] };
-const TEAM_FALLBACK_EMAILS = [FALLBACK.email];
+// Deliberately no hidden fallback. An unconfigured team must be visible in the
+// admin UI, never silently delivered to an old address or phone number.
+const FALLBACK = { email: '', numbers: [] };
+const TEAM_FALLBACK_EMAILS = [];
 const lower = value => String(value || '').trim().toLowerCase();
 
 async function teamContacts() {
@@ -19,7 +19,7 @@ async function teamContacts() {
     .select('email adminContact').lean();
   const saved = admins.filter(admin => admin.adminContact?.email || admin.adminContact?.whatsappNumbers?.length)
     .map(admin => ({ email: lower(admin.adminContact.email || admin.email), numbers: admin.adminContact.whatsappNumbers || [] }));
-  return saved.length ? saved : [{ email: FALLBACK.email, numbers: FALLBACK.numbers }];
+  return saved;
 }
 /** The team mail's recipients, one address each. */
 async function teamRecipients() {

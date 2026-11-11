@@ -4,6 +4,9 @@ const router = express.Router()
 router.get('/admin/lead-updates', require('../middleware/authToken'), require('./leadUpdates'));
 router.get('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
 router.patch('/admin/my-settings', require('../middleware/authToken'), require('../controller/admin/mySettings'));
+const invoiceSettings = require('../controller/admin/invoiceSettings');
+router.get('/admin/invoice-settings', require('../middleware/authToken'), invoiceSettings.get);
+router.patch('/admin/invoice-settings', require('../middleware/authToken'), invoiceSettings.patch);
 const websitePreview = require('../controller/order/websitePreview');
 const previewAuth = require('../middleware/authToken');
 router.get('/projects/:projectId/website-preview', previewAuth, websitePreview.state);

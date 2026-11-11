@@ -2,6 +2,7 @@ const { formatIndiaDate, formatIndiaDateTime } = require('./dateTime');
 const { reviewTransport: resend, withEvent, queueMail } = require('./emailController');
 const { getOrderDisplayName } = require('./orderPresentation');
 const { buildTemplatedMail } = require('./emailTemplates');
+const { getInvoiceProfile } = require('./invoiceProfile');
 
 // Every mail builder only hands its data to the action's template (helpers/emailDefinitions.js);
 // the wording lives in the editable template, and the builder prepares a review draft — it
@@ -147,6 +148,7 @@ const sendAdminAutoRenewalNotification = (user, order, invoice) =>
  */
 const generateInvoicePdf = async (order, paymentDetails) => {
   try {
+    const profile = await getInvoiceProfile();
     // For this implementation, you would use a PDF generation library like PDFKit
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({
@@ -162,10 +164,10 @@ const generateInvoicePdf = async (order, paymentDetails) => {
     // doc.image('path_to_logo.png', 50, 45, { width: 100 });
     
     doc.fontSize(10);
-    doc.text('VA Computers', { align: 'right' });
-    doc.text('VA Computers, Near New Bus Stand', { align: 'right' });
-    doc.text('Majitha, 143601 ', { align: 'right' });
-    doc.text('Email: contact@merasofware.com', { align: 'right' });
+    doc.text(profile.businessName, { align: 'right' });
+    profile.addressLines.forEach(line => doc.text(line, { align: 'right' }));
+    doc.text(`Email: ${profile.email}`, { align: 'right' });
+    doc.text(`Phone: ${profile.phone}`, { align: 'right' });
     
     doc.moveDown();
     
@@ -302,6 +304,7 @@ const generateInvoicePdf = async (order, paymentDetails) => {
  */
 const generateMonthlyInvoicePdf = async (user, order, invoice) => {
   try {
+    const profile = await getInvoiceProfile();
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({
       margin: 50,
@@ -314,10 +317,10 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
 
     // Company Info (Right aligned)
     doc.fontSize(10);
-    doc.text('VA Computers', { align: 'right' });
-    doc.text('Near New Bus Stand', { align: 'right' });
-    doc.text('Majitha, 143601', { align: 'right' });
-    doc.text('Email: vacomputers.com@gmail.com', { align: 'right' });
+    doc.text(profile.businessName, { align: 'right' });
+    profile.addressLines.forEach(line => doc.text(line, { align: 'right' }));
+    doc.text(`Email: ${profile.email}`, { align: 'right' });
+    doc.text(`Phone: ${profile.phone}`, { align: 'right' });
 
     doc.moveDown(2);
 
@@ -385,7 +388,7 @@ const generateMonthlyInvoicePdf = async (user, order, invoice) => {
 
     doc.moveDown();
     doc.text('1. UPI Payment: vacomputers.com@okhdfcbank');
-    doc.text('2. Visit Office: VA Computers, Majitha');
+    doc.text(`2. Visit Office: ${profile.addressLines.join(', ')}`);
 
     doc.moveDown(2);
     doc.fontSize(9).fillColor('#666');

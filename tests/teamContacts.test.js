@@ -48,14 +48,14 @@ async function teamMessage() {
   await deliverStartNotices();
   const [history] = await EmailHistory.find({ event: 'offer.start.request.admin' }).lean();
   const queued = await Queue.find({ event: 'offer.start.request.admin' }).sort({ to: 1 }).lean();
-  return { to: history.to, whatsapp: queued.filter(row => row.status === 'pending').map(row => row.to) };
+  return { to: history?.to || [], whatsapp: queued.filter(row => row.status === 'pending').map(row => row.to) };
 }
 
-test('nobody saved settings: the owner fallback, syncvap@gmail.com and both numbers', async () => {
-  assert.deepEqual(await teamRecipients(), ['syncvap@gmail.com']);
+test('nobody saved settings: no hidden email or WhatsApp fallback', async () => {
+  assert.deepEqual(await teamRecipients(), []);
   const { to, whatsapp } = await teamMessage();
-  assert.deepEqual(to, ['syncvap@gmail.com']);
-  assert.deepEqual(whatsapp, ['919256537003', '919356393094']);
+  assert.deepEqual(to, []);
+  assert.deepEqual(whatsapp, []);
 });
 test('the admin settings decide: contact email and both saved numbers, no fallback', async () => {
   await User.create({ name: 'Owner', email: 'login@example.test', roles: ['admin'], phone: '+919800000000',

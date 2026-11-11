@@ -3,6 +3,7 @@ const orderModel = require("../../models/orderProductModel");
 const PDFDocument = require('pdfkit');
 const mongoose = require('mongoose');
 const { getOrderDisplayName } = require('../../helpers/orderPresentation');
+const { getInvoiceProfile } = require('../../helpers/invoiceProfile');
 
 const downloadInvoice = async (req, res) => {
   try {
@@ -19,6 +20,7 @@ const downloadInvoice = async (req, res) => {
         message: 'Order not found'
       });
     }
+    const profile = await getInvoiceProfile();
     
     // Create PDF document
     const doc = new PDFDocument();
@@ -35,10 +37,11 @@ const downloadInvoice = async (req, res) => {
     doc.moveDown();
     
     // Company info
-    doc.fontSize(12).text('Your Company Name', { align: 'right' });
-    doc.fontSize(10).text('123 Business Street', { align: 'right' });
-    doc.text('City, State ZIP', { align: 'right' });
-    doc.text('Email: support@yourcompany.com', { align: 'right' });
+    doc.fontSize(12).text(profile.businessName, { align: 'right' });
+    doc.fontSize(10);
+    profile.addressLines.forEach(line => doc.text(line, { align: 'right' }));
+    doc.text(`Email: ${profile.email}`, { align: 'right' });
+    doc.text(`Phone: ${profile.phone}`, { align: 'right' });
     doc.moveDown();
     
     // Invoice details
