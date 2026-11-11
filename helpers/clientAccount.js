@@ -58,9 +58,19 @@ const upgradeMemberToClient = async (user, { phone, session }) => {
 // A member who pays for a project themselves becomes a client (owner decision 9 Nov 2026). Unlike
 // upgradeMemberToClient (an admin converting a lead), the person acts for themselves: they are signed in and
 // are paying, so the account keeps its own password and nothing is reset.
+// Written with updateOne, not user.save(): inside the purchase transaction an offer's reservation lock
+// (offerReservations.js attachProjectReservation) bumps the account's __v after `user` was loaded, and
+// a save of the changed roles array would then fail its version check ("No matching document found").
+// A phone added just before (packagePurchase.js) is written in the same update.
 const promoteMemberToClient = async (user, { session } = {}) => {
-  user.roles = ["customer"];
-  return user.save(session ? { session } : undefined);
+  const set = { roles: ["customer"] };
+  if (user.isModified("phone")) {
+    set.phone = user.phone;
+    set.phoneVerified = user.phoneVerified;
+  }
+  await userModel.updateOne({ _id: user._id }, { $set: set }, session ? { session } : undefined);
+  user.set("roles", ["customer"]);
+  return user;
 };
 
 module.exports = {

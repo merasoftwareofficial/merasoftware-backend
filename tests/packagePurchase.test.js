@@ -255,3 +255,35 @@ test('catalogue: a running offer shows its price, end and the server clock; once
     assert.equal(after.price, 10000, 'the normal price again');
   } finally { global.fetch = live; }
 });
+
+// A member buys a package that has a running offer and pays by UPI (fix 11 Nov 2026). The offer's reservation lock
+// bumps the account's version inside the purchase transaction; becoming a client must still work, with or without a
+// phone already on the account ("No matching document found ... modifiedPaths roles" before the fix).
+test('a member buys an offer package by UPI: becomes a client and the project is created, with or without a phone on the account', async () => {
+  const offer = { slug: 'dhamaka', title: 'Dhamaka', status: 'published', endsAt: new Date(Date.now() + 48 * 3600e3).toISOString(), targets: ['projects'],
+    applicableCategories: ['standard_websites'], pricingRule: 'fixed_price', offerPrice: 2099, resolvedTerms: [] };
+  const withOffer = await savePackage({ ...base, name: 'Startup Offer', id: '', paymentOptions: ['full'], offerSlug: 'dhamaka' }, true, [offer]);
+  const live = global.fetch;
+  global.fetch = async url => String(url).includes('/api/offers/live') ? { ok: true, json: async () => ({ offers: [offer], catalogueOffers: [offer], packagePages: [] }) } : live(url);
+  process.env.OFFER_RESERVATIONS_ENABLED = 'true';
+  try {
+    const noPhone = await User.create({ name: 'Member Two', email: 'member2@example.test', roles: ['member'], password: 'own-hash', walletBalance: 0 });
+    await User.updateOne({ _id: member._id }, { walletBalance: 0 });
+    const offerKey = quotePackage(withOffer, [offer]).quoteKey;
+    for (const [user, upi, extra] of [[member, '100850359714', {}], [noPhone, '100850359715', { countryCode: '+91', phone: '9876500099' }]]) {
+      const before = await User.findById(user._id).lean();
+      const result = await purchasePackage({ userId: user._id, packageId: withOffer.id, choice: { paymentOption: 'full' }, quoteKey: offerKey,
+        creationKey: `offer-key-${++key}-abcdefghij`, upiTransactionId: upi, ...extra });
+      assert.equal(result.promoted, true);
+      assert.equal(result.upiPending, 2099, 'the offer price is charged');
+      assert.equal(result.approved, false, 'the UPI payment waits for the admin');
+      const after = await User.findById(user._id).lean();
+      assert.deepEqual(after.roles, ['customer']);
+      assert.equal(after.password, before.password, 'the password the member chose stays');
+      assert.equal(after.phone, before.phone || '+919876500099', 'a phone given at checkout is saved');
+      const order = await Order.findById(result.orderId).lean();
+      assert.equal(order.projectSnapshot.salesAgreement.offer.slug, 'dhamaka');
+      assert.equal((await Transaction.findOne({ orderId: order._id }).lean()).status, 'pending');
+    }
+  } finally { global.fetch = live; delete process.env.OFFER_RESERVATIONS_ENABLED; }
+});
