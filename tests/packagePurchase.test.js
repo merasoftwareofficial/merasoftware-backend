@@ -23,7 +23,7 @@ const base = { name: 'Business Starter', description: 'A business website.', sta
   linkedPlanIds: [], order: 0, pages: [] };
 const CYCLES = [{ billingCycle: 'monthly', discountPercent: 0 }, { billingCycle: 'quarterly', discountPercent: 10 }];
 const MONTHLY = { ...base, name: 'Monthly Care', paymentOptions: undefined, billing: 'monthly', regularPrice: 1500, discountedPrice: 1000,
-  monthly: { pricing: 'fixed', billingOptions: CYCLES, maxTenureMonths: 12 } };
+  monthly: { billingOptions: CYCLES, maxTenureMonths: 12, uploadsPerMonth: 2 } };
 let database, member, customer, admin, saved, key = 0, emails;
 const realFetch = global.fetch;
 before(async () => {
@@ -164,15 +164,21 @@ test('an installment package: the first payment starts the project, the rest fol
   assert.equal(await wallet(member), 15000);
 });
 
-test('a monthly package: the first cycle is paid and the cycles follow', async () => {
+test('a monthly package is bought as a plan: the first cycle is paid now, the plan engine bills the rest', async () => {
   const care = await savePackage({ ...MONTHLY, id: '' }, true, []);
   const choice = { billingCycle: 'quarterly', tenureMonths: 6 };
   const result = await purchasePackage({ userId: customer._id, packageId: care.id, choice, quoteKey: quoteKey(care), creationKey: 'monthly-key-abcdefghijk', upiTransactionId: '210987654321' });
+  assert.equal(result.plan, true);
   const order = await Order.findById(result.orderId).lean();
-  assert.equal(order.isPartialPayment, true);
-  assert.equal(order.installments.length, 2, 'two quarterly cycles in six months');
-  assert.equal(result.upiPending, order.installments[0].amount);
-  assert.equal(order.projectSnapshot.salesAgreement.package.billing, 'monthly');
+  assert.deepEqual([order.isServicePlan, order.isWebsiteProject, order.serviceTotalCycles, order.serviceCyclePrice], [true, false, 2, 2700]);
+  assert.equal(result.upiPending + result.walletPaid, 2700, 'cycle 1 only');
+  assert.equal(order.salesPackage.package.billing, 'monthly');
+  // A member pays wallet-only: the plan is live at once.
+  const memberPlan = await purchasePackage({ userId: member._id, packageId: care.id, choice: { billingCycle: 'monthly', tenureMonths: 3 }, quoteKey: quoteKey(care), creationKey: 'monthly-member-abcdefghij' });
+  const live = await Order.findById(memberPlan.orderId).lean();
+  assert.deepEqual([live.orderVisibility, live.servicePlanStatus, memberPlan.walletPaid], ['approved', 'active', 1000]);
+  await assert.rejects(purchasePackage({ userId: member._id, packageId: care.id, choice: { billingCycle: 'monthly', tenureMonths: 3 }, quoteKey: quoteKey(care), creationKey: 'monthly-member-second-abc' }),
+    error => error.code === 'package_already_bought');
 });
 
 test('the same purchase sent twice makes one project and one payment', async () => {
@@ -199,14 +205,16 @@ test('staff without a client or member role cannot buy', async () => {
 });
 
 // The portal's "Start a Project" list and choice quote (owner decision 10 Nov 2026): the same prices the purchase charges.
-test('catalogue: published one-time packages with the purchase price, nothing internal; empty while the system is off', async () => {
-  await savePackage({ ...MONTHLY, id: '' }, true, []);
+test('catalogue: published one-time and monthly packages with the purchase price, nothing internal; empty while the system is off', async () => {
+  const care = await savePackage({ ...MONTHLY, id: '' }, true, []);
   await savePackage({ ...base, name: 'Hidden Draft', status: 'draft', id: '' }, true, []);
   const { catalogueForCustomer } = require('../helpers/packagePurchase');
   const list = await catalogueForCustomer(customer._id);
   assert.equal(list.enabled, true);
-  assert.deepEqual(list.packages.map(row => row.id), [saved.id], 'only the published one-time package');
-  const row = list.packages[0];
+  assert.deepEqual(list.packages.map(row => row.id).sort(), [saved.id, care.id].sort(), 'the published packages, monthly too');
+  const monthly = list.packages.find(row => row.id === care.id);
+  assert.deepEqual([monthly.billing, monthly.monthly.uploadsPerMonth, monthly.monthly.maxTenureMonths], ['monthly', 2, 12]);
+  const row = list.packages.find(item => item.id === saved.id);
   assert.equal(row.price, 10000);
   assert.equal(row.mainPrice, 15000);
   assert.deepEqual(row.paymentOptions, ['full', 'installments_2']);

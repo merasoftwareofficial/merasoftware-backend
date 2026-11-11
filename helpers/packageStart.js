@@ -46,7 +46,7 @@ async function listPackageStarts(userId) {
 
 // The customer's choice on the customize page (package.md §3), as the request stores it.
 const choiceFromQuote = quote => (quote.billing === 'monthly'
-  ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths, files: quote.monthly.files, updates: quote.monthly.updatesPerMonth }
+  ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths }
   : { paymentOption: quote.paymentOption });
 
 async function requestPackageStart(input, retry = true) {
@@ -201,7 +201,8 @@ async function alertPendingPackageStarts({ now = new Date(), limit = 20 } = {}) 
 
 // Called inside the project-creation transaction: a project on this package closes the person's open request.
 async function closeOnProject({ order, session }) {
-  const packageId = order?.projectSnapshot?.salesAgreement?.package?.id;
+  // A one-time package project, or a monthly package sold as a plan (packagePlanOrder.js).
+  const packageId = require('./packagePlanOrder').packageIdOf(order);
   if (!packageId || !order.userId) return null;
   return StartRequest.updateOne({ userId: order.userId, packageId, closedAt: null },
     { $set: { closedAt: new Date(), closedReason: 'project_created', projectId: order._id } }, { session });

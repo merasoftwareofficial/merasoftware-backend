@@ -6,7 +6,7 @@ const { readPackages, quotePackage, quoteChoice, fail } = require('./salesPackag
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { requireCategoryForNewProject } = require('./projectCategories');
 const { resolveProjectPricing } = require('./projectPricing');
-const { buildInstallments, buildCycleInstallments } = require('./projectInstallments');
+const { buildInstallments } = require('./projectInstallments');
 const { persistAdminProject } = require('./adminProjectCreation');
 const { receiveFirstPaymentInSession } = require('./projectPaymentSettlement');
 const { prepareUpiPaymentEvidence } = require('./upiPaymentEvidence');
@@ -30,21 +30,25 @@ const DEFAULT_STARTING_NODE_TITLE = 'Project Started';
 // it again needs the customer's own "yes, a second one" (confirmRepeat), so a confused repeat click never makes a
 // second project. Running = not cancelled, not payment-rejected, not completed; a deleted project is gone from Orders.
 // One rule for the purchase, the "Proceed to pay" start request and the page that asks before paying.
-const ACTIVE_PACKAGE_PROJECT = packageId => ({ 'projectSnapshot.salesAgreement.package.id': packageId,
-  orderVisibility: { $nin: ['cancelled', 'payment-rejected'] }, status: { $ne: 'completed' } });
-const projectView = order => ({ orderId: String(order._id), packageId: order.projectSnapshot?.salesAgreement?.package?.id || null,
-  name: order.projectSnapshot?.displayName || order.projectSnapshot?.salesAgreement?.package?.name || 'Project',
-  boughtAt: order.createdAt || null, approved: order.orderVisibility === 'approved' });
+// A monthly package runs as a plan (packagePlanOrder.js): running = its plan is active, paused for a bill, or waiting.
+const RUNNING_PLAN = ['active', 'paused', 'pending_activation'];
+const ACTIVE_PACKAGE_ORDER = idMatch => ({ orderVisibility: { $nin: ['cancelled', 'payment-rejected'] }, $or: [
+  { 'projectSnapshot.salesAgreement.package.id': idMatch, status: { $ne: 'completed' } },
+  { 'salesPackage.package.id': idMatch, isServicePlan: true, servicePlanStatus: { $in: RUNNING_PLAN } }] });
+const { packageIdOf } = require('./packagePlanOrder');
+const projectView = order => ({ orderId: String(order._id), packageId: packageIdOf(order),
+  name: order.projectSnapshot?.displayName || order.projectSnapshot?.salesAgreement?.package?.name || order.salesPackage?.package?.name || 'Project',
+  boughtAt: order.createdAt || null, approved: order.orderVisibility === 'approved', plan: order.isServicePlan === true });
+const VIEW_FIELDS = 'projectSnapshot salesPackage isServicePlan orderVisibility createdAt';
 async function activePackageProject(userId, packageId, session = null) {
-  const order = await Order.findOne({ userId, ...ACTIVE_PACKAGE_PROJECT(packageId) }).sort({ createdAt: -1 })
-    .select('projectSnapshot orderVisibility createdAt').session(session).lean();
+  const order = await Order.findOne({ userId, ...ACTIVE_PACKAGE_ORDER(packageId) }).sort({ createdAt: -1 })
+    .select(VIEW_FIELDS).session(session).lean();
   return order ? projectView(order) : null;
 }
-// The customer's running package projects, one per package (the newest), for the page to ask before paying.
+// The customer's running package projects and monthly package plans, one per package (the newest), for the page to ask before paying.
 async function activePackageProjects(userId) {
-  const orders = await Order.find({ userId, 'projectSnapshot.salesAgreement.package.id': { $type: 'string' },
-    orderVisibility: { $nin: ['cancelled', 'payment-rejected'] }, status: { $ne: 'completed' } })
-    .sort({ createdAt: -1 }).select('projectSnapshot orderVisibility createdAt').lean();
+  const orders = await Order.find({ userId, ...ACTIVE_PACKAGE_ORDER({ $type: 'string' }) })
+    .sort({ createdAt: -1 }).select(VIEW_FIELDS).lean();
   const seen = new Set();
   return orders.map(projectView).filter(row => row.packageId && !seen.has(row.packageId) && seen.add(row.packageId));
 }
@@ -81,7 +85,7 @@ const publishedPackage = async packageId => {
   return item;
 };
 
-// The portal's "Start a Project" list (owner decision 10 Nov 2026): the published one-time packages a signed-in
+// The portal's "Start a Project" list (owner decisions 10 + 11 Nov 2026): the published one-time and monthly packages a signed-in
 // customer can buy, each with the price the purchase would charge. It reads the same quote as the purchase, so
 // the list, the choice quote and the payment can never disagree. Nothing internal (service references, frozen
 // add-on pricing, page design) is sent. While the package start system is off the list is empty, and the portal
@@ -91,11 +95,14 @@ async function catalogueForCustomer(userId) {
   if (!enabled()) return { enabled: false, packages: [] };
   const offers = (await fetchWebsiteCatalogue()).offers;
   const packages = (await readPackages())
-    .filter(item => item.status === 'published' && item.billing === 'one_time')
+    .filter(item => item.status === 'published' && (item.billing === 'one_time' || item.billing === 'monthly'))
     .map(item => {
       const { quote } = quotePackage(item, offers);
+      // A monthly package (owner decision 11 Nov 2026): price is per month; the customer picks a cycle and a length.
       return { id: item.id, name: item.name, description: item.description, category: item.category, billing: item.billing,
         portalUploads: item.portalUploads, paymentOptions: item.paymentOptions, inclusions: item.inclusions, terms: quote.terms,
+        ...(item.billing === 'monthly' ? { monthly: { billingOptions: item.monthly.billingOptions, maxTenureMonths: item.monthly.maxTenureMonths,
+          uploadsPerMonth: item.portalUploads ? (item.monthly.uploadsPerMonth ?? null) : null } } : {}),
         mainPrice: item.regularPrice, price: quote.finalPrice, discountAmount: quote.discountAmount,
         offer: quote.offer ? { title: quote.offer.title, endsAt: quote.offer.endsAt } : null };
     });
@@ -145,9 +152,8 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   const commercial = await resolveProjectPricing({ body: { packageId, packageQuoteKey: quoted.quoteKey, sellingPrice, ...(monthly ? { monthlyChoice: choice } : {}) },
     category: item.category, basePrice: categoryEntry.basePrice || 0, features: [], referenceTotal: 0, userId });
   const finalPrice = commercial.finalPrice;
-  const monthlyTerm = commercial.monthly || null;
   const installmentCount = !monthly && priced.installments?.length ? priced.installments.length : 0;
-  const isPartialPayment = Boolean(monthlyTerm) || installmentCount > 0;
+  const isPartialPayment = installmentCount > 0;
   const startingNodeTitle = categoryEntry.startingNodeTitle || DEFAULT_STARTING_NODE_TITLE;
   const creationHash = createHash('sha256').update(JSON.stringify({ userId: String(userId), packageId, choice, quoteKey })).digest('hex');
 
@@ -170,6 +176,12 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   }
   const preparedEvidence = needsUpi && !sameRequest ? await prepareUpiPaymentEvidence({ reference: upiReference, transactionId, capturedVia: 'customer' }) : null;
 
+  // A monthly package is sold as a plan (packagePlanOrder.js): the first cycle is paid now, the plan engine bills the rest.
+  if (monthly) {
+    return purchaseMonthlyPackage({ userId, packageId, item, commercial, projectCreationKey, creationHash, confirmRepeat, enteredPhone,
+      upiReference, transactionId, preparedEvidence }, { schedule });
+  }
+
   const orderData = {
     paymentPolicy: commercial.paymentPolicy || null,
     projectCreationKey, projectCreationHash: creationHash,
@@ -186,8 +198,7 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
     orderItems: [{ id: `project:${item.category}`, name: commercial.agreement.package?.name || `${categoryEntry.label} (Base)`, type: 'main', quantity: 1,
       originalPrice: commercial.basePrice, finalPrice: commercial.basePrice }],
   };
-  if (monthlyTerm) orderData.installments = buildCycleInstallments(monthlyTerm.cyclePrice, monthlyTerm.totalCycles, monthlyTerm.cycleMonths, monthlyTerm.startsAt);
-  else if (installmentCount) orderData.installments = buildInstallments(finalPrice, installmentCount);
+  if (installmentCount) orderData.installments = buildInstallments(finalPrice, installmentCount);
 
   let promoted = false;
   const { order, invoice, reused, purchase } = await persistAdminProject({
@@ -233,6 +244,42 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   });
   return { orderId: String(order._id), invoiceId: String(invoice._id), approved: order.orderVisibility === 'approved', reused: false, promoted,
     finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending };
+}
+
+// The monthly package purchase: the same checks as above, then one plan order with its first-cycle bill and payment.
+async function purchaseMonthlyPackage({ userId, packageId, item, commercial, projectCreationKey, creationHash, confirmRepeat, enteredPhone,
+  upiReference, transactionId, preparedEvidence }, { schedule }) {
+  const { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan } = require('./packagePlanOrder');
+  const orderData = { ...buildPackagePlanOrderData({ userId, item, commercial }), projectCreationKey, projectCreationHash: creationHash };
+  let promoted = false;
+  const { order, invoice, reused, walletPaid, upiPending } = await persistPackagePlanOrder({
+    orderData, actorId: userId, clientPurchase: true, sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
+    payment: { kind: 'customer', upiReference, transactionId, preparedEvidence },
+    async beforeCreate({ client, session }) {
+      await User.updateOne({ _id: userId }, { $inc: { __v: 1 } }, { session });
+      if (!confirmRepeat) {
+        const running = await activePackageProject(userId, packageId, session);
+        if (running) throw alreadyBought(running);
+      }
+      if (!client.phone) { client.phone = enteredPhone; client.phoneVerified = false; }
+      // Paying for a package makes a member a client, in this same transaction (clientAccount.js).
+      if (!(client.roles || []).includes('customer')) { await promoteMemberToClient(client, { session }); promoted = true; }
+      else if (client.isModified('phone')) await client.save({ session });
+    },
+  });
+  if (reused) return { orderId: String(order._id), approved: order.orderVisibility === 'approved', reused: true, promoted: false, plan: true };
+  // A wallet-paid first bill starts cycle 1 now; a UPI part starts it when the admin approves it.
+  const started = await startPaidPackagePlan({ order, invoice });
+  const after = async (label, work) => { try { await work(); } catch (error) { console.error(`[package purchase] ${label}:`, error.message); } };
+  // The plan's own mails, as for any plan bought (customerCreateServicePlanOrder.js): "payment submitted" for a UPI
+  // part and the team's notice. A paid cycle already told the customer (settleServiceCycle → plan mails).
+  await schedule(async () => {
+    const fresh = await User.findById(userId);
+    if (promoted) await after('Won lead', () => require('./wonLead').ensureWonLead(fresh));
+    await after('plan mails', () => require('./servicePlanNotifications').preparePurchaseMails(order._id, { walletPaid, upiPending, upiReference: upiPending > 0 ? upiReference : '' }));
+  });
+  return { orderId: String(order._id), invoiceId: String(invoice._id), approved: started.orderVisibility === 'approved', reused: false, promoted, plan: true,
+    finalPrice: commercial.finalPrice, dueNow: order.totalAmount, walletPaid, upiPending };
 }
 
 module.exports = { purchasePackage, paymentInfo, quoteForPurchase, catalogueForCustomer, quoteForCustomer, activePackageProject, activePackageProjects, alreadyBought };

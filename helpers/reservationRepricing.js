@@ -76,12 +76,11 @@ function revisedAgreement(agreement, terms, revision, reason, now) {
 
 // Writes one immutable revision and every projection of the price in the caller's transaction.
 // Settled money is never rewritten: only the unpaid first bill, installments and summary change.
-const MONTHLY_FIXED = 'A monthly package project keeps the cycle prices it was created with. Review it by hand.';
+const MONTHLY_FIXED = 'A monthly package runs as a plan and keeps the cycle prices it was bought with. Review it by hand.';
 async function applyPricingRevision({ order, reservation, terms, reason, actorId = null, note = '', session }) {
   const agreement = order.projectSnapshot?.salesAgreement;
-  // A monthly package's cycles are fixed at creation (merasoftware/src/docs/package.md); a reprice would
-  // rebuild them as 50 / 50 progress installments, so it is never done automatically.
-  if (agreement?.package?.monthly) fail(MONTHLY_FIXED, 409);
+  // A monthly package is a plan order (src/docs/monthlypackage.md) whose cycle price is frozen; it is never repriced here.
+  if (order.isServicePlan) fail(MONTHLY_FIXED, 409);
   const invoice = await firstInvoice(order, session);
   if (!agreement || !invoice || ['paid', 'cancelled'].includes(invoice.status)) fail('The first bill is already settled; the price is locked', 409);
   const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
@@ -158,8 +157,8 @@ async function reconcileReservation(reservationId, { now = new Date(), catalogue
     const agreement = order.projectSnapshot?.salesAgreement;
     let terms;
     try {
+      if (order.isServicePlan) fail(MONTHLY_FIXED);
       if (!agreement?.regularPrice) fail('This project has no saved agreement to reprice');
-      if (agreement.package?.monthly) fail(MONTHLY_FIXED);
       terms = expiredTerms(agreement, currentOffer, order.projectSnapshot.category, now, fresh.offerSlug);
     } catch (error) {
       fresh.resolution = { status: 'needs_review', source: null, note: error.message, at: now };
@@ -286,7 +285,6 @@ async function loadForceApply({ reservationId, orderId, session }) {
   if (reservation.projectId && String(reservation.projectId) !== String(order._id)) fail('This reservation is already used on another project', 409);
   if (order.offerReservationId && String(order.offerReservationId) !== String(reservation._id)) fail('This project is linked to a different reservation', 409);
   if (reservation.confirmedAt) fail('This reservation already locked its price', 409);
-  if (order.projectSnapshot?.salesAgreement?.package?.monthly) fail(MONTHLY_FIXED, 409);
   if (reservation.resolution?.status === 'force_applied') fail('This reservation was already force-applied', 409);
   const categories = reservation.offerSnapshot.applicableCategories || [];
   if (!categories.includes(order.projectSnapshot?.category)) fail('The reserved offer does not cover this project category', 409);

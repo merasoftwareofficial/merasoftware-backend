@@ -688,6 +688,10 @@ const orderSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    // A monthly package sold as a plan (helpers/packagePlanOrder.js): the package agreement frozen at
+    // purchase (package id/name, prices, offer, terms, the bought term). Absent on every other order.
+    // Kept outside projectSnapshot so the order never counts as a project (frontend orderType.js).
+    salesPackage: { type: mongoose.Schema.Types.Mixed, default: undefined },
     servicePlanSnapshot: {
         // The plan's display name, frozen at purchase like every other snapshot
         // field. Without this the order would depend on the catalog product row

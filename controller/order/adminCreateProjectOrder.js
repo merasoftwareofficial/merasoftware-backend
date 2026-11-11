@@ -8,7 +8,7 @@ const { sellableFeatureFilter, featureLines } = require("../../helpers/featureCa
 const { ADMIN_PAYMENT_METHODS, preparePaymentEvidence } = require("../../helpers/paymentEvidence");
 const { sendProjectCreatedEmail } = require("../../helpers/emailService");
 const { resolveProjectPricing } = require('../../helpers/projectPricing');
-const { buildInstallments, buildCycleInstallments } = require('../../helpers/projectInstallments');
+const { buildInstallments } = require('../../helpers/projectInstallments');
 const { createHash } = require('node:crypto');
 
 const PAYMENT_METHODS = ADMIN_PAYMENT_METHODS;
@@ -157,8 +157,8 @@ const adminCreateProjectOrderController = async (req, res) => {
       offer = commercial.agreement.offer;
     }
 
-    // A monthly package is paid per billing cycle (merasoftware/src/docs/package.md decision 9), never in
-    // full or in 2 / 3 installments; only a monthly package is.
+    // A monthly package is paid per billing cycle (src/docs/monthlypackage.md), never in full or in 2 / 3
+    // installments; only a monthly package is. It is made as a plan (packagePlanOrder.js), as a customer's purchase is.
     const monthlyTerm = commercial?.monthly || null;
     if (Boolean(monthlyTerm) !== (paymentType === "monthly")) {
       return res.status(400).json({
@@ -167,7 +167,23 @@ const adminCreateProjectOrderController = async (req, res) => {
         success: false,
       });
     }
-    const isPartialPayment = !isFree && (paymentType === "partial" || Boolean(monthlyTerm));
+    if (monthlyTerm) {
+      const packageItem = (await require('../../helpers/salesPackages').readPackages()).find(row => row.id === req.body.packageId);
+      const { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan } = require('../../helpers/packagePlanOrder');
+      const orderData = buildPackagePlanOrderData({ userId: customerId, item: packageItem, commercial });
+      if (creationKey) { orderData.projectCreationKey = creationKey; orderData.projectCreationHash = creationHash; }
+      // Agreed pay-later offer terms: the plan works before payment (as customerCreateServicePlanOrder.js).
+      if (!shouldRecordPayment && require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(commercial.paymentPolicy)) orderData.orderVisibility = 'approved';
+      const { order, invoice, reused } = await persistPackagePlanOrder({
+        orderData, actorId: req.userId, sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
+        payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null,
+      });
+      const saved = reused ? order : await startPaidPackagePlan({ order, invoice });
+      // Pay-later terms: the plan is working before payment, so it has started (the paid case is told by the cycle settlement).
+      if (!reused && invoice.status !== 'paid' && orderData.orderVisibility === 'approved') require('../../helpers/servicePlanNotifications').notifyPlanStarted(order._id, invoice);
+      return res.status(reused ? 200 : 201).json({ message: "Monthly package started as a plan", success: true, error: false, data: saved });
+    }
+    const isPartialPayment = !isFree && paymentType === "partial";
     // A project order must never be born `approved` without a real payment recorded. When admin
     // defers payment ("Just Add Project, Let Client Pay the Bill"), the order stays
     // `pending-approval`; the same approveProjectOrder.js "record payment to approve" flow closes it out
@@ -212,9 +228,7 @@ const adminCreateProjectOrderController = async (req, res) => {
       ],
     };
 
-    if (monthlyTerm) {
-      orderData.installments = buildCycleInstallments(monthlyTerm.cyclePrice, monthlyTerm.totalCycles, monthlyTerm.cycleMonths, monthlyTerm.startsAt);
-    } else if (isPartialPayment) {
+    if (isPartialPayment) {
       orderData.installments = buildInstallments(finalPrice, installmentCount);
     }
 

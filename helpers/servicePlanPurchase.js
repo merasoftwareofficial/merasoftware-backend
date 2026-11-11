@@ -153,7 +153,8 @@ const buildServicePlanOrderData = ({
 
   return {
     userId,
-    productId: plan._id,
+    // A monthly package sold as a plan has no catalogue plan (packagePlanOrder.js): no productId, its own item id.
+    productId: plan._id ?? null,
     quantity: 1,
     price,
     originalPrice: price,
@@ -170,7 +171,7 @@ const buildServicePlanOrderData = ({
     messages: [],
     orderItems: [
       {
-        id: plan._id.toString(),
+        id: plan._id ? plan._id.toString() : plan.orderItemId,
         name: plan.serviceName,
         type: "main",
         quantity: 1,

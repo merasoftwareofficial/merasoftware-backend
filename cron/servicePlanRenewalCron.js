@@ -8,6 +8,15 @@ const { syncServiceBillingStatement } = require('../helpers/serviceBillingStatem
 const processServicePlanRenewals = async (now = new Date()) => {
   const dueServices = await orderModel.find({ isServicePlan: true, servicePlanStatus: 'active', serviceNextBillingDate: { $lte: now } });
   for (const service of dueServices) {
+    // The client stopped it (serviceLifecycle.js stopServiceRenewal, like a subscription): the paid cycle runs to
+    // its end, then the plan ends with no further bill, whatever length was bought (src/docs/monthlypackage.md).
+    if (service.serviceAutoRenewalStoppedAt) {
+      service.servicePlanStatus = 'expired';
+      service.serviceNextBillingDate = null;
+      await service.save();
+      await syncServiceBillingStatement(service);
+      continue;
+    }
     if (service.paymentPolicy) {
       await require('../helpers/offerServiceRenewal').advanceOfferServiceCycle(service._id, now);
       continue;

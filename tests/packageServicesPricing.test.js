@@ -10,7 +10,7 @@ const Order = require('../models/orderProductModel');
 const Invoice = require('../models/invoiceModel');
 const Category = require('../models/categoryBasePriceModel');
 const Product = require('../models/productModel');
-const { savePackage, readPackages, quotePackage, validatePackage } = require('../helpers/salesPackages');
+const { savePackage, readPackages, quotePackage, quotePackageChoice, validatePackage } = require('../helpers/salesPackages');
 const createProject = require('../controller/order/adminCreateProjectOrder');
 const { adminRead, integrationRead } = require('../controller/order/salesPackagesController');
 
@@ -80,7 +80,7 @@ test('the price the form shows must match; a client-sent pricing is ignored', as
   assert.equal(forged.pricing.categoryBasePrice, 10000);
 });
 
-test('refused: unpriced category, hidden or other-category add-on, unknown, duplicate, bad quantity, monthly', async () => {
+test('refused: unpriced category, hidden or other-category add-on, unknown, duplicate, bad quantity', async () => {
   await assert.rejects(make({ category: 'unpriced_one', regularPrice: 3000, discountedPrice: 3000 }), /no base price/);
   await assert.rejects(make({ services: sel([hidden]), regularPrice: 10100 }), /unavailable/);
   await assert.rejects(make({ services: sel([otherCategory]), regularPrice: 10700 }), /unavailable/);
@@ -88,7 +88,17 @@ test('refused: unpriced category, hidden or other-category add-on, unknown, dupl
   await assert.rejects(make({ services: sel([seo], [seo]) }), /twice/);
   await assert.rejects(make({ services: [{ featureId: String(pages._id), quantity: 0 }], regularPrice: 10000 }), /1 and 1000|between 1/);
   await assert.rejects(make({ services: [{ featureId: 'nope', quantity: 1 }] }), /valid add-on/);
-  await assert.rejects(make({ billing: 'monthly', paymentOptions: undefined, monthly: { pricing: 'fixed', billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12 } }), /one-time/);
+});
+
+// Owner decision 11 Nov 2026 (src/docs/monthlypackage.md): a monthly package may be priced from its category and
+// add-ons too; that price is the price of one month, and every cycle (with its discount) is worked out from it.
+test('a monthly package priced from its category and add-ons: the parts make the monthly price', async () => {
+  const MONTHLY = { billing: 'monthly', paymentOptions: undefined, monthly: { billingOptions: [{ billingCycle: 'quarterly', discountPercent: 10 }], maxTenureMonths: 12, uploadsPerMonth: 2 } };
+  const saved = await make({ ...MONTHLY, name: 'Monthly parts' });
+  assert.deepEqual([saved.regularPrice, saved.pricing.categoryBasePrice, saved.billing], [13000, 10000, 'monthly']);
+  const quarter = quotePackageChoice(saved, [], { billingCycle: 'quarterly', tenureMonths: 6 });
+  // Normal price 12,000 a month: a quarter is 36,000 less 10% = 32,400, two quarters in six months.
+  assert.deepEqual([quarter.monthly.perMonthPrice, quarter.monthly.cyclePrice, quarter.finalPrice], [12000, 32400, 64800]);
 });
 
 test('a non-quantity add-on counts once whatever quantity is sent (as the custom project form)', async () => {
@@ -155,8 +165,8 @@ test('a saved package keeps the way its price was set: neither way switches; typ
   assert.equal('pricing' in typedNew, false);
   const partsNew = await savePackage({ ...base, id: '', name: 'Parts new', regularPrice: 13000, discountedPrice: 12000, services: sel([seo]) }, true, []);
   assert.equal(partsNew.pricing.services.length, 1);
-  // A priced package cannot become monthly, a typed one-time package can (monthly is typed).
-  await assert.rejects(savePackage({ ...base, id: priced.id, billing: 'monthly', paymentOptions: undefined, regularPrice: 13000, discountedPrice: 9999, monthly: { pricing: 'fixed', billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12 } }, false, []), /stays one-time/);
+  // Monthly follows the same rule: a priced package made monthly keeps its parts (they must be sent), never a typed price.
+  await assert.rejects(savePackage({ ...base, id: priced.id, billing: 'monthly', paymentOptions: undefined, regularPrice: 13000, discountedPrice: 9999, monthly: { billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12 } }, false, []), /Send its services, or duplicate it/);
 });
 
 test('the quote key follows the frozen pricing, never the live catalogue; packages without it keep their key', async () => {

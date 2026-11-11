@@ -40,6 +40,7 @@ const stopServiceRenewal = async ({ serviceOrderId, userId, now = new Date() }) 
   const service = await orderModel.findOne({ _id: serviceOrderId, userId, isServicePlan: true });
   if (!service) throw new Error('Service not found');
   if (service.servicePlanStatus !== 'active') throw new Error('Only active services can stop renewal');
+  if (service.serviceAutoRenewalStoppedAt) throw new Error('This plan is already stopped; it ends after the current paid period');
   service.serviceAutoRenew = false;
   service.serviceAutoRenewalStoppedAt = now;
   await service.save();

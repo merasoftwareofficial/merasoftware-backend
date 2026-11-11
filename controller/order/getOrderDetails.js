@@ -2,7 +2,7 @@ const orderProductModel = require("../../models/orderProductModel");
 const invoiceModel = require("../../models/invoiceModel");
 const transactionModel = require("../../models/transactionModel");
 const { getDueUnpaidInvoiceFilter, dueInstallment } = require("../../helpers/projectDuePayment");
-const { projectAllowsUploads, projectUploadLimits } = require("../../helpers/projectUploadGate");
+const { projectAllowsUploads } = require("../../helpers/projectUploadGate");
 const { getOrderState } = require("../../helpers/orderStatusEngine");
 const { uploadAllowanceNow } = require("../../helpers/serviceAllowance");
 const { buildLifecycleTimeline, getCurrentStateSince } = require("../../helpers/orderLifecycleLog");
@@ -218,13 +218,9 @@ const getOrderDetails = async (req, res) => {
         // one more thing that can disagree with itself) and everything arrives in time order.
         const lifecycleTimeline = buildLifecycleTimeline(orderData);
 
-        // A monthly package project's term and what it lets the client send now (projectUploadGate.js),
-        // so the portal shows the end date and remaining updates the server enforces.
-        const packageTerm = order.isServicePlan ? null : await projectUploadLimits(order);
         const responseData = {
             ...orderData,
             paymentAccess,
-            packageTerm,
             orderState,
             lifecycleTimeline,
             // When the order reached the state it is in now — powers the "since" on a status badge.

@@ -39,8 +39,8 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     } else if (!body.packageQuoteKey || body.packageQuoteKey !== quoted.quoteKey) fail('Package, offer or terms changed. Refresh packages and review the new price.', 409);
     if (body.offerSlug && body.offerSlug !== quoted.quote.offer?.slug) fail('The selected offer does not match this package', 409);
     quote = quoted.quote; scope = packageItem.inclusions; packageQuoteKey = quoted.quoteKey;
-    // A monthly package (package.md decision 9) is priced for the customer's cycle and length by the one
-    // choice quote; its totals stand in for the one price, so the agreement, invoices and PDFs stay whole.
+    // A monthly package (src/docs/monthlypackage.md) is priced for the customer's cycle and length by the one
+    // choice quote (the plan engine); its totals stand in for the one price in the agreement.
     if (packageItem.billing === 'monthly') {
       if (features.length || (body.priceAdjustment !== undefined && Number(body.priceAdjustment) !== 0)) fail('A monthly package is sold as it is, without extra features or a price adjustment');
       monthly = quoteChoice(packageItem, quoted, body.monthlyChoice || {});
@@ -86,8 +86,8 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
         // How it was sold, frozen for this project (package.md decision 7); projectUploadGate.js reads portalUploads.
         ...(packageItem.billing ? { billing: packageItem.billing, portalUploads: packageItem.portalUploads,
           ...(packageItem.paymentOptions ? { paymentOptions: [...packageItem.paymentOptions] } : {}),
-          // The monthly term the client bought: cycle, length, files and updates, prices, start and end
-          // (projectUploadGate.js and projectNodeService.js read it; package.md decisions 11–13).
+          // The monthly term the client bought: cycle, length, prices, start and end. A monthly package is
+          // sold as a plan order (packagePlanOrder.js), which keeps this agreement in order.salesPackage.
           ...(term ? { monthly: term } : {}) } : {}) } : null,
       regularPrice: quote.regularPrice, offerDiscount: quote.discountAmount, packagePrice: quote.finalPrice,
       offerScopeExtra: packageItem?.offerExtraPrice || 0,

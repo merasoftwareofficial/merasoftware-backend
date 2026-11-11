@@ -20,8 +20,6 @@ const installmentThreshold = (installment) =>
 // "nothing due" (merasoftware/src/docs/package.md, decision 17).
 function isInstallmentDue(order, installment, now = new Date()) {
   if (!installment || installment.paid) return false;
-  // A monthly package cycle is due on its date; it must never fall into the 40% / 75% legacy rule below.
-  if (installment.dueBy === 'date') return !!installment.dueDate && new Date(installment.dueDate) <= now;
   const threshold = installmentThreshold(installment);
   return threshold == null || Number(order.projectProgress || 0) >= Number(threshold);
 }

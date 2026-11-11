@@ -18,13 +18,11 @@ function freezePaymentPolicy(offer, now = new Date()) {
     uploadAllowance: raw.mode === 'limited_uploads' ? raw.uploadAllowance : 0,
     reminderOffsets: [...new Set(raw.reminderOffsets)].sort((a, b) => a - b) };
 }
-// A monthly package project has billing cycles too (its date-based installments, package.md), so the
-// offer's cycle rule applies to it as to a plan: after cycle 1 only an every-cycle offer keeps its mode.
-const isCycleProject = order => !order.isServicePlan && order.installments?.some?.(row => row.dueBy === 'date');
-function modeForCycle(order, cycle = isCycleProject(order) ? order.currentInstallment || 1 : order.serviceCurrentCycleNumber || 1) {
+// A plan's billing cycles (a monthly package is a plan too): after cycle 1 only an every-cycle offer keeps its mode.
+function modeForCycle(order, cycle = order.serviceCurrentCycleNumber || 1) {
   const policy = order.paymentPolicy;
   if (!policy) return 'current';
-  return (order.isServicePlan || isCycleProject(order)) && cycle > 1 && policy.cycleScope !== 'every_cycle' ? 'advance' : policy.mode;
+  return order.isServicePlan && cycle > 1 && policy.cycleScope !== 'every_cycle' ? 'advance' : policy.mode;
 }
 const allowsDeferredPayment = policy => ['limited_uploads', 'pay_later'].includes(policy?.mode);
 const paymentDueDate = (policy, start = new Date()) => new Date(new Date(start).getTime() + Number(policy?.dueDays || 0) * DAY);

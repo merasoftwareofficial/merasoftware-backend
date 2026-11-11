@@ -1,6 +1,6 @@
 // Package phases 2 and 3 (merasoftware/src/docs/package.md §7): the customer's choice (one-time payment option,
-// or a monthly cycle, length, files and updates), its one quote, the request that carries it, and the monthly
-// package project: cycle installments due by date, its term, its upload limits and no 100% before the end.
+// or a monthly cycle and length), its one quote, the request that carries it, and the monthly package, which
+// runs as a plan (src/docs/monthlypackage.md): plan order, plan uploads, renewal at the frozen price, stop.
 // Isolated MongoDB; the website is never contacted.
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,12 +14,11 @@ const Category = require('../models/categoryBasePriceModel');
 const StartRequest = require('../models/packageStartRequestModel');
 const UpdateRequest = require('../models/updateRequestModel');
 const { savePackage, quotePackage, quotePackageChoice, validatePackage } = require('../helpers/salesPackages');
-const { isInstallmentDue } = require('../helpers/projectDuePayment');
-const { assertProjectAcceptsUpload, projectUploadLimits } = require('../helpers/projectUploadGate');
-const { assertUploadOrder } = require('../helpers/uploadOrderPolicy');
-const { modeForCycle } = require('../helpers/offerPaymentPolicy');
-const { appendProjectNode } = require('../helpers/projectNodeService');
-const { buildCycleInstallments, addMonths } = require('../helpers/projectInstallments');
+const { uploadAllowanceNow } = require('../helpers/serviceAllowance');
+const { processServicePlanRenewals } = require('../cron/servicePlanRenewalCron');
+const { stopServiceRenewal } = require('../helpers/serviceLifecycle');
+const { activePackageProject } = require('../helpers/packagePurchase');
+const { addMonths } = require('../helpers/projectInstallments');
 const start = require('../helpers/packageStart');
 const { integrationQuote } = require('../controller/order/salesPackagesController');
 const createProject = require('../controller/order/adminCreateProjectOrder');
@@ -31,9 +30,8 @@ const ONE_TIME = { name: 'Business Starter', description: 'A business website.',
   regularPrice: 15000, discountedPrice: 9999, offerExtraPrice: 0, offerSlug: '', inclusions: ['Website'], terms: [], linkedPlanIds: [], order: 0, pages: [] };
 const CYCLES = [{ billingCycle: 'monthly', discountPercent: 0 }, { billingCycle: 'quarterly', discountPercent: 10 }];
 const FIXED = { ...ONE_TIME, name: 'Monthly Care', paymentOptions: undefined, billing: 'monthly', regularPrice: 1500, discountedPrice: 1000,
-  monthly: { pricing: 'fixed', billingOptions: CYCLES, maxTenureMonths: 12 } };
-const PER_FILE = { ...FIXED, name: 'Data Entry', regularPrice: 15, discountedPrice: 10,
-  monthly: { pricing: 'per_file', billingOptions: CYCLES, maxTenureMonths: 12, files: { min: 10, max: 50, step: 10 }, updatesPerMonth: { min: 1, max: 4 } } };
+  monthly: { billingOptions: CYCLES, maxTenureMonths: 12, uploadsPerMonth: 2 } };
+const UPDATES_ONLY = { ...FIXED, name: 'Care Updates', portalUploads: false, monthly: { billingOptions: CYCLES, maxTenureMonths: 12 } };
 let database, customer, admin;
 const realFetch = global.fetch;
 before(async () => {
@@ -65,21 +63,6 @@ const create = async body => {
   return res;
 };
 const cash = { paymentMethod: 'cash', transactionReference: 'CASH-1' };
-async function monthlyProject(pkg, monthlyChoice, total) {
-  const saved = await savePackage({ ...pkg, id: '' }, true, []);
-  const res = await create({ sellingPrice: total, paymentType: 'monthly', monthlyChoice, packageId: saved.id, packageQuoteKey: quotePackage(saved, []).quoteKey, recordPayment: cash });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body).slice(0, 300));
-  return { saved, order: await Order.findById(res.body.data._id) };
-}
-// Moves a project's term back in time, as if it had been created `days` ago.
-async function age(order, days) {
-  const term = order.projectSnapshot.salesAgreement.package.monthly;
-  const shift = date => new Date(new Date(date).getTime() - days * DAY);
-  await Order.updateOne({ _id: order._id }, { $set: {
-    'projectSnapshot.salesAgreement.package.monthly.startsAt': shift(term.startsAt), 'projectSnapshot.salesAgreement.package.monthly.endsAt': shift(term.endsAt),
-    installments: order.installments.map(row => ({ ...row.toObject(), dueDate: shift(row.dueDate) })) } });
-  return Order.findById(order._id);
-}
 
 // --- Phase 2: one-time choice, quote and request -------------------------------------------------------------
 test('a one-time choice is quoted with its installments; only offered options; older packages have none', async () => {
@@ -118,91 +101,83 @@ test('a package request carries the choice and the quoted price; a package with 
   assert.equal((await StartRequest.findById(request.id).lean()).closedReason, 'project_created');
 });
 
-// --- Phase 3: monthly packages -------------------------------------------------------------------------------
-test('monthly settings follow the plan rules; no payment options, no offer extras, per file needs uploads', () => {
-  assert.equal(validatePackage({ ...FIXED, id: 'care' }).monthly.pricing, 'fixed');
+// --- Phase 3: monthly packages run as plans -------------------------------------------------------------------
+test('monthly settings follow the plan rules; one fixed price (no per file); updates a month need uploads', () => {
+  assert.equal(validatePackage({ ...FIXED, id: 'care' }).monthly.uploadsPerMonth, 2);
+  assert.equal(validatePackage({ ...FIXED, id: 'care', monthly: { ...FIXED.monthly, uploadsPerMonth: null } }).monthly.uploadsPerMonth, null, 'unlimited');
   assert.throws(() => validatePackage({ ...FIXED, id: 'care', paymentOptions: ['full'] }), /without payment options/);
   assert.throws(() => validatePackage({ ...FIXED, id: 'care', offerExtraPrice: 100 }), /offer extras/);
-  assert.throws(() => validatePackage({ ...PER_FILE, id: 'data', portalUploads: false }), /needs portal uploads/);
+  assert.throws(() => validatePackage({ ...FIXED, id: 'care', monthly: { ...FIXED.monthly, pricing: 'per_file' } }), /one fixed monthly price/);
+  assert.throws(() => validatePackage({ ...UPDATES_ONLY, id: 'care', monthly: { ...UPDATES_ONLY.monthly, uploadsPerMonth: 2 } }), /portal uploads/);
+  assert.throws(() => validatePackage({ ...FIXED, id: 'care', monthly: { ...FIXED.monthly, uploadsPerMonth: 40 } }), /from 1 to 31/);
   assert.throws(() => validatePackage({ ...FIXED, id: 'care', monthly: { ...FIXED.monthly, billingOptions: [{ billingCycle: 'monthly', discountPercent: 100 }] } }), /discount/);
   assert.throws(() => validatePackage({ ...FIXED, id: 'care', monthly: { ...FIXED.monthly, maxTenureMonths: 13 } }), /Maximum length/);
-  assert.throws(() => validatePackage({ ...PER_FILE, id: 'data', monthly: { ...PER_FILE.monthly, files: { min: 10, max: 200, step: 10 } } }), /at most 100/);
   assert.throws(() => validatePackage({ ...ONE_TIME, id: 'starter', monthly: FIXED.monthly }), /belong to a monthly package/);
 });
 
-test('a monthly choice is priced by the plan engine: cycle discount on the charged price, per file = files × rate × updates', async () => {
+test('a monthly choice is priced by the plan engine: cycle discount on the monthly price', async () => {
   const fixed = await savePackage({ ...FIXED, id: '' }, true, []);
   const quarter = quotePackageChoice(fixed, [], { billingCycle: 'quarterly', tenureMonths: 12 });
   assert.deepEqual([quarter.monthly.cyclePrice, quarter.monthly.totalCycles, quarter.finalPrice, quarter.dueNow], [2700, 4, 10800, 2700]);
   assert.equal(quarter.regularPrice, 10800, 'without an offer the normal price is the base');
   assert.throws(() => quotePackageChoice(fixed, [], { billingCycle: 'quarterly', tenureMonths: 4 }), /whole number of billing periods/);
   assert.throws(() => quotePackageChoice(fixed, [], { billingCycle: 'yearly', tenureMonths: 12 }), /not available/);
-  const perFile = await savePackage({ ...PER_FILE, id: '' }, true, []);
-  const month = quotePackageChoice(perFile, [], { billingCycle: 'monthly', tenureMonths: 3, files: 20, updates: 4 });
-  assert.deepEqual([month.monthly.perMonthPrice, month.monthly.cyclePrice, month.finalPrice, month.monthly.files, month.monthly.updatesPerMonth], [800, 800, 2400, 20, 4]);
-  assert.throws(() => quotePackageChoice(perFile, [], { billingCycle: 'monthly', tenureMonths: 3, files: 15, updates: 4 }), /files per update/);
 });
 
-test('cycle installments: same amount, due by date, the last one takes the rounding', () => {
-  const start = new Date('2026-11-08T10:00:00Z');
-  const rows = buildCycleInstallments(800, 3, 1, start);
-  assert.deepEqual(rows.map(row => [row.installmentNumber, row.amount, row.percentage, row.dueBy, row.progressThreshold]),
-    [[1, 800, 33.33, 'date', null], [2, 800, 33.33, 'date', null], [3, 800, 33.34, 'date', null]]);
-  assert.deepEqual(rows.map(row => row.dueDate.toISOString()), [start, addMonths(start, 1), addMonths(start, 2)].map(date => date.toISOString()));
-});
+async function monthlyPlan(pkg, monthlyChoice, total) {
+  const saved = await savePackage({ ...pkg, id: '' }, true, []);
+  const res = await create({ sellingPrice: total, paymentType: 'monthly', monthlyChoice, packageId: saved.id, packageQuoteKey: quotePackage(saved, []).quoteKey, recordPayment: cash });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body).slice(0, 300));
+  return { saved, order: await Order.findById(res.body.data._id) };
+}
 
-test('a monthly project: paid per cycle only, its term frozen, extras refused', async () => {
+test('a monthly package is made as a plan order: first cycle billed and paid, the agreement frozen, never a project', async () => {
   const saved = await savePackage({ ...FIXED, id: '' }, true, []);
   const key = quotePackage(saved, []).quoteKey;
   const choice = { billingCycle: 'quarterly', tenureMonths: 12 };
   assert.equal((await create({ sellingPrice: 10800, paymentType: 'full', monthlyChoice: choice, packageId: saved.id, packageQuoteKey: key })).statusCode, 400);
   assert.equal((await create({ sellingPrice: 10800, paymentType: 'monthly', monthlyChoice: choice, packageId: saved.id, packageQuoteKey: key, priceAdjustment: 100, adjustmentLabel: 'Extra' })).statusCode, 400);
   assert.equal((await create({ sellingPrice: 9999, paymentType: 'monthly', monthlyChoice: choice, packageId: saved.id, packageQuoteKey: key })).statusCode, 409, 'price must match the quote');
-  const one = await savePackage({ ...ONE_TIME, id: '' }, true, []);
-  assert.equal((await create({ sellingPrice: 9999, paymentType: 'monthly', packageId: one.id, packageQuoteKey: quotePackage(one, []).quoteKey })).statusCode, 400, 'one-time package');
-  const { order } = await monthlyProject(FIXED, choice, 10800);
-  const agreement = order.projectSnapshot.salesAgreement;
-  assert.deepEqual([order.totalAmount, order.installments.length, agreement.finalPrice, agreement.package.monthly.cyclePrice], [10800, 4, 10800, 2700]);
-  assert.ok(order.installments.every(row => row.dueBy === 'date' && row.amount === 2700));
-  assert.equal(new Date(agreement.package.monthly.endsAt).getTime(), addMonths(agreement.package.monthly.startsAt, 12).getTime());
-  assert.equal(order.installments[0].paid, true, 'cycle 1 paid at creation');
+  const { order, saved: bought } = await monthlyPlan(FIXED, choice, 10800);
+  assert.deepEqual([order.isServicePlan, order.isWebsiteProject, order.productId, order.projectSnapshot?.salesAgreement], [true, false, null, undefined]);
+  assert.deepEqual([order.totalAmount, order.serviceCyclePrice, order.serviceTotalCycles, order.serviceBillingCycleMonths], [2700, 2700, 4, 3]);
+  assert.deepEqual([order.orderVisibility, order.servicePlanStatus, order.paymentComplete], ['approved', 'active', true]);
+  assert.equal(order.servicePlanSnapshot.serviceName, 'Monthly Care');
+  assert.equal(order.salesPackage.package.id, bought.id);
+  assert.equal(order.salesPackage.package.monthly.cyclePrice, 2700);
+  assert.equal(new Date(order.servicePlanEndDate).getTime(), addMonths(order.servicePlanStartDate, 12).getTime());
+  const bills = await Invoice.find({ orderId: order._id, invoiceType: 'project' }).lean();
+  assert.deepEqual(bills.map(bill => [bill.serviceCycleNumber, bill.amount, bill.status]), [[1, 2700, 'paid']]);
+  // The plan's billing statement for the whole length, as every plan with a fixed length has (serviceBillingStatement.js).
+  const statement = await Invoice.findOne({ orderId: order._id, invoiceType: 'service_statement' }).lean();
+  assert.deepEqual([statement.amount, statement.amountPaid], [10800, 2700]);
+  assert.equal((await activePackageProject(customer._id, bought.id)).plan, true, 'a running monthly package asks before a second purchase');
 });
 
-test('a cycle is due by its date, never by progress; due and unpaid closes uploads; the offer cycle rule applies', async () => {
-  const { order: fresh } = await monthlyProject(FIXED, { billingCycle: 'monthly', tenureMonths: 3 }, 3000);
-  const second = fresh.installments[1];
-  assert.equal(isInstallmentDue({ projectProgress: 80 }, second), false, 'not the legacy 40% rule');
-  assert.equal(await assertProjectAcceptsUpload(fresh), null);
-  const order = await age(fresh, 35);
-  assert.equal(isInstallmentDue(order, order.installments[1]), true);
-  assert.match(await assertProjectAcceptsUpload(order), /payment is due/i);
-  assert.equal(modeForCycle({ ...order.toObject(), paymentPolicy: { mode: 'pay_later', cycleScope: 'first_purchase' }, currentInstallment: 2 }), 'advance');
-  assert.equal(modeForCycle({ ...order.toObject(), paymentPolicy: { mode: 'pay_later', cycleScope: 'every_cycle' }, currentInstallment: 2 }), 'pay_later');
+test('uploads follow the plan: updates a month with a monthly reset, unlimited, or no uploads (work updates)', async () => {
+  const { order } = await monthlyPlan(FIXED, { billingCycle: 'quarterly', tenureMonths: 6 }, 5400);
+  const s = order.servicePlanSnapshot;
+  assert.deepEqual([s.capability, s.limitScope, s.portalAccessCount, s.updatesPerMonth, s.releaseMode, s.filesLimit], ['upload_data', 'per_month', 6, 2, 'monthly', 100]);
+  const now = uploadAllowanceNow(order);
+  assert.deepEqual([now.unlimited, now.limit, now.remaining], [false, 2, 2], 'month 1 opens its 2 updates');
+  const { order: unlimited } = await monthlyPlan({ ...FIXED, name: 'Unlimited Care', monthly: { ...FIXED.monthly, uploadsPerMonth: null } }, { billingCycle: 'monthly', tenureMonths: 3 }, 3000);
+  assert.equal(uploadAllowanceNow(unlimited).unlimited, true);
+  const { order: updates } = await monthlyPlan(UPDATES_ONLY, { billingCycle: 'monthly', tenureMonths: 3 }, 3000);
+  assert.equal(updates.servicePlanSnapshot.capability, 'send_reminders');
 });
 
-test('per file: files per update and updates per month (month by month, rejected ones given back); the end closes uploads', async () => {
-  const { order } = await monthlyProject(PER_FILE, { billingCycle: 'monthly', tenureMonths: 2, files: 20, updates: 2 }, 800);
-  const limits = await projectUploadLimits(order);
-  assert.deepEqual([limits.maxFiles, limits.allowance.limit, limits.allowance.remaining, limits.cycle.number, limits.cycle.of], [20, 2, 2, 1, 2]);
-  await assert.rejects(assertUploadOrder(order, { fileCount: 21 }), /allows 20 files/);
-  const upload = status => UpdateRequest.create({ userId: customer._id, updatePlanId: order._id, files: [], status });
-  await upload('pending'); await upload('rejected');
-  assert.equal((await projectUploadLimits(order)).allowance.remaining, 1, 'a rejected upload does not count');
-  await upload('completed');
-  assert.match(await assertProjectAcceptsUpload(order), /updates are used/);
-  const ended = await age(order, 70);
-  await Order.updateOne({ _id: ended._id }, { $set: { 'installments.1.paid': true } });
-  assert.match(await assertProjectAcceptsUpload(await Order.findById(order._id)), /package has ended/);
-});
-
-test('a monthly project reaches 100% only after its end date', async () => {
-  const { order } = await monthlyProject(FIXED, { billingCycle: 'monthly', tenureMonths: 1 }, 1000);
-  assert.throws(() => appendProjectNode({ order, title: 'Done', cumulativeProgress: 100, actorId: admin._id }), /can reach 100% only after/);
-  const fresh = await Order.findById(order._id);
-  appendProjectNode({ order: fresh, title: 'Halfway', cumulativeProgress: 50, actorId: admin._id });
-  const ended = await age(order, 40);
-  appendProjectNode({ order: ended, title: 'Done', cumulativeProgress: 100, actorId: admin._id });
-  assert.equal(ended.projectProgress, 100);
+test('every cycle renews at the frozen price; a stopped plan ends after its paid cycle', async () => {
+  const { order } = await monthlyPlan(FIXED, { billingCycle: 'monthly', tenureMonths: 3 }, 3000);
+  const later = new Date(Date.now() + 32 * DAY);
+  await processServicePlanRenewals(later);
+  const renewal = await Invoice.findOne({ orderId: order._id, invoiceType: 'plan_renewal' }).lean();
+  assert.deepEqual([renewal.serviceCycleNumber, renewal.amount], [2, 1000]);
+  const { order: other } = await monthlyPlan({ ...FIXED, name: 'Other Care' }, { billingCycle: 'monthly', tenureMonths: 3 }, 3000);
+  await stopServiceRenewal({ serviceOrderId: other._id, userId: customer._id });
+  await processServicePlanRenewals(later);
+  const stopped = await Order.findById(other._id).lean();
+  assert.deepEqual([stopped.servicePlanStatus, stopped.serviceNextBillingDate], ['expired', null]);
+  assert.equal(await Invoice.countDocuments({ orderId: other._id, invoiceType: 'plan_renewal' }), 0);
 });
 
 test('the admin quote prices a monthly choice for the create form, with a reservation at its own package only', async () => {

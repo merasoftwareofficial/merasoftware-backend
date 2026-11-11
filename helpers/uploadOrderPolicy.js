@@ -32,9 +32,7 @@ async function assertUploadOrder(order, { fileCount, serviceOrderId }) {
   } else if (isProjectUpload) {
     const refusal = await assertProjectAcceptsUpload(order);
     if (refusal) reject(refusal);
-    // A per-file monthly package allows the files per update the client bought (projectUploadGate.js).
-    const own = await require('./projectUploadGate').projectUploadLimits(order);
-    if (fileCount > (own?.maxFiles ?? limits.MAX_PROJECT_FILES_PER_UPLOAD)) reject(own && own.maxFiles < limits.MAX_PROJECT_FILES_PER_UPLOAD ? `Your package allows ${own.maxFiles} files in each update` : 'Too many files for one upload');
+    if (fileCount > limits.MAX_PROJECT_FILES_PER_UPLOAD) reject('Too many files for one upload');
   } else if (fileCount > limits.MAX_LEGACY_UPDATE_FILES_PER_UPLOAD) reject('Too many files for one upload');
   if (order.planStatus === 'closed') reject('This plan has been closed and cannot accept updates');
   if (order.autoRenewalStatus === 'paused') reject('This plan is paused because an invoice payment is overdue');
