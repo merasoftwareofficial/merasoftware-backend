@@ -244,24 +244,29 @@ async function priceFromCatalogue({ category, selection, previous, refresh }) {
     if (category.basePrice === null || category.basePrice === undefined) fail('This category has no base price yet. Set its base price first.');
     categoryBasePrice = category.basePrice;
   }
+  // The category's terms follow the same rule as its base price: a saved package keeps the terms it was saved with.
+  const categoryTerms = reuse ? [...(previous.pricing.categoryTerms || [])] : [...(category.terms || [])];
   const frozen = new Map(reuse ? previous.pricing.services.map(row => [row.featureId, row]) : []);
   const wanted = selection.filter(row => !frozen.has(row.featureId));
-  const docs = wanted.length ? await Product.find({ _id: { $in: wanted.map(row => row.featureId) }, ...sellableFeatureFilter(category.category) }).select('serviceName sellingPrice price isQuantityBased').lean() : [];
+  const docs = wanted.length ? await Product.find({ _id: { $in: wanted.map(row => row.featureId) }, ...sellableFeatureFilter(category.category) }).select('serviceName sellingPrice price isQuantityBased terms').lean() : [];
   const live = new Map(docs.map(doc => [String(doc._id), doc]));
   const services = selection.map(row => {
+    // A service saved before add-on terms existed has no `terms` field; it gets none (no backfill, the price stays as saved).
     const kept = frozen.get(row.featureId);
-    if (kept) return { featureId: row.featureId, name: kept.name, unitPrice: kept.unitPrice, isQuantityBased: !!kept.isQuantityBased, quantity: kept.isQuantityBased ? row.quantity : 1 };
+    if (kept) return { featureId: row.featureId, name: kept.name, unitPrice: kept.unitPrice, isQuantityBased: !!kept.isQuantityBased, quantity: kept.isQuantityBased ? row.quantity : 1, terms: [...(kept.terms || [])] };
     const doc = live.get(row.featureId);
     if (!doc) {
       const old = previous?.pricing?.services?.find(service => service.featureId === row.featureId);
       fail(old ? `${old.name} is no longer offered; remove it` : 'An add-on service is unavailable for this category. Refresh the list.');
     }
     const [line] = featureLines([doc], { [row.featureId]: row.quantity });
-    return { featureId: row.featureId, name: line.name, unitPrice: line.unitPrice, isQuantityBased: !!doc.isQuantityBased, quantity: line.quantity };
+    return { featureId: row.featureId, name: line.name, unitPrice: line.unitPrice, isQuantityBased: !!doc.isQuantityBased, quantity: line.quantity, terms: line.terms };
   });
   const total = money(categoryBasePrice + services.reduce((sum, row) => sum + money(row.unitPrice * row.quantity), 0));
-  return { total, snapshot: { categoryBasePrice, services } };
+  return { total, snapshot: { categoryBasePrice, categoryTerms, services } };
 }
+// The terms a package gets automatically from its category and add-ons (frozen in pricing), in order, without repeats.
+const automaticTerms = (pricing) => pricing ? [...new Set([...(pricing.categoryTerms || []), ...pricing.services.flatMap(row => row.terms || [])])] : [];
 async function savePackage(raw, creating, offers, packagePages = []) {
   // A new package without an ID gets one from its name; an ID is never typed or changed by the admin.
   const autoId = creating && (raw?.id === undefined || raw?.id === '');
@@ -291,7 +296,12 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     if (previous && !previous.pricing) fail('This package was priced by hand and keeps it. Duplicate it to price a copy from its category and add-ons.');
     const priced = await priceFromCatalogue({ category, selection, previous, refresh: raw.repriceFromCurrent === true });
     if (money(item.regularPrice) !== priced.total) fail('The main price changed. Review the current category and add-on prices.', 409);
+    // The admin's own lines are kept; lines this package got automatically last time are dropped first, so an add-on
+    // that was removed leaves no terms behind, then the automatic terms of the current selection are added.
+    const typed = item.terms.filter(line => !automaticTerms(previous?.pricing).includes(line));
     item.pricing = priced.snapshot;
+    item.terms = [...new Set([...typed, ...automaticTerms(item.pricing)])];
+    if (item.terms.length > 50) fail('The package terms are more than 50 lines. Shorten them or remove an add-on.');
   } else if (previous?.pricing) {
     fail(item.billing === 'one_time' ? 'This package is priced from its category and add-ons and keeps it. Send its services, or duplicate it to make a copy with typed prices.' : 'A package priced from its category and add-ons stays one-time');
   }

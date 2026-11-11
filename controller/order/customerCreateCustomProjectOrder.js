@@ -113,7 +113,7 @@ const customerCreateCustomProjectOrder = async (req, res) => {
             isHidden: { $ne: true },
             ...featureCatalogueFilter(category),
           })
-          .select("serviceName sellingPrice price isQuantityBased compatibleWith")
+          .select("serviceName sellingPrice price isQuantityBased compatibleWith terms")
           .lean()
       : [];
 
@@ -176,6 +176,8 @@ const customerCreateCustomProjectOrder = async (req, res) => {
         referenceTotal: finalPrice,
         finalPrice,
         features: clientProjectFeatures,
+        // Terms of the category and of the chosen add-ons, shown on the order page (a custom project has no package agreement).
+        terms: [...new Set([...(categoryEntry.terms || []), ...clientProjectFeatures.flatMap((feature) => feature.terms || [])])],
       },
       orderItems: [
         {

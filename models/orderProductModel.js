@@ -278,6 +278,8 @@ const projectSnapshotSchema = new mongoose.Schema({
     finalPrice: Number,
     // Frozen package/offer agreement; never re-read current catalogue prices for old work.
     salesAgreement: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    // Terms of a custom project's category and add-ons, frozen at creation (a package's terms live in salesAgreement).
+    terms: { type: [String], default: undefined },
     features: [{
         featureId: { type: mongoose.Schema.Types.ObjectId, ref: 'product' },
         name: String,

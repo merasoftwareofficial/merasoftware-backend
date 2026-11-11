@@ -49,6 +49,8 @@ const productSchema = new mongoose.Schema({
     
     compatibleWith : [String],
     keyBenefits : [String],
+    // Add-on services only: the terms & conditions a package or a custom project picks up when this add-on is included.
+    terms: [String],
     isWebsiteUpdate: {
       type: Boolean,
       default: false

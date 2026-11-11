@@ -137,7 +137,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     const featureDocs = requestedIds.length
       ? await productModel
           .find({ _id: { $in: requestedIds }, ...sellableFeatureFilter(category) })
-          .select("serviceName sellingPrice price isQuantityBased compatibleWith")
+          .select("serviceName sellingPrice price isQuantityBased compatibleWith terms")
           .lean()
       : [];
     if (requestedIds.length !== new Set(requestedIds).size || requestedIds.length !== featureDocs.length || !Array.isArray(requestedFeatureIds) || requestedIds.length !== requestedFeatureIds.length) {
@@ -198,6 +198,8 @@ const adminCreateProjectOrderController = async (req, res) => {
         referenceTotal,
         finalPrice,
         features: clientProjectFeatures,
+        // Terms of the project's add-ons and, unless a package agreement already holds them, of its category.
+        terms: [...new Set([...(commercial ? [] : categoryEntry.terms || []), ...clientProjectFeatures.flatMap((feature) => feature.terms || [])])],
         ...(commercial ? { salesAgreement: commercial.agreement } : {}),
         ...(offer ? { offer: { slug: offer.slug, title: offer.title } } : {}),
       },

@@ -50,12 +50,28 @@ const make = (fields = {}) => { const regularPrice = fields.regularPrice ?? 1300
 test('main price = category base + chosen add-ons, read here; the services are frozen in `pricing`', async () => {
   const saved = await make();
   assert.equal(saved.regularPrice, 13000);
-  assert.deepEqual(saved.pricing, { categoryBasePrice: 10000, services: [{ featureId: String(seo._id), name: 'SEO setup', unitPrice: 3000, isQuantityBased: false, quantity: 1 }] });
+  assert.deepEqual(saved.pricing, { categoryBasePrice: 10000, categoryTerms: [], services: [{ featureId: String(seo._id), name: 'SEO setup', unitPrice: 3000, isQuantityBased: false, quantity: 1, terms: [] }] });
   assert.equal('services' in saved, false, 'the request field is not stored');
   const many = await make({ name: 'Second', regularPrice: 10000 + 3000 + 1500, services: sel([seo], [pages, 3]) });
   assert.equal(many.pricing.services[1].quantity, 3);
   const none = await make({ name: 'Base only', regularPrice: 10000, discountedPrice: 10000, services: [] });
-  assert.deepEqual(none.pricing, { categoryBasePrice: 10000, services: [] });
+  assert.deepEqual(none.pricing, { categoryBasePrice: 10000, categoryTerms: [], services: [] });
+});
+
+test('add-on and category terms are merged into the package terms automatically; the admin lines stay', async () => {
+  await Category.updateOne({ category: 'standard_websites' }, { terms: ['Category term A', 'Category term B'] });
+  await Product.updateOne({ _id: seo._id }, { terms: ['SEO term 1', 'SEO term 2'] });
+  const saved = await make({ terms: ['Admin line'] });
+  assert.deepEqual(saved.terms, ['Admin line', 'Category term A', 'Category term B', 'SEO term 1', 'SEO term 2']);
+  assert.deepEqual(saved.pricing.categoryTerms, ['Category term A', 'Category term B']);
+  // A saved service keeps the terms it was saved with, even if the add-on's terms change later.
+  await Product.updateOne({ _id: seo._id }, { terms: ['SEO term changed'] });
+  const resaved = await savePackage({ ...base, id: saved.id, regularPrice: 13000, discountedPrice: 12000, services: sel([seo]), terms: saved.terms }, false, []);
+  assert.deepEqual(resaved.terms, ['Admin line', 'Category term A', 'Category term B', 'SEO term 1', 'SEO term 2']);
+  // Untick the add-on: the form sends only the admin's own lines, and the add-on's automatic lines are gone.
+  const unticked = await savePackage({ ...base, id: saved.id, regularPrice: 10000, discountedPrice: 10000, services: [], terms: ['Admin line'] }, false, []);
+  assert.deepEqual(unticked.terms, ['Admin line', 'Category term A', 'Category term B']);
+  await assert.rejects(make({ terms: Array.from({ length: 49 }, (_, i) => `Line ${i}`) }), /more than 50 lines/);
 });
 
 test('the price the form shows must match; a client-sent pricing is ignored', async () => {
@@ -166,6 +182,19 @@ test('an add-on service price change does not reach a project made from the pack
   assert.ok(saved.id);
 });
 
+test('a custom project carries the terms of its category and add-ons on its order (shown on the order page)', async () => {
+  await Category.updateOne({ category: 'standard_websites' }, { terms: ['Category term A'] });
+  await Product.updateOne({ _id: seo._id }, { terms: ['SEO term 1'] });
+  const response = () => ({ statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
+  const res = response();
+  const projectBody = { category: 'standard_websites', projectName: 'Custom terms', totalPages: 5, sellingPrice: 13000, featureIds: [String(seo._id)], paymentType: 'full' };
+  await createProject({ userId: admin._id, userRole: 'admin', params: { customerId: String(customer._id) }, body: projectBody }, res);
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.deepEqual(res.body.data.projectSnapshot.terms, ['Category term A', 'SEO term 1']);
+  const stored = await Order.findById(res.body.data._id).lean();
+  assert.deepEqual(stored.projectSnapshot.terms, ['Category term A', 'SEO term 1']);
+});
+
 test('adminRead gives the form the base prices, add-ons and category usage; the public read hides the frozen pricing', async () => {
   const saved = await make();
   const call = async handler => { const res = { statusCode: 200, headers: {}, set() { return this; }, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } }; await handler(handler === adminRead ? { userId: admin._id, userRole: 'admin' } : { get: () => `Bearer ${process.env.PORTFOLIO_INTEGRATION_SECRET}` }, res); return res; };
@@ -175,7 +204,7 @@ test('adminRead gives the form the base prices, add-ons and category usage; the 
   assert.equal(standard.basePrice, 10000);
   assert.equal(standard.usage.packages, 1);
   assert.ok(read.body.data.addOns.some(row => row.name === 'Hidden add-on' && row.isHidden === true));
-  assert.deepEqual(read.body.data.addOns.find(row => row.name === 'Extra page'), { id: String(pages._id), name: 'Extra page', unitPrice: 500, description: '', isHidden: false, isQuantityBased: true, compatibleWith: [] });
+  assert.deepEqual(read.body.data.addOns.find(row => row.name === 'Extra page'), { id: String(pages._id), name: 'Extra page', unitPrice: 500, description: '', isHidden: false, isQuantityBased: true, compatibleWith: [], terms: [] });
   assert.ok(read.body.data.packages.find(row => row.id === saved.id).pricing, 'the admin sees the frozen pricing');
   const publicRead = await call(integrationRead);
   assert.equal(publicRead.statusCode, 200, JSON.stringify(publicRead.body));

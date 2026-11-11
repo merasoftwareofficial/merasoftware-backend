@@ -23,14 +23,15 @@ const adminRead = handle(async (req, res) => {
   // The package form also prices a package from them (base price) and edits them in a dialog (the other fields,
   // and where each is used, so archiving can warn).
   const [list, usage] = await Promise.all([listProjectCategories(), categoryUsage()]);
-  const categories = list.map(({ category, label, status, sortOrder, basePrice, description, startingNodeTitle, customerSelectable, locked }) => ({
-    category, label, status, sortOrder, basePrice, description, startingNodeTitle, customerSelectable, locked, usage: usage[category] || { projects: 0, features: 0, packages: 0 } }));
+  const categories = list.map(({ category, label, status, sortOrder, basePrice, description, terms, startingNodeTitle, customerSelectable, locked }) => ({
+    category, label, status, sortOrder, basePrice, description, terms, startingNodeTitle, customerSelectable, locked, usage: usage[category] || { projects: 0, features: 0, packages: 0 } }));
   // The add-on services a package can be priced from (the same catalogue a custom project takes its add-ons from).
   // The website narrows them to the chosen category; the save checks again with featureCatalogue.js.
   const addOns = (await Product.find({ category: FEATURE_UPGRADE_CATEGORY, retiredAt: null, archivedAt: null }).sort({ createdAt: -1 })
-    .select('_id serviceName price sellingPrice isHidden isQuantityBased formattedDescriptions compatibleWith').lean())
+    .select('_id serviceName price sellingPrice isHidden isQuantityBased formattedDescriptions compatibleWith terms').lean())
     .map(row => ({ id: String(row._id), name: row.serviceName, unitPrice: row.sellingPrice ?? row.price ?? 0, description: row.formattedDescriptions?.[0]?.content || '',
-      isHidden: !!row.isHidden, isQuantityBased: !!row.isQuantityBased, compatibleWith: Array.isArray(row.compatibleWith) ? row.compatibleWith : [] }));
+      isHidden: !!row.isHidden, isQuantityBased: !!row.isQuantityBased, compatibleWith: Array.isArray(row.compatibleWith) ? row.compatibleWith : [],
+      terms: Array.isArray(row.terms) ? row.terms : [] }));
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans, categories, addOns, drafts: await drafts.listDrafts() } });
 });
 // Package working copies (helpers/packageDrafts.js): save, delete after publish or discard, forget an ended offer.

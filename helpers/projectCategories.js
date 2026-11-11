@@ -35,6 +35,7 @@ const normalise = (row) => {
     basePrice,
     configured: basePrice !== null,
     description: row.description || '',
+    terms: Array.isArray(row.terms) ? [...row.terms] : [],
     startingNodeTitle: row.startingNodeTitle || '',
     status: row.status || 'active',
     sortOrder: row.sortOrder ?? builtIn?.sortOrder ?? 9999,
@@ -92,6 +93,12 @@ async function categoryUsage() {
   return usage;
 }
 
+// Terms & conditions, one per line (the admin's textarea). Blank lines are dropped; at most 50 lines of 1500 characters.
+const termLines = (value) => {
+  if (!Array.isArray(value) || value.length > 50 || value.some(line => typeof line !== 'string' || line.trim().length > 1500)) fail('Enter the terms as lines, at most 50 and 1500 characters each');
+  return value.map(line => line.trim()).filter(Boolean);
+};
+
 const text = (value, max, label, required = false) => {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.trim().length > max || (required && !value.trim())) fail(`Enter a valid ${label}`);
@@ -116,6 +123,7 @@ async function saveProjectCategory(body, actorId) {
   if (label !== undefined) update.label = label;
   const description = text(body.description, 1000, 'description');
   if (description !== undefined) update.description = description;
+  if (body.terms !== undefined) update.terms = termLines(body.terms);
   const startingNodeTitle = text(body.startingNodeTitle, 120, 'starting node title');
   if (startingNodeTitle !== undefined) update.startingNodeTitle = startingNodeTitle;
 

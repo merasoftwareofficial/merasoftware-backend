@@ -55,6 +55,8 @@ function featureLines(featureDocs, featureQuantities = {}) {
       unitPrice,
       price: roundMoney(unitPrice * quantity),
       quantity,
+      // The add-on's terms & conditions (empty for rows saved before add-on terms existed).
+      terms: Array.isArray(feature.terms) ? [...feature.terms] : [],
     };
   });
 }

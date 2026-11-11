@@ -25,6 +25,11 @@ const categoryBasePriceSchema = new mongoose.Schema({
     type: String,
     default: "",
   },
+  // Terms & conditions of the category: a package priced from it, or a custom project in it, picks them up.
+  terms: {
+    type: [String],
+    default: [],
+  },
   startingNodeTitle: {
     type: String,
     default: "",
