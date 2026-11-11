@@ -47,7 +47,7 @@ async function listPackageStarts(userId) {
 // The customer's choice on the customize page (package.md §3), as the request stores it.
 const choiceFromQuote = quote => (quote.billing === 'monthly'
   ? { billingCycle: quote.monthly.billingCycle, tenureMonths: quote.monthly.tenureMonths }
-  : { paymentOption: quote.paymentOption });
+  : { paymentOption: quote.paymentOption, ...(quote.advance ? { advanceAmount: quote.advance.selected } : {}) });
 
 async function requestPackageStart(input, retry = true) {
   const { userId, packageId, choice, countryCode, phone, kind = 'callback', confirmRepeat = false } = input;

@@ -77,6 +77,22 @@ test('a one-time choice is quoted with its installments; only offered options; o
   assert.throws(() => quotePackageChoice({ ...old, id: 'legacy' }, [], {}), error => error.statusCode === 404);
 });
 
+test('an advance offer lets every one-time mode choose a token above the offer minimum', async () => {
+  const offer = { slug: 'token', title: 'Token offer', status: 'published', endsAt: '2099-01-01T00:00:00Z',
+    applicableCategories: ['standard_websites'], pricingRule: 'fixed_price', offerPrice: 9999, resolvedTerms: [],
+    paymentPolicy: { mode: 'advance', minimumAdvance: { type: 'fixed', value: 2000 } } };
+  const item = { ...ONE_TIME, id: 'token-pack', offerSlug: 'token', paymentOptions: ['full', 'installments_2', 'installments_3'] };
+  for (const option of item.paymentOptions) {
+    const quote = quotePackageChoice(item, [offer], { paymentOption: option, advanceAmount: 2500 });
+    assert.equal(quote.dueNow, 2500);
+    assert.equal(quote.advance.minimum, 2000);
+    assert.deepEqual(quote.installments.map(row => row.progressThreshold), option === 'installments_3' ? [null, 50, 90] : [null, 90]);
+    assert.equal(quote.installments.reduce((sum, row) => sum + Math.round(row.amount * 100), 0), 999900);
+  }
+  assert.throws(() => quotePackageChoice(item, [offer], { paymentOption: 'full', advanceAmount: 1999 }), /Choose an advance/);
+  assert.equal(quotePackageChoice(item, [offer], { paymentOption: 'full', advanceAmount: 9999 }).installments.length, 0);
+});
+
 test('the website quote route needs the integration key and answers the one choice quote', async () => {
   const saved = await savePackage({ ...ONE_TIME, id: '' }, true, []);
   const call = async (auth, body) => { const res = response(); await integrationQuote({ get: () => auth, body }, res); return res; };
@@ -88,7 +104,7 @@ test('the website quote route needs the integration key and answers the one choi
 
 test('a package request carries the choice and the quoted price; a package with settings needs a choice', async () => {
   const saved = await savePackage({ ...ONE_TIME, id: '' }, true, []);
-  await assert.rejects(start.requestPackageStart({ userId: customer._id, packageId: saved.id }), /Choose how you want to buy/);
+  await assert.rejects(start.requestPackageStart({ userId: customer._id, packageId: saved.id, kind: 'buy' }), /Choose how you want to buy/);
   await assert.rejects(start.requestPackageStart({ userId: customer._id, packageId: saved.id, choice: { paymentOption: 'installments_2' } }), /way to pay/);
   const { request } = await start.requestPackageStart({ userId: customer._id, packageId: saved.id, choice: { paymentOption: 'installments_3' } });
   assert.deepEqual([request.price, request.category, request.choice], [9999, 'standard_websites', { paymentOption: 'installments_3' }]);

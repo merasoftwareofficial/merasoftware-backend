@@ -116,6 +116,23 @@ test('installment project redistributes every installment in paise and bills the
   assert.equal((await firstBill(order._id)).amount, 3000);
 });
 
+test('repricing preserves a customer-chosen offer advance and redistributes only its balance', async () => {
+  const order = await project({ paymentType: 'partial', installmentCount: 3 });
+  order.projectSnapshot.salesAgreement.paymentChoice = { option: 'installments_3', advance: { selected: 1000, minimum: 500 }, installments: [] };
+  order.markModified('projectSnapshot');
+  order.installments[0].amount = 1000; order.installments[0].percentage = 20;
+  order.installments[1].amount = 2000; order.installments[1].percentage = 40;
+  order.installments[2].amount = 2000; order.installments[2].percentage = 40;
+  await order.save();
+  await Invoice.updateOne({ orderId: order._id, invoiceType: 'project', installmentNumber: 1 }, { $set: { amount: 1000 } });
+  await expire();
+  await repricing.reconcileOrderReservation(order._id);
+  const saved = await Order.findById(order._id);
+  assert.deepEqual(saved.installments.map(row => row.amount), [1000, 4500, 4500]);
+  assert.deepEqual(saved.projectSnapshot.salesAgreement.paymentChoice.installments.map(row => row.amount), [1000, 4500, 4500]);
+  assert.equal((await firstBill(order._id)).amount, 1000);
+});
+
 test('payment submitted in time holds the price; after rejection the next check reprices', async () => {
   const order = await project();
   const bill = await firstBill(order._id);

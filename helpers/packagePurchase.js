@@ -6,7 +6,6 @@ const { readPackages, quotePackage, quoteChoice, fail } = require('./salesPackag
 const { fetchWebsiteCatalogue } = require('./websiteOffers');
 const { requireCategoryForNewProject } = require('./projectCategories');
 const { resolveProjectPricing } = require('./projectPricing');
-const { buildInstallments } = require('./projectInstallments');
 const { persistAdminProject } = require('./adminProjectCreation');
 const { receiveFirstPaymentInSession } = require('./projectPaymentSettlement');
 const { prepareUpiPaymentEvidence } = require('./upiPaymentEvidence');
@@ -152,8 +151,8 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
   const commercial = await resolveProjectPricing({ body: { packageId, packageQuoteKey: quoted.quoteKey, sellingPrice, ...(monthly ? { monthlyChoice: choice } : {}) },
     category: item.category, basePrice: categoryEntry.basePrice || 0, features: [], referenceTotal: 0, userId });
   const finalPrice = commercial.finalPrice;
-  const installmentCount = !monthly && priced.installments?.length ? priced.installments.length : 0;
-  const isPartialPayment = installmentCount > 0;
+  const installmentPlan = !monthly && priced.installments?.length ? priced.installments : [];
+  const isPartialPayment = installmentPlan.length > 0;
   const startingNodeTitle = categoryEntry.startingNodeTitle || DEFAULT_STARTING_NODE_TITLE;
   const creationHash = createHash('sha256').update(JSON.stringify({ userId: String(userId), packageId, choice, quoteKey })).digest('hex');
 
@@ -192,13 +191,14 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
     projectSnapshot: {
       displayName: commercial.agreement.package?.name || categoryEntry.label, categoryLabel: categoryEntry.label, category: item.category,
       startingNodeTitle, basePrice: commercial.basePrice, referenceTotal: commercial.referenceTotal, finalPrice, features: [],
-      salesAgreement: commercial.agreement,
+      salesAgreement: { ...commercial.agreement, paymentChoice: { option: priced.paymentOption,
+        ...(priced.advance ? { advance: priced.advance } : {}), installments: installmentPlan } },
       ...(commercial.agreement.offer ? { offer: { slug: commercial.agreement.offer.slug, title: commercial.agreement.offer.title } } : {}),
     },
     orderItems: [{ id: `project:${item.category}`, name: commercial.agreement.package?.name || `${categoryEntry.label} (Base)`, type: 'main', quantity: 1,
       originalPrice: commercial.basePrice, finalPrice: commercial.basePrice }],
   };
-  if (installmentCount) orderData.installments = buildInstallments(finalPrice, installmentCount);
+  if (installmentPlan.length) orderData.installments = installmentPlan.map(row => ({ ...row, paid: false, paymentStatus: 'none' }));
 
   let promoted = false;
   const { order, invoice, reused, purchase } = await persistAdminProject({

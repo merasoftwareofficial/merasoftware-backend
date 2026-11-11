@@ -47,7 +47,7 @@ beforeEach(async () => {
   [member, customer, admin] = await User.create([
     { name: 'Member', email: 'member@example.test', roles: ['member'], phone: '+919876500001', password: 'member-own-hash', walletBalance: 20000 },
     { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002', walletBalance: 0 },
-    { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
+    { name: 'Admin', email: 'admin@example.test', roles: ['admin'], adminContact: { email: 'admin@example.test', whatsappNumbers: [] } },
   ]);
   await Category.create({ category: 'standard_websites', basePrice: 10000 });
   saved = await savePackage({ ...base, id: '' }, true, []);
@@ -162,6 +162,24 @@ test('an installment package: the first payment starts the project, the rest fol
   assert.equal(order.currentInstallment, 2);
   assert.equal(order.paidAmount, 5000);
   assert.equal(await wallet(member), 15000);
+});
+
+test('an offer token becomes the paid first installment and freezes the chosen schedule', async () => {
+  const offer = { slug: 'token-offer', title: 'Token offer', status: 'published', endsAt: new Date(Date.now() + 86400000).toISOString(),
+    applicableCategories: ['standard_websites'], pricingRule: 'fixed_price', offerPrice: 10000, resolvedTerms: [],
+    paymentPolicy: { mode: 'advance', minimumAdvance: { type: 'fixed', value: 2000 }, dueDays: 0, uploadAllowance: 0, cycleScope: 'first_purchase', reminderOffsets: [] } };
+  const withOffer = await savePackage({ ...base, name: 'Token Package', id: '', offerSlug: offer.slug }, true, [offer]);
+  const live = global.fetch;
+  global.fetch = async url => String(url).includes('/api/offers/live') ? { ok: true, json: async () => ({ offers: [offer], catalogueOffers: [offer], packagePages: [] }) } : live(url);
+  try {
+    const choice = { paymentOption: 'full', advanceAmount: 2500 };
+    const result = await purchasePackage({ userId: member._id, packageId: withOffer.id, choice, quoteKey: quotePackage(withOffer, [offer]).quoteKey,
+      dueNow: 2500, creationKey: 'token-purchase-abcdefghij' });
+    const order = await Order.findById(result.orderId).lean();
+    assert.deepEqual([result.dueNow, order.paidAmount, order.remainingAmount, order.currentInstallment], [2500, 2500, 7500, 2]);
+    assert.deepEqual(order.installments.map(row => [row.amount, row.paid, row.progressThreshold]), [[2500, true, null], [7500, false, 90]]);
+    assert.equal(order.projectSnapshot.salesAgreement.paymentChoice.advance.selected, 2500);
+  } finally { global.fetch = live; }
 });
 
 test('a monthly package is bought as a plan: the first cycle is paid now, the plan engine bills the rest', async () => {

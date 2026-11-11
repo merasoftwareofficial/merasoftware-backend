@@ -1253,7 +1253,7 @@ const PACKAGE_PAYMENT_WORDS = { full: 'Full payment', installments_2: '2 install
 function packageChoiceWords(snapshot) {
   const choice = snapshot?.choice;
   if (!choice) return '';
-  if (choice.paymentOption) return PACKAGE_PAYMENT_WORDS[choice.paymentOption] || '';
+  if (choice.paymentOption) return `${PACKAGE_PAYMENT_WORDS[choice.paymentOption] || ''}${choice.advanceAmount ? `; ₹${Number(choice.advanceAmount).toLocaleString('en-IN')} advance` : ''}`;
   const length = choice.tenureMonths ? `for ${choice.tenureMonths} month${choice.tenureMonths === 1 ? '' : 's'}` : '';
   const files = choice.files && choice.updates ? `${choice.files} files × ${choice.updates} update${choice.updates === 1 ? '' : 's'} a month` : '';
   return [CYCLE_WORDS[choice.billingCycle], length, files].filter(Boolean).join(', ');

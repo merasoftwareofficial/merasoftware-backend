@@ -9,7 +9,7 @@ const { offerEligible, calculateBenefit, money, fail } = require('./salesPackage
 const { buildLineItemsFromOrder } = require('./paymentRecording');
 const { setOrderPaidAmount, getOrderAmountReceived, deriveInvoiceStatus, getInvoiceAmountReceived } = require('./orderPaymentTotals');
 const { syncProjectFinalInvoice } = require('./projectFinalInvoice');
-const { buildInstallments } = require('./projectInstallments');
+const { buildInstallments, buildAdvanceInstallments } = require('./projectInstallments');
 const { deadlineOf, PENDING_PAYMENT } = require('./offerReservations');
 const { createHash } = require('node:crypto');
 const Preview = require('../models/reservationActionPreviewModel');
@@ -77,13 +77,20 @@ function revisedAgreement(agreement, terms, revision, reason, now) {
 // Writes one immutable revision and every projection of the price in the caller's transaction.
 // Settled money is never rewritten: only the unpaid first bill, installments and summary change.
 const MONTHLY_FIXED = 'A monthly package runs as a plan and keeps the cycle prices it was bought with. Review it by hand.';
+function revisedInstallments(order, agreement, finalPrice) {
+  if (!order.isPartialPayment) return null;
+  const selected = agreement?.paymentChoice?.advance?.selected;
+  if (selected == null) return buildInstallments(finalPrice, order.installments.length);
+  if (Number(selected) >= Number(finalPrice)) fail('The revised total is not above the chosen advance. Review this payment schedule by hand.', 409);
+  return buildAdvanceInstallments(finalPrice, order.installments.length, selected);
+}
 async function applyPricingRevision({ order, reservation, terms, reason, actorId = null, note = '', session }) {
   const agreement = order.projectSnapshot?.salesAgreement;
   // A monthly package is a plan order (src/docs/monthlypackage.md) whose cycle price is frozen; it is never repriced here.
   if (order.isServicePlan) fail(MONTHLY_FIXED, 409);
   const invoice = await firstInvoice(order, session);
   if (!agreement || !invoice || ['paid', 'cancelled'].includes(invoice.status)) fail('The first bill is already settled; the price is locked', 409);
-  const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
+  const plan = revisedInstallments(order, agreement, terms.finalPrice);
   const invoiceAmount = plan ? plan[0].amount : terms.finalPrice;
   const now = new Date();
   const revision = Number(order.pricingRevision || 0) + 1;
@@ -95,6 +102,7 @@ async function applyPricingRevision({ order, reservation, terms, reason, actorId
   const allocation = await require('./projectReceiptReallocation').reallocateProjectReceipts({ order, invoices: bills, installments: plan,
     finalPrice: terms.finalPrice, revision, session });
   const nextAgreement = revisedAgreement(agreement, terms, revision, reason, now);
+  if (plan && nextAgreement.paymentChoice) nextAgreement.paymentChoice = { ...nextAgreement.paymentChoice, installments: plan };
   order.projectSnapshot.salesAgreement = nextAgreement;
   order.projectSnapshot.finalPrice = terms.finalPrice;
   order.markModified('projectSnapshot');
@@ -299,10 +307,10 @@ async function loadForceApply({ reservationId, orderId, session }) {
 async function forceApplyPreview({ reservationId, orderId, actorId }) {
   return mongoose.connection.transaction(async session => {
     await require('./offerReservations').currentAdmin(actorId, session);
-    const { reservation, order, invoice, terms } = await loadForceApply({ reservationId, orderId, session });
+    const { reservation, order, invoice, agreement, terms } = await loadForceApply({ reservationId, orderId, session });
     const stateHash = await forceStateHash({ reservation, order, invoice, session });
     const [token] = await Preview.create([{ actorId, orderId, reservationId, stateHash, expiresAt: new Date(Date.now() + 15 * 60000) }], { session });
-    const plan = order.isPartialPayment ? buildInstallments(terms.finalPrice, order.installments.length) : null;
+    const plan = revisedInstallments(order, agreement, terms.finalPrice);
     const received = await getOrderAmountReceived(order._id, { session });
     return { reservationId: String(reservation._id), orderId: String(order._id), offerSlug: reservation.offerSlug, offerTitle: reservation.offerSnapshot.title,
       previewToken: String(token._id), pricingRevision: Number(order.pricingRevision || 0), deadline: deadlineOf(reservation), expiresAt: reservation.expiresAt,

@@ -13,10 +13,26 @@ function freezePaymentPolicy(offer, now = new Date()) {
   if (!Number.isInteger(raw.dueDays) || raw.dueDays < 0 || raw.dueDays > 365) fail('Payment due days must be between 0 and 365');
   if (raw.mode === 'limited_uploads' && (!Number.isInteger(raw.uploadAllowance) || raw.uploadAllowance < 1 || raw.uploadAllowance > 10000)) fail('Enter a valid pre-payment upload allowance');
   if (!Array.isArray(raw.reminderOffsets) || raw.reminderOffsets.length > 10 || raw.reminderOffsets.some(n => !Number.isInteger(n) || n < -365 || n > 365)) fail('Enter valid reminder days relative to the due date');
+  const minimumAdvance = raw.minimumAdvance;
+  if (minimumAdvance && (raw.mode !== 'advance' || !['fixed', 'percentage'].includes(minimumAdvance.type)
+    || !Number.isFinite(minimumAdvance.value) || minimumAdvance.value <= 0
+    || Math.abs(minimumAdvance.value * 100 - Math.round(minimumAdvance.value * 100)) > 0.00001
+    || (minimumAdvance.type === 'percentage' && minimumAdvance.value > 100))) fail('Enter a valid minimum advance payment');
   return { version: 1, offerSlug: offer.slug, offerTitle: offer.title, appliedAt: now,
     mode: raw.mode, dueDays: raw.dueDays, cycleScope: raw.cycleScope,
     uploadAllowance: raw.mode === 'limited_uploads' ? raw.uploadAllowance : 0,
+    ...(minimumAdvance ? { minimumAdvance: { type: minimumAdvance.type, value: minimumAdvance.value } } : {}),
     reminderOffsets: [...new Set(raw.reminderOffsets)].sort((a, b) => a - b) };
+}
+function minimumAdvanceAmount(offer, totalAmount) {
+  const rule = offer?.paymentPolicy?.mode === 'advance' ? offer.paymentPolicy.minimumAdvance : null;
+  if (!rule) return null;
+  const totalPaise = Math.round(Number(totalAmount) * 100);
+  const paise = rule.type === 'percentage'
+    ? Math.ceil(totalPaise * Number(rule.value) / 100)
+    : Math.round(Number(rule.value) * 100);
+  if (!(paise > 0) || paise > totalPaise) fail('The offer minimum advance must be within the final project price');
+  return paise / 100;
 }
 // A plan's billing cycles (a monthly package is a plan too): after cycle 1 only an every-cycle offer keeps its mode.
 function modeForCycle(order, cycle = order.serviceCurrentCycleNumber || 1) {
@@ -63,4 +79,4 @@ function policyLines(order) {
     `Payment due: ${p.dueDays} day(s) after project creation / service-cycle start`,
     ...(order.isServicePlan ? [`Applies to: ${p.cycleScope === 'every_cycle' ? 'every billing cycle' : 'first purchase only'}`] : [])];
 }
-module.exports = { freezePaymentPolicy, allowsDeferredPayment, modeForCycle, paymentDueDate, getPaymentAccess, policyLines, DAY };
+module.exports = { freezePaymentPolicy, minimumAdvanceAmount, allowsDeferredPayment, modeForCycle, paymentDueDate, getPaymentAccess, policyLines, DAY };

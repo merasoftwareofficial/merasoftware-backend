@@ -5,7 +5,7 @@ const Draft = require('../models/packageDraftModel');
 const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
 const { sellableFeatureFilter, featureLines } = require('./featureCatalogue');
 const { MAX_PROJECT_FILES_PER_UPLOAD } = require('../config/uploadLimits');
-const { buildInstallments } = require('./projectInstallments');
+const { buildInstallments, buildAdvanceInstallments } = require('./projectInstallments');
 
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -203,6 +203,7 @@ function quoteChoice(item, quoted, choice = {}) {
   const offer = quoted.quote.offer ? { slug: quoted.quote.offer.slug, title: quoted.quote.offer.title, endsAt: quoted.quote.offer.endsAt } : null;
   const base = { packageId: item.id, quoteKey: quoted.quoteKey, billing: item.billing, offer };
   if (item.billing === 'monthly') {
+    if (quoted.quote.offer?.paymentPolicy?.minimumAdvance) fail('Advance token payment is only available for one-time project packages');
     const charged = monthlyQuote(item, quoted.quote.finalPrice, choice);
     const regular = monthlyQuote(item, quoted.quote.regularPrice, choice);
     return { ...base, monthly: charged, regularPrice: regular.totalPrice, discountAmount: money(regular.totalPrice - charged.totalPrice),
@@ -211,10 +212,24 @@ function quoteChoice(item, quoted, choice = {}) {
   const option = choice.paymentOption;
   if (!item.paymentOptions.includes(option)) fail('Choose a way to pay that this package offers');
   const finalPrice = quoted.quote.finalPrice;
-  const installments = INSTALLMENT_COUNT[option] ? buildInstallments(finalPrice, INSTALLMENT_COUNT[option])
-    .map(({ installmentNumber, percentage, amount, progressThreshold }) => ({ installmentNumber, percentage, amount, progressThreshold })) : [];
+  const minimumAdvance = require('./offerPaymentPolicy').minimumAdvanceAmount(quoted.quote.offer, finalPrice);
+  let advance = null;
+  let installments;
+  if (minimumAdvance != null) {
+    const rawAdvance = Number(choice.advanceAmount ?? minimumAdvance);
+    const selected = money(rawAdvance);
+    if (!Number.isFinite(rawAdvance) || Math.abs(rawAdvance * 100 - Math.round(rawAdvance * 100)) > 0.00001
+      || selected < minimumAdvance || selected > finalPrice) fail(`Choose an advance from ₹${minimumAdvance} up to ₹${finalPrice}`);
+    const count = option === 'installments_3' ? 3 : 2;
+    installments = buildAdvanceInstallments(finalPrice, count, selected);
+    advance = { minimum: minimumAdvance, selected, type: quoted.quote.offer.paymentPolicy.minimumAdvance.type,
+      value: quoted.quote.offer.paymentPolicy.minimumAdvance.value };
+  } else {
+    installments = INSTALLMENT_COUNT[option] ? buildInstallments(finalPrice, INSTALLMENT_COUNT[option]) : [];
+  }
+  installments = installments.map(({ installmentNumber, percentage, amount, progressThreshold }) => ({ installmentNumber, percentage, amount, progressThreshold }));
   return { ...base, paymentOption: option, installments, regularPrice: quoted.quote.regularPrice, discountAmount: quoted.quote.discountAmount,
-    finalPrice, dueNow: installments[0]?.amount ?? finalPrice };
+    finalPrice, dueNow: installments[0]?.amount ?? finalPrice, ...(advance ? { advance } : {}) };
 }
 const quotePackageChoice = (item, offers, choice, now = Date.now()) => quoteChoice(item, quotePackage(item, offers, now), choice);
 async function catalogueWithQuotes(offers, admin = false) {
