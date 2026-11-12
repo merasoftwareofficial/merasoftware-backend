@@ -11,7 +11,8 @@ const Order = require('../models/orderProductModel');
 const Invoice = require('../models/invoiceModel');
 const Category = require('../models/categoryBasePriceModel');
 const Reservation = require('../models/offerReservationModel');
-const { savePackage, quotePackage, validatePackage } = require('../helpers/salesPackages');
+const Draft = require('../models/packageDraftModel');
+const { savePackage, quotePackage, validatePackage, readPackages, deleteArchivedPackage, transitionPackageStatus } = require('../helpers/salesPackages');
 const { isInstallmentDue, dueInstallment, getDueUnpaidInvoiceFilter, isProjectPaymentDue } = require('../helpers/projectDuePayment');
 const { assertProjectAcceptsUpload } = require('../helpers/projectUploadGate');
 const createProject = require('../controller/order/adminCreateProjectOrder');
@@ -25,7 +26,7 @@ const realFetch = global.fetch;
 before(async () => {
   database = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(database.getUri());
-  await Promise.all([User, Catalogue, Order, Invoice, Category, Reservation].map(model => model.init()));
+  await Promise.all([User, Catalogue, Order, Invoice, Category, Reservation, Draft].map(model => model.init()));
   Object.assign(process.env, { PORTFOLIO_WEBSITE_URL: 'https://website.example.test', PORTFOLIO_INTEGRATION_SECRET: 'isolated-test-secret-32-characters-long', RESEND_API_KEY: 'isolated-test', FROM_EMAIL: 'sender@example.test' });
   global.fetch = async url => {
     if (String(url).includes('/api/offers/live')) return { ok: true, json: async () => ({ offers: [], catalogueOffers: [], packagePages: [] }) };
@@ -105,6 +106,37 @@ test('a new package is published only with its settings, and settings once chose
   // An older package (seeded without settings) is still edited and saved as before.
   await Catalogue.updateOne({ _id: 'packages' }, { $set: { 'packages.legacy': { ...old, id: 'legacy' } } });
   assert.equal((await savePackage({ ...old, id: 'legacy', name: 'Legacy renamed' }, false, [])).name, 'Legacy renamed');
+});
+
+test('only an archived package is permanently removed; its draft goes too, while its bought project and ID history stay', async () => {
+  const saved = await savePackage({ ...item, id: '' }, true, []);
+  const quoted = quotePackage(saved, []);
+  const made = await create({ sellingPrice: 9999, paymentType: 'full', packageId: saved.id, packageQuoteKey: quoted.quoteKey,
+    recordPayment: { paymentMethod: 'cash', transactionReference: 'CASH-PACKAGE-DELETE' } });
+  assert.equal(made.statusCode, 201, JSON.stringify(made.body));
+  await Draft.create({ packageId: saved.id, name: saved.name, data: { item: saved }, version: 1 });
+  await assert.rejects(deleteArchivedPackage(saved.id), /Archive this package before deleting it/);
+  await savePackage({ ...saved, status: 'archived' }, false, []);
+
+  assert.deepEqual(await deleteArchivedPackage(saved.id), { id: saved.id, name: saved.name });
+  assert.equal((await readPackages()).some(row => row.id === saved.id), false, 'the future catalogue record is gone');
+  assert.equal(await Draft.exists({ packageId: saved.id }), null, 'its working copy is gone too');
+  const order = await Order.findById(made.body.data._id).lean();
+  assert.equal(order.projectSnapshot.salesAgreement.package.id, saved.id, 'the bought project remains frozen');
+  const replacement = await savePackage({ ...item, id: '', name: saved.name }, true, []);
+  assert.notEqual(replacement.id, saved.id, 'a deleted package ID is never assigned to a new package');
+});
+
+test('list lifecycle actions reuse the current package rules and refuse a running offer or edit draft', async () => {
+  const saved = await savePackage({ ...item, id: '', name: 'List actions' }, true, []);
+  const runningOffer = { slug: 'running', title: 'Running offer', packageId: saved.id, status: 'published', endsAt: new Date(Date.now() + HOUR).toISOString() };
+  await assert.rejects(transitionPackageStatus(saved.id, 'archived', [runningOffer], []), /End the running offer/);
+  const archived = await transitionPackageStatus(saved.id, 'archived', [], []);
+  assert.equal(archived.status, 'archived');
+  const published = await transitionPackageStatus(saved.id, 'published', [], []);
+  assert.equal(published.status, 'published');
+  await Draft.create({ packageId: saved.id, name: saved.name, data: { item: saved }, version: 1 });
+  await assert.rejects(transitionPackageStatus(saved.id, 'archived', [], []), /draft in progress/);
 });
 
 // --- Portal uploads frozen on the project -----------------------------------------------------------------

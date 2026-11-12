@@ -2,7 +2,7 @@ const User = require('../../models/userModel');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deleteArchivedPackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories, categoryUsage } = require('../../helpers/projectCategories');
 const { FEATURE_UPGRADE_CATEGORY } = require('../../helpers/featureCatalogue');
 const drafts = require('../../helpers/packageDrafts');
@@ -49,6 +49,15 @@ const adminSave = handle(async (req, res) => {
   const { offers, packagePages } = await fetchWebsiteCatalogue();
   const item = await savePackage(req.body.item, req.body.creating, offers, packagePages);
   res.json({ success: true, data: item });
+});
+const adminDelete = handle(async (req, res) => {
+  await requireAdmin(req);
+  res.json({ success: true, data: await deleteArchivedPackage(req.body?.packageId) });
+});
+const adminLifecycle = handle(async (req, res) => {
+  await requireAdmin(req);
+  const { offers, packagePages } = await fetchWebsiteCatalogue();
+  res.json({ success: true, data: await transitionPackageStatus(req.body?.packageId, req.body?.action, offers, packagePages) });
 });
 const adminLinkOffer = handle(async (req, res) => {
   await requireAdmin(req);
@@ -101,4 +110,4 @@ const adminQuote = handle(async (req, res) => {
   const offers = reserved ? [] : (await fetchWebsiteCatalogue()).offers;
   res.set('Cache-Control', 'no-store').json({ success: true, data: { quote: quoteChoice(item, quotePackageForProject(item, reserved, offers), req.body?.choice || {}) } });
 });
-module.exports = { adminRead, adminSave, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };
+module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };

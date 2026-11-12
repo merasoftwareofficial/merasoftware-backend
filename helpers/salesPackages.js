@@ -1,4 +1,5 @@
 const { createHash } = require('node:crypto');
+const mongoose = require('mongoose');
 const Catalogue = require('../models/salesCatalogueModel');
 const Product = require('../models/productModel');
 const Draft = require('../models/packageDraftModel');
@@ -309,7 +310,10 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   const existing = await readPackages();
   // A draft's ID is reserved for it (helpers/packageDrafts.js), so an automatic ID skips those too.
   const draftIds = async () => (await Draft.find().select('packageId').lean()).map(row => row.packageId);
-  if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set([...existing.map(row => row.id), ...await draftIds()]));
+  // A deleted package leaves a minimal tombstone behind. It is not catalogue
+  // data, only an identity reservation for historical orders and requests.
+  const retiredIds = async () => Object.keys((await Catalogue.findById('packages').select('retiredPackageIds').lean())?.retiredPackageIds || {});
+  if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set([...existing.map(row => row.id), ...await draftIds(), ...await retiredIds()]));
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
   // package.md decision 15: a new package is published only with its purchase settings; once chosen
@@ -355,9 +359,55 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     const result = await Catalogue.updateOne({ _id: 'packages', ...(creating ? { [path]: { $exists: false } } : { [path]: { $exists: true } }) }, { $set: { [path]: item } });
     if (result.matchedCount) return item;
     if (!autoId) break;
-    item.id = packageIdCandidate(packageIdBase(item.name), new Set([...(await readPackages()).map(row => row.id), ...await draftIds()]));
+    item.id = packageIdCandidate(packageIdBase(item.name), new Set([...(await readPackages()).map(row => row.id), ...await draftIds(), ...await retiredIds()]));
   }
   fail('Package changed; refresh the catalogue and try again', 409);
+}
+
+// Permanent deletion is deliberately narrower than archive: only an already
+// archived catalogue package can be removed. Customer orders, invoices,
+// reservations and start requests hold their own immutable snapshots and are
+// never read or changed here.
+async function deleteArchivedPackage(id) {
+  if (!safeId(id)) fail('Choose a valid package');
+  const path = `packages.${id}`;
+  const statusPath = `${path}.status`;
+  let deleted = null;
+  await mongoose.connection.transaction(async session => {
+    const catalogue = await Catalogue.findOne({ _id: 'packages', [path]: { $exists: true }, [statusPath]: 'archived' })
+      .select({ [path]: 1 }).session(session).lean();
+    if (!catalogue) {
+      const exists = await Catalogue.exists({ _id: 'packages', [path]: { $exists: true } }).session(session);
+      fail(exists ? 'Archive this package before deleting it' : 'Package not found', exists ? 409 : 404);
+    }
+    deleted = catalogue.packages[id];
+    const result = await Catalogue.updateOne(
+      { _id: 'packages', [path]: { $exists: true }, [statusPath]: 'archived' },
+      { $set: { [`retiredPackageIds.${id}`]: { deletedAt: new Date() } }, $unset: { [path]: '' } },
+      { session },
+    );
+    if (result.modifiedCount !== 1) fail('Package changed; refresh the catalogue and try again', 409);
+    await Draft.deleteOne({ packageId: id }, { session });
+  });
+  return { id, name: deleted.name };
+}
+
+// The list-level Publish/Archive controls never accept a package object from
+// the browser. They re-use the normal save validation with the latest
+// catalogue row, so a stale list cannot overwrite a package edit.
+async function transitionPackageStatus(id, status, offers, packagePages = []) {
+  if (!safeId(id)) fail('Choose a valid package');
+  if (!['published', 'archived'].includes(status)) fail('Choose whether to publish or archive the package');
+  if (await Draft.exists({ packageId: id })) fail('This package has a draft in progress. Continue or discard the draft first.', 409);
+  const current = (await readPackages()).find(item => item.id === id);
+  if (!current) fail('Package not found', 404);
+  if (current.status === status) return current;
+  if (status === 'archived') {
+    const running = offers.find(offer => offer.status === 'published' && Date.parse(offer.endsAt) > Date.now()
+      && (offer.packageId === id || (!!current.offerSlug && offer.slug === current.offerSlug)));
+    if (running) fail(`End the running offer "${running.title}" before archiving this package.`, 409);
+  }
+  return savePackage({ ...current, status }, false, offers, packagePages);
 }
 function checkOfferFits(item, offer) {
   if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category)) fail(`The offer is unavailable or does not match the category of ${item.name}`);
@@ -394,4 +444,4 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };
+module.exports = { money, fail, readPackages, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deleteArchivedPackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };
