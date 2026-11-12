@@ -10,7 +10,7 @@ const Order = require('../models/orderProductModel');
 const Invoice = require('../models/invoiceModel');
 const Category = require('../models/categoryBasePriceModel');
 const Product = require('../models/productModel');
-const { savePackage, readPackages, quotePackage, quotePackageChoice, validatePackage } = require('../helpers/salesPackages');
+const { savePackage, readPackages, quotePackage, quotePackageChoice, validatePackage, transitionPackageStatus } = require('../helpers/salesPackages');
 const createProject = require('../controller/order/adminCreateProjectOrder');
 const { adminRead, integrationRead } = require('../controller/order/salesPackagesController');
 
@@ -56,6 +56,17 @@ test('main price = category base + chosen add-ons, read here; the services are f
   assert.equal(many.pricing.services[1].quantity, 3);
   const none = await make({ name: 'Base only', regularPrice: 10000, discountedPrice: 10000, services: [] });
   assert.deepEqual(none.pricing, { categoryBasePrice: 10000, categoryTerms: [], services: [] });
+});
+
+test('outside Archive skips sellability revalidation; Publish reconstructs the frozen add-on selection', async () => {
+  const saved = await make({ name: 'Standard Website' });
+  const stored = (await readPackages()).find(row => row.id === saved.id);
+  assert.equal('services' in stored, false, 'the catalogue deliberately stores only pricing.services');
+  const archived = await transitionPackageStatus(saved.id, 'archived', [], []);
+  assert.equal(archived.status, 'archived');
+  const published = await transitionPackageStatus(saved.id, 'published', [], []);
+  assert.equal(published.status, 'published');
+  assert.deepEqual(published.pricing.services.map(row => [row.featureId, row.quantity]), saved.pricing.services.map(row => [row.featureId, row.quantity]));
 });
 
 test('the included work shows the saved number of each quantity add-on: "4 × name"; other lines stay as written', async () => {

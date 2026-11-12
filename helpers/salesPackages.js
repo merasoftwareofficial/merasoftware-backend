@@ -18,6 +18,13 @@ async function readPackages() {
   return Object.values(row ? row.packages : {})
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
 }
+// IDs are permanent identities: packages, working copies and deleted-package
+// tombstones all reserve their link so customer history never points at a new
+// package with an old ID.
+async function reservedPackageIds() {
+  const [packages, catalogue] = await Promise.all([readPackages(), Catalogue.findById('packages').select('retiredPackageIds').lean()]);
+  return new Set([...packages.map(item => item.id), ...Object.keys(catalogue?.retiredPackageIds || {})]);
+}
 const cleanText = (value, max, label) => {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(`Enter a valid ${label}`);
   return value.trim();
@@ -315,6 +322,7 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   const retiredIds = async () => Object.keys((await Catalogue.findById('packages').select('retiredPackageIds').lean())?.retiredPackageIds || {});
   if (autoId) item.id = packageIdCandidate(packageIdBase(item.name), new Set([...existing.map(row => row.id), ...await draftIds(), ...await retiredIds()]));
   if (creating && existing.some(row => row.id === item.id)) fail('This package ID already exists', 409);
+  if (creating && (await retiredIds()).includes(item.id)) fail('This package ID was retired and cannot be reused', 409);
   if (!creating && !existing.some(row => row.id === item.id)) fail('Package not found', 404);
   // package.md decision 15: a new package is published only with its purchase settings; once chosen
   // they are never dropped again (older packages simply have none until the admin chooses them).
@@ -364,25 +372,20 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   fail('Package changed; refresh the catalogue and try again', 409);
 }
 
-// Permanent deletion is deliberately narrower than archive: only an already
-// archived catalogue package can be removed. Customer orders, invoices,
+// Permanent deletion removes a future catalogue package in any state. Customer orders, invoices,
 // reservations and start requests hold their own immutable snapshots and are
 // never read or changed here.
-async function deleteArchivedPackage(id) {
+async function deletePackage(id) {
   if (!safeId(id)) fail('Choose a valid package');
   const path = `packages.${id}`;
-  const statusPath = `${path}.status`;
   let deleted = null;
   await mongoose.connection.transaction(async session => {
-    const catalogue = await Catalogue.findOne({ _id: 'packages', [path]: { $exists: true }, [statusPath]: 'archived' })
+    const catalogue = await Catalogue.findOne({ _id: 'packages', [path]: { $exists: true } })
       .select({ [path]: 1 }).session(session).lean();
-    if (!catalogue) {
-      const exists = await Catalogue.exists({ _id: 'packages', [path]: { $exists: true } }).session(session);
-      fail(exists ? 'Archive this package before deleting it' : 'Package not found', exists ? 409 : 404);
-    }
+    if (!catalogue) fail('Package not found', 404);
     deleted = catalogue.packages[id];
     const result = await Catalogue.updateOne(
-      { _id: 'packages', [path]: { $exists: true }, [statusPath]: 'archived' },
+      { _id: 'packages', [path]: { $exists: true } },
       { $set: { [`retiredPackageIds.${id}`]: { deletedAt: new Date() } }, $unset: { [path]: '' } },
       { session },
     );
@@ -406,8 +409,15 @@ async function transitionPackageStatus(id, status, offers, packagePages = []) {
     const running = offers.find(offer => offer.status === 'published' && Date.parse(offer.endsAt) > Date.now()
       && (offer.packageId === id || (!!current.offerSlug && offer.slug === current.offerSlug)));
     if (running) fail(`End the running offer "${running.title}" before archiving this package.`, 409);
+    const path = `packages.${id}`;
+    const result = await Catalogue.updateOne({ _id: 'packages', [path]: { $exists: true } }, { $set: { [`${path}.status`]: 'archived', [`${path}.offerSlug`]: '' } });
+    if (result.modifiedCount !== 1) fail('Package changed; refresh the catalogue and try again', 409);
+    return { ...current, status: 'archived', offerSlug: '' };
   }
-  return savePackage({ ...current, status }, false, offers, packagePages);
+  // savePackage owns every sellability check. Restore the editor-only service
+  // selection from its frozen snapshot before handing the current row to it.
+  const raw = current.pricing ? { ...current, services: current.pricing.services.map(row => ({ featureId: row.featureId, quantity: row.quantity })) } : current;
+  return savePackage({ ...raw, status }, false, offers, packagePages);
 }
 function checkOfferFits(item, offer) {
   if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category)) fail(`The offer is unavailable or does not match the category of ${item.name}`);
@@ -444,4 +454,4 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deleteArchivedPackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };
+module.exports = { money, fail, readPackages, reservedPackageIds, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deletePackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };

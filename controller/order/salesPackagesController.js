@@ -2,7 +2,7 @@ const User = require('../../models/userModel');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deleteArchivedPackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deletePackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories, categoryUsage } = require('../../helpers/projectCategories');
 const { FEATURE_UPGRADE_CATEGORY } = require('../../helpers/featureCatalogue');
 const drafts = require('../../helpers/packageDrafts');
@@ -52,7 +52,7 @@ const adminSave = handle(async (req, res) => {
 });
 const adminDelete = handle(async (req, res) => {
   await requireAdmin(req);
-  res.json({ success: true, data: await deleteArchivedPackage(req.body?.packageId) });
+  res.json({ success: true, data: await deletePackage(req.body?.packageId) });
 });
 const adminLifecycle = handle(async (req, res) => {
   await requireAdmin(req);

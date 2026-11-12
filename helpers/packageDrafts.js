@@ -2,7 +2,7 @@
 // a draft needs only the package name, and the offer name when an offer was added; every other check runs
 // when the website publishes it through the normal package save (helpers/salesPackages.js savePackage).
 const Draft = require('../models/packageDraftModel');
-const { fail, readPackages, packageIdBase } = require('./salesPackages');
+const { fail, readPackages, reservedPackageIds, packageIdBase } = require('./salesPackages');
 
 const MAX_BYTES = 300000;
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
@@ -15,8 +15,8 @@ async function listDrafts() {
 }
 // IDs that are taken: live packages and other drafts, so a new draft never takes a published link.
 async function takenIds() {
-  const [live, drafts] = await Promise.all([readPackages(), Draft.find().select('packageId').lean()]);
-  return new Set([...live.map(row => row.id), ...drafts.map(row => row.packageId)]);
+  const [reserved, drafts] = await Promise.all([reservedPackageIds(), Draft.find().select('packageId').lean()]);
+  return new Set([...reserved, ...drafts.map(row => row.packageId)]);
 }
 function checkData(data) {
   if (!plain(data) || !plain(data.item)) fail('Nothing to save in this draft');

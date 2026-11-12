@@ -12,7 +12,8 @@ const Invoice = require('../models/invoiceModel');
 const Category = require('../models/categoryBasePriceModel');
 const Reservation = require('../models/offerReservationModel');
 const Draft = require('../models/packageDraftModel');
-const { savePackage, quotePackage, validatePackage, readPackages, deleteArchivedPackage, transitionPackageStatus } = require('../helpers/salesPackages');
+const drafts = require('../helpers/packageDrafts');
+const { savePackage, quotePackage, validatePackage, readPackages, deletePackage, transitionPackageStatus } = require('../helpers/salesPackages');
 const { isInstallmentDue, dueInstallment, getDueUnpaidInvoiceFilter, isProjectPaymentDue } = require('../helpers/projectDuePayment');
 const { assertProjectAcceptsUpload } = require('../helpers/projectUploadGate');
 const createProject = require('../controller/order/adminCreateProjectOrder');
@@ -108,21 +109,20 @@ test('a new package is published only with its settings, and settings once chose
   assert.equal((await savePackage({ ...old, id: 'legacy', name: 'Legacy renamed' }, false, [])).name, 'Legacy renamed');
 });
 
-test('only an archived package is permanently removed; its draft goes too, while its bought project and ID history stay', async () => {
+test('a package in any state is force-deleted with its draft, while its bought project and ID history stay', async () => {
   const saved = await savePackage({ ...item, id: '' }, true, []);
   const quoted = quotePackage(saved, []);
   const made = await create({ sellingPrice: 9999, paymentType: 'full', packageId: saved.id, packageQuoteKey: quoted.quoteKey,
     recordPayment: { paymentMethod: 'cash', transactionReference: 'CASH-PACKAGE-DELETE' } });
   assert.equal(made.statusCode, 201, JSON.stringify(made.body));
   await Draft.create({ packageId: saved.id, name: saved.name, data: { item: saved }, version: 1 });
-  await assert.rejects(deleteArchivedPackage(saved.id), /Archive this package before deleting it/);
-  await savePackage({ ...saved, status: 'archived' }, false, []);
-
-  assert.deepEqual(await deleteArchivedPackage(saved.id), { id: saved.id, name: saved.name });
+  assert.deepEqual(await deletePackage(saved.id), { id: saved.id, name: saved.name });
   assert.equal((await readPackages()).some(row => row.id === saved.id), false, 'the future catalogue record is gone');
   assert.equal(await Draft.exists({ packageId: saved.id }), null, 'its working copy is gone too');
   const order = await Order.findById(made.body.data._id).lean();
   assert.equal(order.projectSnapshot.salesAgreement.package.id, saved.id, 'the bought project remains frozen');
+  const replacementDraft = await drafts.saveDraft({ data: { item: { name: saved.name } } });
+  assert.notEqual(replacementDraft.packageId, saved.id, 'a deleted package ID is never assigned to a new draft');
   const replacement = await savePackage({ ...item, id: '', name: saved.name }, true, []);
   assert.notEqual(replacement.id, saved.id, 'a deleted package ID is never assigned to a new package');
 });
