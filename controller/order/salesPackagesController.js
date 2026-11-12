@@ -76,8 +76,9 @@ const integrationRead = handle(async (req, res) => {
   requireIntegration(req);
   const { offers } = await fetchWebsiteCatalogue();
   const packages = await catalogueWithQuotes(offers);
-  // Category names for the public package cards; only active categories, key and name only.
-  const categories = (await listProjectCategories()).filter(entry => entry.status === 'active').map(({ category, label }) => ({ category, label }));
+  // Category names for the public package cards and filters: key and name only. Archived categories are included too,
+  // because a live package may still be in one (archiving a category does not change its packages).
+  const categories = (await listProjectCategories()).map(({ category, label }) => ({ category, label }));
   // Service references are admin-only; public packages never expose internal notes/IDs.
   // The frozen add-on pricing (service IDs and prices) is the admin's working data, never public.
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: packages.map(({ linkedPlanIds, pricing, ...item }) => item), categories } });

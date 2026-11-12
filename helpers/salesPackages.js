@@ -358,6 +358,12 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     if (count !== item.linkedPlanIds.length) fail('A referenced service is unavailable. Select active portal services.');
   }
   if (item.offerSlug && item.status !== 'archived') checkOfferFits(item, offers.find(row => row.slug === item.offerSlug));
+  // Dates for the website's "recently added" and "recently modified" sorts (owner decision, 12 Nov 2026). A package
+  // saved before these dates existed gets no invented date: createdAt is kept only when it is already stored.
+  const now = new Date();
+  if (creating) item.createdAt = now;
+  else if (previous?.createdAt) item.createdAt = previous.createdAt;
+  item.updatedAt = now;
   try {
     await Catalogue.updateOne({ _id: 'packages' }, { $setOnInsert: { packages: {} } }, { upsert: true });
   } catch (error) { if (error.code !== 11000) throw error; }
@@ -410,9 +416,10 @@ async function transitionPackageStatus(id, status, offers, packagePages = []) {
       && (offer.packageId === id || (!!current.offerSlug && offer.slug === current.offerSlug)));
     if (running) fail(`End the running offer "${running.title}" before archiving this package.`, 409);
     const path = `packages.${id}`;
-    const result = await Catalogue.updateOne({ _id: 'packages', [path]: { $exists: true } }, { $set: { [`${path}.status`]: 'archived', [`${path}.offerSlug`]: '' } });
+    const updatedAt = new Date();
+    const result = await Catalogue.updateOne({ _id: 'packages', [path]: { $exists: true } }, { $set: { [`${path}.status`]: 'archived', [`${path}.offerSlug`]: '', [`${path}.updatedAt`]: updatedAt } });
     if (result.modifiedCount !== 1) fail('Package changed; refresh the catalogue and try again', 409);
-    return { ...current, status: 'archived', offerSlug: '' };
+    return { ...current, status: 'archived', offerSlug: '', updatedAt };
   }
   // savePackage owns every sellability check. Restore the editor-only service
   // selection from its frozen snapshot before handing the current row to it.
@@ -434,13 +441,19 @@ async function linkOfferPackages(offerSlug, packageIds, offers) {
   const packages = await readPackages();
   const wanted = new Set(packageIds);
   const changes = {};
+  // Only packages whose offer really changes get a new "modified" date.
+  const touched = new Set();
   for (const id of wanted) {
     const item = packages.find(row => row.id === id);
     if (!item || item.status === 'archived') fail('A selected package is unavailable. Refresh and try again.');
     checkOfferFits(item, offer);
-    if (item.offerSlug !== offerSlug) changes[`packages.${id}.offerSlug`] = offerSlug;
+    if (item.offerSlug !== offerSlug) { changes[`packages.${id}.offerSlug`] = offerSlug; touched.add(id); }
   }
-  for (const item of packages) if (item.offerSlug === offerSlug && !wanted.has(item.id)) changes[`packages.${item.id}.offerSlug`] = '';
+  for (const item of packages) if (item.offerSlug === offerSlug && !wanted.has(item.id)) { changes[`packages.${item.id}.offerSlug`] = ''; touched.add(item.id); }
+  if (touched.size) {
+    const updatedAt = new Date();
+    for (const id of touched) changes[`packages.${id}.updatedAt`] = updatedAt;
+  }
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return [...wanted];
 }
