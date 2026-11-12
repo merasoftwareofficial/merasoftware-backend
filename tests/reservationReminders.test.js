@@ -15,7 +15,7 @@ const { EmailDraft, EmailHistory, EmailPolicy, EmailTemplate } = require('../mod
 const { Queue } = require('../whatsapp/src/models.js');
 const { reserveOffer, listReservations, extendReservation } = require('../helpers/offerReservations');
 const { closeDueReservations, reservationOverview } = require('../helpers/reservationClosure');
-const { sendDueReminders } = require('../helpers/reservationReminders');
+const { sendDueReminders, upcomingStage } = require('../helpers/reservationReminders');
 const { requestProjectStart, deliverStartNotices, alertPendingStarts } = require('../helpers/reservationStart');
 const { byKey, channelFor } = require('../helpers/emailCatalog');
 const createProject = require('../controller/order/adminCreateProjectOrder');
@@ -44,7 +44,7 @@ beforeEach(async () => {
   [member, customer, admin] = await User.create([
     { name: 'Member', email: 'member@example.test', roles: ['member'], phone: '+919876500001' },
     { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002' },
-    { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
+    { name: 'Admin', email: 'admin@example.test', roles: ['admin'], adminContact: { email: 'team@example.test' } },
   ]);
   await Category.create({ category: 'standard_websites', basePrice: 10000 });
   emails = 0;
@@ -65,6 +65,23 @@ async function age(ago) {
 }
 const queued = event => Queue.find({ event }).lean();
 const history = event => EmailHistory.find({ event }).lean();
+
+test('read-only upcoming reminder forecast follows existing stages and pause rules', () => {
+  const start = new Date('2026-11-01T00:00:00Z');
+  const deadline = new Date(start.getTime() + 72 * HOUR);
+  const row = { reservedAt: start, expiresAt: deadline, remindersEnabled: true, remindersSent: [], extensions: [], startRequests: [] };
+  const first = upcomingStage(row, new Date(start.getTime() + HOUR));
+  assert.equal(first.event, 'offer.reservation.dayPassed');
+  assert.equal(first.at.getTime(), start.getTime() + 24 * HOUR);
+  const later = upcomingStage(row, new Date(start.getTime() + 25 * HOUR));
+  assert.equal(later.event, 'offer.reservation.reminder');
+  assert.equal(later.at.getTime(), deadline.getTime() - 24 * HOUR);
+  assert.equal(upcomingStage({ ...row, startRequestedAt: start }, start), null);
+  assert.equal(upcomingStage({ ...row, remindersEnabled: false }, start), null);
+  assert.equal(upcomingStage({ ...row, confirmedAt: start }, start), null);
+  assert.notEqual(upcomingStage({ ...row, remindersSent: [`day:${deadline.toISOString()}`] }, start).event, 'offer.reservation.dayPassed');
+  assert.equal(upcomingStage(row, new Date(deadline.getTime() + 1)), null);
+});
 const start = async (user = member) => requestProjectStart({ reservationId: (await Reservation.findOne())._id, userId: user._id });
 async function projectOn(reservationId) {
   const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
@@ -129,7 +146,7 @@ test('start request: clock paused, team and customer told once, lead follow-up, 
   await deliverStartNotices(); await deliverStartNotices();
   const [team] = await history('offer.start.request.admin');
   assert.equal((await history('offer.start.request.admin')).length, 1);
-  assert.deepEqual(team.to, ['syncvap@gmail.com'], 'no admin saved settings here: the fallback');
+  assert.deepEqual(team.to, ['team@example.test'], 'team mail uses the saved admin contact');
   const [told] = await queued('offer.start.request.received');
   assert.match(told.text, /We have received your request/); assert.match(told.text, /\/offer\/test-offer/);
   assert.equal((await history('offer.start.request.received')).length, 1);
@@ -146,6 +163,8 @@ test('start request: clock paused, team and customer told once, lead follow-up, 
   assert.equal((await listReservations(member._id)).reservations[0].status, 'start_requested');
   const view = await reservationOverview();
   assert.equal(view.counts.running, 1); assert.equal(view.counts.expired, 0); assert.ok(view.running[0].startRequestedAt);
+  assert.equal(view.running[0].teamReminder.number, 1);
+  assert.equal(new Date(view.running[0].teamReminder.at).getTime() - new Date(view.running[0].startRequestedAt).getTime(), 24 * HOUR);
   assert.equal((await reserve()).id, reserved.id, 'reserving again returns the paused reservation');
 });
 test('a project created on a paused reservation resumes the clock for the first payment, at least 24 hours', async () => {
@@ -197,6 +216,7 @@ test('a request nobody acts on reminds the team once a day, at most 3 times', as
   assert.equal((await EmailDraft.findOne({ dedupeKey: /^offer-start-request:/ })).blocks.get('waiting').text, '', 'the first message has no waiting line');
   await age(5 * 24 * HOUR); for (let run = 0; run < 5; run++) await alertPendingStarts();
   assert.equal((await alerts()).length, 3);
+  assert.equal((await reservationOverview()).running[0].teamReminder, null, 'no forecast after the third reminder');
 });
 test('no start after the deadline, on a project, or by another account', async () => {
   await reserve();

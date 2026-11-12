@@ -111,11 +111,12 @@ test('wallet only: active at once and uploads open; the purchase mails stay Off 
   // Off by default: no admin copy and no "submitted" mail was even prepared.
   assert.equal(await EmailDraft.countDocuments({ event: { $in: ['plan.purchase.admin', 'plan.payment.submitted'] } }), 0);
 
+  await User.updateOne({ _id: admin._id }, { $set: { 'adminContact.email': 'team@example.test' } });
   await turnOn('plan.purchase.admin', 'plan.payment.submitted');
   await buy(plan, { key: crypto.randomUUID() });
   const [adminMail] = await mailsFor('plan.purchase.admin');
-  // No admin saved settings here: the owner's fallback (helpers/teamContacts.js).
-  assert.deepEqual(adminMail.to, ['syncvap@gmail.com']);
+  // Admin mail goes to the saved team contact (helpers/teamContacts.js has no hidden fallback).
+  assert.deepEqual(adminMail.to, ['team@example.test']);
   assert.match(adminMail.text, /Paid in full from the wallet\. The plan is active\./);
   assert.equal(await EmailDraft.countDocuments({ event: 'plan.payment.submitted' }), 0, 'wallet-only buyer gets "plan started", not "submitted"');
 });

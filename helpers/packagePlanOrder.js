@@ -110,9 +110,22 @@ async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = fa
 }
 
 // After the commit: a paid first bill approves the order and starts cycle 1 (the plan rule).
-async function startPaidPackagePlan({ order, invoice }) {
+async function startPaidPackagePlan({ order, invoice, reviewStart = false }) {
   if (invoice?.status !== 'paid') return order;
-  return require('./serviceCycleSettlement').settleServiceCycle({ orderId: order._id, invoice });
+  return require('./serviceCycleSettlement').settleServiceCycle({ orderId: order._id, invoice, skipNotification: reviewStart });
 }
 
-module.exports = { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan, packageIdOf };
+// A paid cycle an admin approves (transactionApprovalController.js). For an admin-made package that has not
+// started yet (serviceStartReview, no start message claimed), the first paid cycle starts it: stage the
+// existing `plan.started` template for Send / Don't Send inside this admin request instead of sending it
+// automatically. Every other order, renewal, or call without an admin request keeps the automatic message.
+async function settleCycleReviewingStart({ orderId, invoice }) {
+  const { settleServiceCycle } = require('./serviceCycleSettlement');
+  const waiting = invoice?.status === 'paid' && require('./emailController').hasActiveRequestScope()
+    && await Order.exists({ _id: orderId, isServicePlan: true, serviceStartReview: true, serviceStartNotifiedAt: null });
+  const settled = await settleServiceCycle({ orderId, invoice, skipNotification: !!waiting });
+  if (waiting) await require('./servicePlanNotifications').prepareAdminStartReview(orderId, invoice);
+  return settled;
+}
+
+module.exports = { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan, settleCycleReviewingStart, packageIdOf };

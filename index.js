@@ -24,6 +24,10 @@ const server = http.createServer(app)
 // Default OFF: a missing or unset ENABLE_CRONS never starts them by accident.
 // Render production sets ENABLE_CRONS=true in its own environment variables.
 const cronsEnabled = process.env.ENABLE_CRONS === 'true';
+// New rule engine is a separate opt-in; legacy reminder jobs remain unchanged.
+if (process.env.COMMUNICATION_REMINDER_JOBS_ENABLED === 'true') {
+  cron.schedule('* * * * *', () => require('./helpers/communicationReminderWorker').processCommunicationReminders().catch(error => console.error('[communication reminders]', error.message)), { timezone: 'Asia/Kolkata' });
+}
 if (cronsEnabled) {
   fileCleanupScheduler.scheduleCleanup();
   scheduleServicePlanRenewals();

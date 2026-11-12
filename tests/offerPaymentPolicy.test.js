@@ -87,6 +87,23 @@ test('pay-later project starts work with unpaid bill and frozen agreement; advan
   const advance = await project('advance'); assert.equal(advance.orderVisibility, 'pending-approval');
   await assert.rejects(assertUploadOrder(advance, { fileCount: 0 }), /approval/);
 });
+test('reminder overview reads saved invoice terms without changing or sending anything', async () => {
+  const order = await project('pay_later', { reminderOffsets: [-3, 0, 3] });
+  const bill = await Invoice.findOne({ orderId: order._id, invoiceType: 'project' }).lean();
+  const beforeHistory = await EmailHistory.countDocuments();
+  const overview = await require('../helpers/offerReminderOverview').offerReminderOverview({ now: new Date(new Date(bill.dueDate).getTime() - 4 * 86400000) });
+  assert.equal(overview.total, 1);
+  assert.equal(overview.rows[0].invoiceNumber, bill.invoiceNumber);
+  assert.equal(overview.rows[0].customer, 'Policy Client');
+  assert.equal(overview.rows[0].nextMilestone.offset, -3);
+  assert.equal(overview.rows[0].outstanding, 699);
+  assert.deepEqual(overview.rows[0].offsets, [-3, 0, 3]);
+  assert.equal(await EmailHistory.countDocuments(), beforeHistory);
+  assert.equal(sent.length, 0);
+  assert.equal((await Invoice.findById(bill._id)).status, bill.status);
+  await Invoice.updateOne({ _id: bill._id }, { $set: { status: 'paid' } });
+  assert.equal((await require('../helpers/offerReminderOverview').offerReminderOverview()).total, 0);
+});
 test('last project pre-payment allowance is atomic; replay and rejected submissions spend nothing', async () => {
   const order = await project('limited_uploads', { uploadAllowance: 1 });
   const results = await Promise.allSettled([upload(order), upload(order)]);

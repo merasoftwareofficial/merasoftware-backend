@@ -116,7 +116,9 @@ const catalog = events.map(([key, section, label, group = label]) => ({
 }));
 // Composed broadcasts participate in the same delivery/audit/access catalog, but their
 // reusable content is owned by Broadcast, not by the action-template settings.
-const deliveryCatalog = [...catalog, { key: 'broadcast.manual', section: 'Broadcast', label: 'Broadcast', group: 'Broadcast', application: 'portal', trigger: 'admin', audience: 'customer', defaultChannel: 'whatsapp', channels: CHANNELS }];
+const deliveryCatalog = [...catalog, { key: 'broadcast.manual', section: 'Broadcast', label: 'Broadcast', group: 'Broadcast', application: 'portal', trigger: 'admin', audience: 'customer', defaultChannel: 'whatsapp', channels: CHANNELS },
+  // Internal route for rendered rule-step messages; it is not an action template.
+  { key: 'reminder.automated', section: 'Reminders', label: 'Scheduled reminder', group: 'Reminders', application: 'portal', trigger: 'system', audience: 'customer', defaultChannel: 'whatsapp', channels: CHANNELS }];
 const byKey = new Map(deliveryCatalog.map(event => [event.key, event]));
 const eventKeys = application => deliveryCatalog.filter(event => event.application === application).map(event => event.key);
 const isCustomerTriggered = key => byKey.get(key)?.trigger === 'customer';

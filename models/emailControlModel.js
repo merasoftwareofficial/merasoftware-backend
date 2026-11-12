@@ -59,6 +59,8 @@ const draftSchema = new Schema({
   lastAttemptAt: Date,
   attempts: [{ _id: false, at: Date, status: String, failure: String }],
   reminderInvoice: Schema.Types.ObjectId,
+  // Only new configurable reminder drafts carry this; legacy messages are unchanged.
+  reminderRunId: Schema.Types.ObjectId,
   // Set only by Send message on a lead's page (helpers/leadMessage.js).
   leadId: Schema.Types.ObjectId,
   // Set only by Send Upgrade on a project's page (helpers/complimentaryUpgrade.js).

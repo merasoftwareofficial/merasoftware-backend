@@ -3,7 +3,7 @@ const { getCycleDates, isFinalCycle } = require("./serviceBillingSchedule");
 const { syncServiceBillingStatement } = require("./serviceBillingStatement");
 const { markOrderApproved } = require("./orderLifecycle");
 
-const settleServiceCycle = async ({ orderId, invoice, now = new Date() }) => {
+const settleServiceCycle = async ({ orderId, invoice, now = new Date(), skipNotification = false }) => {
   const service = await orderModel.findOne({ _id: orderId, isServicePlan: true });
   if (!service) throw new Error("Service order not found");
   if (invoice.status !== "paid") return service;
@@ -54,7 +54,7 @@ const settleServiceCycle = async ({ orderId, invoice, now = new Date() }) => {
   await service.save();
   await syncServiceBillingStatement(service);
   // Every paid cycle (wallet purchase, approved UPI, admin start) tells the client once.
-  require('./servicePlanNotifications').notifyCyclePaid(service._id, invoice);
+  if (!skipNotification) require('./servicePlanNotifications').notifyCyclePaid(service._id, invoice);
   return service;
 };
 

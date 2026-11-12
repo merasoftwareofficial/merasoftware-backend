@@ -48,7 +48,7 @@ beforeEach(async () => {
   [member, customer, admin] = await User.create([
     { name: 'Member', email: 'member@example.test', roles: ['member'], phone: '+919876500001' },
     { name: 'Client', email: 'client@example.test', roles: ['customer'], phone: '+919876500002' },
-    { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
+    { name: 'Admin', email: 'admin@example.test', roles: ['admin'], adminContact: { email: 'team@example.test', whatsappNumbers: ['+919876500003'] } },
   ]);
   await Category.create({ category: 'standard_websites', basePrice: 10000 });
   emails = 0;

@@ -7,6 +7,15 @@ const fail = (message, status = 409) => { throw Object.assign(new Error(message)
 async function availability(draft) {
   const emails = draft.to || [];
   const email = emails.length > 0 && emails.every(value => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value));
+  if (draft.reminderRunId) {
+    const run = await require('../models/communicationReminderRunModel').findById(draft.reminderRunId).select('source').lean();
+    if (run?.source === 'broadcast') {
+      const result = await require('./communicationReminderEligibility').maySendReminder(draft.reminderRunId);
+      if (!result.allowed) fail(result.reason);
+      const recipients = result.candidate.phones.map((phone, index) => ({ ...(emails[0] ? { email: emails[0] } : {}), phone, ...(index ? { alt: true } : {}) }));
+      return choicesFor(draft, { email: email && result.candidate.emails.includes(emails[0]), whatsapp: recipients.length > 0, recipients });
+    }
+  }
   // Team mail to the admins: the numbers saved in Admin → Settings, and WhatsApp goes to every admin that has one
   // (an admin without a number still gets the email). Everyone else: each recipient must have a number.
   const team = isAdminRecipientEvent(draft.event);
@@ -101,6 +110,10 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
     }
     if (delivery.channels.includes('whatsapp') && delivery.whatsappStatus !== 'queued') {
       try {
+        if (current.reminderRunId) {
+          const eligibility = await require('./communicationReminderEligibility').maySendReminder(current.reminderRunId);
+          if (!eligibility.allowed) throw new Error(`Reminder not queued: ${eligibility.reason}`);
+        }
         await enqueueWhatsAppForEmail({ ...current, subject: delivery.subject }, { recipients: delivery.recipients, strict: true });
         delivery.whatsappStatus = 'queued';
       } catch (error) { delivery.whatsappStatus = 'failed'; errors.push(error.message); }

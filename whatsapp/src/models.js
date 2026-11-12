@@ -17,6 +17,7 @@ const queueSchema = new mongoose.Schema({
   event: String, // email action key, e.g. sendProjectCreatedEmail
   application: { type: String, enum: ['website', 'portal'] },
   emailDraftId: mongoose.Schema.Types.ObjectId, // the sent email this WhatsApp copies
+  reminderRunId: mongoose.Schema.Types.ObjectId, // new reminder only; survives draft expiry
   broadcastRecipientId: mongoose.Schema.Types.ObjectId,
   finalMessageExpiryId: mongoose.Schema.Types.ObjectId, // original draft id: one expiry per cycle
   quotedMessage: { id: String, chat: String, text: String },

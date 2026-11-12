@@ -47,6 +47,14 @@ async function draft() {
   return (await api(`/email-control/drafts/${result.emailDraftIds[0]}`)).data;
 }
 const decision = (draft, channels) => ({ choice: 'send', channels, subject: draft.subject, subjectDoc: draft.templateSubjectDoc, doc: draft.templateDoc || draft.doc, templateId: draft.selectedTemplateId });
+test('an unavailable new reminder is blocked before email provider and WhatsApp queue', async () => {
+  const row = await draft();
+  await EmailDraft.updateOne({ _id: row._id }, { $set: { reminderRunId: new mongoose.Types.ObjectId() } });
+  const result = await api(`/email-control/drafts/${row._id}/decision`, 'POST', decision(row, 'both'));
+  assert.equal(result.data.status, 'failed');
+  assert.equal(providerCalls.length, 0);
+  assert.equal(await Queue.countDocuments(), 0);
+});
 test('review exposes original dynamic fields while preview fills actual recipient; saves selected ID with conflict protection', async () => {
   const row = await draft();
   assert.ok(JSON.stringify(row.templateDoc).includes('emailVariable'));

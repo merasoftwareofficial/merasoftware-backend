@@ -64,6 +64,7 @@ before(async () => {
   app.patch('/admin/sales-packages/offer-links', authToken, salesController.adminLinkOffer);
   app.get('/integration/sales-packages', salesController.integrationRead);
   app.post('/admin/projects/:orderId/approval', authToken, require('../controller/order/approveProjectOrder'));
+  app.post('/wallet/approve-transaction', authToken, require('../controller/user/transactionApprovalController').approveTransaction);
   app.post('/admin/clients/:customerId/recharge-wallet', authToken, require('../controller/user/adminRechargeWallet'));
   await transactionModel.syncIndexes();
   await orderModel.syncIndexes();
@@ -555,6 +556,14 @@ test('back-dated monthly package: the plan, its first cycle and payment start on
   assert.equal(made.status, 201, made.message);
   const plan = await orderModel.findById(made.data._id).lean();
   assert.equal(plan.isServicePlan, true);
+  assert.equal(made.emailStatus, 'awaiting-review');
+  assert.equal(made.emailDraftIds.length, 1);
+  const startDraft = await EmailDraft.findById(made.emailDraftIds[0]).lean();
+  assert.equal(startDraft.event, 'plan.started');
+  assert.equal(startDraft.values.packagePrice, '₹1,000');
+  assert.equal(startDraft.values.packageDuration, '6 months');
+  const decision = await require('../helpers/emailController').decide(String(startDraft._id), admin._id, { choice: 'skip' }, { application: 'portal', portalAdmin: true });
+  assert.equal(decision.status, 'skipped');
   sameTime(plan.createdAt, startedAt, 'plan createdAt'); sameTime(plan.servicePlanStartDate, startedAt, 'plan start');
   sameTime(plan.serviceCurrentCycleStart, startedAt, 'cycle 1 start');
   assert.ok(new Date(plan.serviceCurrentCycleEnd) < new Date(), 'cycle 1 (one month) has already ended');
@@ -566,4 +575,52 @@ test('back-dated monthly package: the plan, its first cycle and payment start on
   const after = await orderModel.findById(plan._id).lean();
   assert.equal(after.servicePlanStatus, 'paused');
   assert.equal(await invoiceModel.countDocuments({ orderId: plan._id, invoiceType: 'plan_renewal', serviceCycleNumber: 2 }), 1);
+});
+
+test('admin-made monthly package that starts later, on payment approval: start message is reviewed; a customer-made plan stays automatic', async () => {
+  const { savePackage } = require('../helpers/salesPackages');
+  const { EmailHistory } = require('../models/emailControlModel');
+  app.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
+  const care = await savePackage({ name: 'Monthly Care', description: 'Care', status: 'published', category: 'standard_websites', billing: 'monthly', portalUploads: true,
+    regularPrice: 1500, discountedPrice: 1000, offerExtraPrice: 0, offerSlug: '', inclusions: ['Care'], terms: [], linkedPlanIds: [], order: 9, pages: [], id: '',
+    monthly: { billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12, uploadsPerMonth: 2 } }, true, []);
+  const choice = { billingCycle: 'monthly', tenureMonths: 6 };
+  const quoted = await api('/admin/sales-packages/quote', { packageId: care.id, choice }, 'PATCH');
+  assert.equal(quoted.status, 200, quoted.message);
+  // The admin adds the package and lets the client pay the bill: nothing has started, nothing is staged.
+  const made = await create({ sellingPrice: quoted.data.quote.finalPrice, paymentType: 'monthly', monthlyChoice: choice, packageId: care.id, packageQuoteKey: quoted.data.packageQuote.quoteKey });
+  assert.equal(made.status, 201, made.message);
+  assert.equal(made.emailDraftIds?.length || 0, 0, 'no start message is staged before payment');
+  const plan = await orderModel.findById(made.data._id).lean();
+  assert.equal(plan.serviceStartReview, true);
+  assert.equal(plan.serviceStartNotifiedAt, null);
+  const invoice = await invoiceModel.findOne({ orderId: plan._id, serviceCycleNumber: 1 });
+  assert.notEqual(invoice.status, 'paid');
+  const pay = async (transactionId) => {
+    await transactionModel.create({ userId: customer._id, orderId: plan._id, invoiceId: invoice._id, transactionId, description: 'Isolated UPI payment', amount: invoice.amount,
+      status: 'pending', paymentStatus: 'pending-approval', paymentMethod: 'upi', type: 'payment', sourceType: 'invoice', upiTransactionId: '412345678901' });
+    return api('/wallet/approve-transaction', { transactionId });
+  };
+  // The admin approves the client's UPI payment: the plan starts now and its message waits for Send / Don't Send.
+  const approved = await pay('ADMINPLAN-APPROVE-1');
+  assert.equal(approved.status, 200, approved.message);
+  assert.equal(approved.emailStatus, 'awaiting-review');
+  assert.equal(approved.emailDraftIds.length, 1);
+  const draft = await EmailDraft.findById(approved.emailDraftIds[0]).lean();
+  assert.equal(draft.event, 'plan.started');
+  assert.equal(draft.values.packagePrice, '₹1,000');
+  const started = await orderModel.findById(plan._id).lean();
+  assert.equal(started.servicePlanStatus, 'active');
+  assert.ok(started.serviceStartNotifiedAt, 'the start is claimed once');
+  assert.equal((await require('../helpers/emailController').decide(String(draft._id), admin._id, { choice: 'skip' }, { application: 'portal', portalAdmin: true })).status, 'skipped');
+  assert.equal(await EmailHistory.countDocuments({ dedupeKey: `plan-started:${plan._id}` }), 0, 'Don\'t Send sends nothing and nothing automatic follows');
+  // The same flag-less order (a client's own purchase) is untouched by this change: no review, the old automatic path claims the start.
+  await orderModel.updateOne({ _id: plan._id }, { $set: { serviceStartReview: false, serviceStartNotifiedAt: null, servicePlanStatus: 'active' } });
+  await invoiceModel.updateOne({ _id: invoice._id }, { $set: { status: 'unpaid', amountPaid: 0, paidDate: null } });
+  const automatic = await pay('ADMINPLAN-APPROVE-2');
+  assert.equal(automatic.status, 200, automatic.message);
+  assert.notEqual(automatic.emailStatus, 'awaiting-review');
+  assert.equal(automatic.emailDraftIds?.length || 0, 0);
+  for (let i = 0; i < 40 && !(await orderModel.findById(plan._id).lean()).serviceStartNotifiedAt; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok((await orderModel.findById(plan._id).lean()).serviceStartNotifiedAt, 'automatic start claimed by the existing path');
 });

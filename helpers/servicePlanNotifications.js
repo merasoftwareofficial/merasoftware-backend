@@ -37,6 +37,13 @@ async function planStarted(orderId, invoice = null) {
   const order = await withCustomer(orderId);
   return sendPlanMail('plan.started', `plan-started:${orderId}`, order, invoice);
 }
+// For an admin start inside a reviewed request, stage the same plan-start
+// template after the order commits. Other start paths keep their system mail.
+async function prepareAdminStartReview(orderId, invoice = null) {
+  if (!await claimStart(orderId)) return 'already';
+  const order = await withCustomer(orderId);
+  return prepareInRequest('plan.started', order, invoice);
+}
 
 // A paid invoice settled a cycle (serviceCycleSettlement.js). The first time the plan is active
 // this is "plan started" (which states the payment); otherwise "payment received".
@@ -96,6 +103,7 @@ async function preparePaymentRejected(orderId, transaction, reason) {
 module.exports = {
   preparePurchaseMails,
   preparePaymentRejected,
+  prepareAdminStartReview,
   notifyPlanStarted: (orderId, invoice) => later('plan started', () => planStarted(orderId, invoice)),
   notifyCyclePaid: (orderId, invoice) => later('plan payment', () => cyclePaid(orderId, invoice)),
   notifyUploadStatus: (requestId, status, note, step) => later(`upload ${status}`, () => uploadStatus(requestId, status, note, step)),

@@ -51,6 +51,14 @@ beforeEach(async () => {
 });
 
 describe('sender', () => {
+  it('cancels a new reminder whose run is unavailable before contacting WhatsApp', async () => {
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    const row = await Queue.create({ to: '919876543210', text: 'Reminder', reminderRunId: new mongoose.Types.ObjectId(), createdAt: now(), nextAttemptAt: now() });
+    assert.equal((await sender.step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+    assert.match((await Queue.findById(row._id)).lastError, /Reminder eligibility changed/);
+  });
   it('sends one message, then waits at least 30 seconds before the next', async () => {
     const wa = fakeWhatsApp();
     const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });

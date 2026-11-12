@@ -755,6 +755,14 @@ const orderSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    // True only for a monthly package an admin made (controller/order/adminCreateProjectOrder.js). If it
+    // starts later, when the admin approves the client's payment, its "plan started" message is staged for
+    // Send / Don't Send instead of going automatically (helpers/packagePlanOrder.js settleCycleReviewingStart).
+    // Absent/false on every other order, so those keep the automatic message.
+    serviceStartReview: {
+        type: Boolean,
+        default: false
+    },
     // Add-on service linkage. A service order can be bought two ways:
     //   linkedProjectOrderId === null -> standalone plan (existing behaviour)
     //   linkedProjectOrderId set       -> this service is an add-on attached to

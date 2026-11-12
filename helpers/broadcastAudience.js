@@ -62,19 +62,21 @@ async function audience(group, { requireName = false, channel = 'whatsapp', bloc
   }
   return { recipients, total: leads.length, count: recipients.length, excluded };
 }
-async function eligible(group, recipient, { requireName = false } = {}) {
+// `blocks`: an already-read contactBlocks() map, for a caller that checks many recipients in one pass (the
+// follow-up planner). Without it every check reads the current blocks, as a send does.
+async function eligible(group, recipient, { requireName = false, blocks: knownBlocks } = {}) {
   if (CATALOG.find(row => row.id === group)?.blocked) return null;
   const lead = await Lead.findOne({ ...groupQuery(group), _id: recipient.leadId }).select('name nameFromWhatsapp phone altPhone email convertedToUserId').lean();
   if (!lead || (requireName && !hasConfirmedName(lead))) return null;
   if (group.startsWith('clients:') && !await require('../models/userModel').exists({ _id: lead.convertedToUserId, roles: 'customer', deletedAt: null, isActive: { $ne: false }, isGuest: { $ne: true } })) return null;
   if (recipient.channel === 'email') {
     if (String(lead.email || '').trim().toLowerCase() !== recipient.email) return null;
-    const blocks = await contactBlocks();
+    const blocks = knownBlocks || await contactBlocks();
     return [normalizePhone(lead.phone), usableAlt(lead.altPhone, lead.phone)].some(number => number && blocks.has(number)) ? null : lead;
   }
   // The number must still be this lead's: its main number, or its alternate while alternate sending is on.
   const main = normalizePhone(lead.phone);
   if (recipient.phone !== main && !(altSendingEnabled() && main && usableAlt(lead.altPhone, lead.phone) === recipient.phone)) return null;
-  return (await contactBlocks()).has(recipient.phone) ? null : lead;
+  return (knownBlocks || await contactBlocks()).has(recipient.phone) ? null : lead;
 }
 module.exports = { GROUPS, CATALOG, groupQuery, audience, eligible };

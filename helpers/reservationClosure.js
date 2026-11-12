@@ -14,6 +14,10 @@ const LATE_MS = 24 * 60 * 60 * 1000;
 const RETRY_MS = 5 * 60 * 1000;
 const LOCK_MS = 2 * 60 * 1000;
 const FINAL = { sent: 'sent', 'not-sent': 'not-sent', paused: 'not-sent', expired: 'not-sent' };
+const teamReminder = (started, alerts, maximum = 3) => {
+  if (!started || !Number.isInteger(Number(alerts)) || Number(alerts) >= maximum) return null;
+  return { at: new Date(new Date(started).getTime() + (Number(alerts) + 1) * 24 * 60 * 60 * 1000), number: Number(alerts) + 1 };
+};
 
 const duePast = now => ({ $or: [{ extendedUntil: null, expiresAt: { $lte: now } }, { extendedUntil: { $lte: now } }] });
 
@@ -67,14 +71,14 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
   const runningQuery = { ...open, $or: [{ startRequestedAt: { $ne: null } }, { extendedUntil: null, expiresAt: { $gt: now } }, { extendedUntil: { $gt: now } }] };
   const [running, used, expired, closures] = await Promise.all([
     Reservation.find(runningQuery).sort({ startRequestedAt: -1, expiresAt: 1 }).limit(limit)
-      .select('userId offerSnapshot.title reservedAt expiresAt extendedUntil origin startRequestedAt').lean(),
+      .select('userId offerSnapshot.title reservedAt expiresAt extendedUntil extensions origin startRequestedAt startRequests remindersEnabled remindersSent projectId confirmedAt').lean(),
     Reservation.countDocuments({ $or: [{ projectId: { $ne: null } }, { confirmedAt: { $ne: null } }] }),
     Reservation.countDocuments({ ...open, startRequestedAt: null, ...duePast(now) }),
     Reservation.aggregate([{ $match: { closureStatus: { $in: ['sent', 'not-sent', 'late', 'failed'] } } }, { $group: { _id: '$closureStatus', count: { $sum: 1 } } }]),
   ]);
   // Open "Start my project" requests on packages without an offer (helpers/packageStart.js), oldest first.
   const starts = await require('../models/packageStartRequestModel').find({ closedAt: null }).sort({ requestedAt: 1 }).limit(limit)
-    .select('userId packageSnapshot requestedAt kind').lean();
+    .select('userId packageSnapshot requestedAt kind alerts').lean();
   const users = await User.find({ _id: { $in: [...running, ...starts].map(row => row.userId) } }).select('name email phone').lean();
   const runningCount = running.length < limit ? running.length
     : await Reservation.countDocuments(runningQuery);
@@ -90,13 +94,16 @@ async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
       // Digits only, the WhatsApp queue's format, which the website's phoneLabel shows as +91 98765 43210.
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '', offer: row.offerSnapshot?.title || '',
         reservedAt: row.reservedAt, deadline: row.extendedUntil || row.expiresAt, extended: !!row.extendedUntil, startRequestedAt: row.startRequestedAt || null,
-        hours: Math.round((new Date(row.expiresAt) - new Date(row.reservedAt)) / 3600000) };
+        hours: Math.round((new Date(row.expiresAt) - new Date(row.reservedAt)) / 3600000),
+        teamReminder: row.startRequestedAt && row.startRequests?.length && !row.startRequests.at(-1)?.ended ? teamReminder(row.startRequestedAt, row.startRequests.at(-1)?.alerts || 0) : null,
+        upcomingReminder: require('./reservationReminders').upcomingStage(row, now) };
     }),
     packageStarts: starts.map(row => {
       const user = users.find(item => String(item._id) === String(row.userId));
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '',
         package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, choice: row.packageSnapshot?.choice || null,
-        billing: row.packageSnapshot?.billing || null, kind: row.kind || 'callback', userId: String(row.userId), requestedAt: row.requestedAt };
+        billing: row.packageSnapshot?.billing || null, kind: row.kind || 'callback', userId: String(row.userId), requestedAt: row.requestedAt,
+        teamReminder: teamReminder(row.requestedAt, row.alerts || 0) };
     }),
   };
 }

@@ -186,15 +186,21 @@ const adminCreateProjectOrderController = async (req, res) => {
       const { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan } = require('../../helpers/packagePlanOrder');
       const orderData = buildPackagePlanOrderData({ userId: customerId, item: packageItem, commercial, ...(startDate ? { startDate } : {}) });
       if (creationKey) { orderData.projectCreationKey = creationKey; orderData.projectCreationHash = creationHash; }
+      // An admin-made package: if it starts later (the admin approves the client's payment), its start message is reviewed.
+      orderData.serviceStartReview = true;
       // Agreed pay-later offer terms: the plan works before payment (as customerCreateServicePlanOrder.js).
       if (!shouldRecordPayment && require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(commercial.paymentPolicy)) orderData.orderVisibility = 'approved';
       const { order, invoice, reused } = await persistPackagePlanOrder({
         orderData, actorId: req.userId, sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
         payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null, startDate,
       });
-      const saved = reused ? order : await startPaidPackagePlan({ order, invoice });
+      const reviewStart = !reused && require('../../helpers/emailController').hasActiveRequestScope();
+      const saved = reused ? order : await startPaidPackagePlan({ order, invoice, reviewStart });
       // Pay-later terms: the plan is working before payment, so it has started (the paid case is told by the cycle settlement).
-      if (!reused && invoice.status !== 'paid' && orderData.orderVisibility === 'approved') require('../../helpers/servicePlanNotifications').notifyPlanStarted(order._id, invoice);
+      if (!reused && (invoice.status === 'paid' || orderData.orderVisibility === 'approved')) {
+        if (reviewStart) await require('../../helpers/servicePlanNotifications').prepareAdminStartReview(order._id, invoice);
+        else if (invoice.status !== 'paid') require('../../helpers/servicePlanNotifications').notifyPlanStarted(order._id, invoice);
+      }
       return res.status(reused ? 200 : 201).json({ message: "Monthly package started as a plan", success: true, error: false, data: saved });
     }
     const isPartialPayment = !isFree && paymentType === "partial";

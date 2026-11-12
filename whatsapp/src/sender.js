@@ -21,6 +21,11 @@ async function broadcastEligible(item) {
 }
 const NOT_ON_WHATSAPP = 'This number is not on WhatsApp.';
 const TOO_OLD = 'Not sent: it waited more than a day (WhatsApp was paused or not linked).';
+// Only new configurable reminders have this identity; old queue items keep their existing checks.
+async function reminderEligible(item) {
+  if (!item.reminderRunId) return true;
+  return (await (await import('../../helpers/communicationReminderEligibility.js')).default.maySendReminder(item.reminderRunId, { phone: item.to })).allowed;
+}
 
 export function dayKey(date, timeZone) {
   return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
@@ -98,8 +103,9 @@ export function createSender({
       await OutgoingAttempt.create({ _id: item.attemptMessageId, queueId: item._id, to: item.to, source,
         cycleDraftId: item.finalMessageExpiryId || (item.event === 'lead.finalMessage' ? item.emailDraftId : undefined), phase: 'preparing' });
       await Queue.updateOne({ _id: item._id, status: 'sending', attemptMessageId: item.attemptMessageId }, { $set: { source } });
-      if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item)) {
-        await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: expiry.CANCELLED, expiresAt: finishedExpiry(now()) } });
+      const reminderStillEligible = await reminderEligible(item);
+      if (!reminderStillEligible || (item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item)) {
+        await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: reminderStillEligible ? expiry.CANCELLED : 'Reminder eligibility changed before sending.', expiresAt: finishedExpiry(now()) } });
         await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'cancelled' } });
         await releaseSlot();
         return { waitMs: POLL_MS, reason: 'cancelled', itemId: item._id };
@@ -114,7 +120,7 @@ export function createSender({
           ...(item.media?.url ? { media: item.media } : {}),
           ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
           beforeSend: async () => {
-            if ((item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await broadcastEligible(item) || !await stopFinalMessage.claimHandoff(item)) return false;
+            if (!await reminderEligible(item) || (item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await broadcastEligible(item) || !await stopFinalMessage.claimHandoff(item)) return false;
             handedOff = true;
             await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'handoff', handedOffAt: now() } });
             return true;
@@ -125,7 +131,7 @@ export function createSender({
     } catch (error) {
       const message = error?.message || 'Unknown sending error';
       outcome = error?.code === 'FINAL_MESSAGE_CHANGED'
-        ? { status: 'cancelled', lastError: item.broadcastRecipientId ? 'Broadcast eligibility changed before sending.' : expiry.CANCELLED }
+        ? { status: 'cancelled', lastError: item.reminderRunId ? 'Reminder eligibility changed before sending.' : item.broadcastRecipientId ? 'Broadcast eligibility changed before sending.' : expiry.CANCELLED }
         : handedOff || item.attempts >= rules.maxAttempts
         ? { status: 'failed', lastError: message }
         : { status: 'pending', lastError: message, nextAttemptAt: new Date(now().getTime() + rules.retryDelayMin * 60_000) };

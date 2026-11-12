@@ -104,6 +104,15 @@ router.post('/final-message/decision', handle(req => decideReply(req.body?.id, r
 // The Reservation box: counts and the running reservations. The hours live on each offer and the
 // three messages are Email Templates actions, so this box only shows how reservations stand.
 router.get('/reservations', handle(() => require('../helpers/reservationClosure').reservationOverview()));
+router.get('/payment-reminders', handle(req => require('../helpers/offerReminderOverview').offerReminderOverview({ page: req.query.page })));
+router.get('/business-activity', handle(() => require('../helpers/communicationActivity').recentActivity()));
+router.get('/reminder-rules', handle(() => require('../helpers/communicationReminderRules').listDrafts()));
+router.get('/reminder-runs', handle(req => require('../helpers/communicationReminderHistory').reminderHistory({ page: req.query.page, view: req.query.view })));
+router.post('/reminder-runs/:id/retry', handle(req => require('../helpers/communicationReminderRetry').retryQueueFailure(req.params.id)));
+router.post('/reminder-rules', handle(req => require('../helpers/communicationReminderRules').createDraft(req.body, req.userId)));
+router.put('/reminder-rules/:id', handle(req => require('../helpers/communicationReminderRules').updateDraft(req.params.id, req.body)));
+router.post('/reminder-rules/:id/enabled', handle(req => require('../helpers/communicationReminderRules').setEnabled(req.params.id, req.body?.enabled, req.body?.expectedRevision)));
+router.get('/reminder-rules/:id/preview', handle(req => require('../helpers/communicationReminderPreview').previewRule(req.params.id)));
 
 // Applies to messages prepared from now on. A message already out keeps the wait it promised.
 router.post('/final-message/time', handle(async req => {

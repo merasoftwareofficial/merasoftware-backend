@@ -95,7 +95,7 @@ async function enqueueWhatsAppForEmail(draft, { recipients, strict = false } = {
       if (await Queue.exists(sameCopy)) continue;
       await enqueueWhatsApp({ to: normalizePhone(saved), skipReason: saved ? BAD_PHONE : NO_PHONE,
         emailDraftId: draft._id, email, event: draft.event, application: draft.application, text,
-        source, ...(target.alt ? { alt: true } : {}) });
+        source, ...(draft.reminderRunId ? { reminderRunId: draft.reminderRunId } : {}), ...(target.alt ? { alt: true } : {}) });
     } catch (error) {
       // 11000: this recipient is already queued. Any other error loses only this recipient's copy.
       if (error.code !== 11000) {

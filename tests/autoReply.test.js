@@ -66,11 +66,77 @@ beforeEach(async () => {
 after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await mongoose.disconnect(); await db?.stop(); });
 
 test('only a signed-in admin can open anything', async () => {
-  for (const [path, method] of [['/status', 'GET'], ['/switches', 'POST'], ['/message', 'POST'], ['/reply', 'POST']]) {
+  for (const [path, method] of [['/status', 'GET'], ['/switches', 'POST'], ['/message', 'POST'], ['/reply', 'POST'], [`/reminder-runs/${new mongoose.Types.ObjectId()}/retry`, 'POST']]) {
     assert.equal((await api(base + path, null, method)).status, 401, path);
     assert.equal((await api(base + path, customer, method)).status, 403, path);
   }
   assert.equal(await Rule.countDocuments(), 0);
+});
+
+test('reminder rule drafts are admin-only, disabled and protected from stale edits', async () => {
+  const Draft = require('../models/communicationReminderRuleModel');
+  const body = { name: 'Monthly reminder', source: 'monthly_package', steps: [{ offsetDays: -3, subject: 'Due soon', text: 'Hello {{name}}', channel: 'whatsapp' }] };
+  try {
+    assert.equal((await api(`${base}/reminder-rules`, customer, 'POST', body)).status, 403);
+    const created = await api(`${base}/reminder-rules`, admin, 'POST', body);
+    assert.equal(created.status, 200); assert.equal(created.data.enabled, false);
+    assert.equal((await api(`${base}/reminder-rules`, admin, 'POST', { ...body, enabled: true })).status, 400);
+    const id = created.data._id;
+    const changed = await api(`${base}/reminder-rules/${id}`, admin, 'PUT', { ...body, name: 'Updated', expectedRevision: created.data.revision });
+    assert.equal(changed.status, 200); assert.equal(changed.data.name, 'Updated');
+    assert.equal((await api(`${base}/reminder-rules/${id}`, admin, 'PUT', { ...body, expectedRevision: created.data.revision })).status, 409);
+    assert.equal((await api(`${base}/reminder-rules`, customer)).status, 403);
+    assert.equal((await Draft.findById(id)).enabled, false);
+    assert.equal(await Queue.countDocuments(), 0, 'saving a rule does not queue anything');
+  } finally { await Draft.deleteMany({}); }
+});
+test('monthly rule activation requires both schedulers and disabling cancels unattempted runs', async () => {
+  const Draft = require('../models/communicationReminderRuleModel');
+  const Runs = require('../models/communicationReminderRunModel');
+  const priorReminders = process.env.COMMUNICATION_REMINDER_JOBS_ENABLED, priorCrons = process.env.ENABLE_CRONS;
+  const body = { name: 'Monthly', source: 'monthly_package', steps: [{ offsetDays: -3, subject: 'Due', text: 'Hello {{name}}', channel: 'email' }] };
+  try {
+    delete process.env.COMMUNICATION_REMINDER_JOBS_ENABLED; delete process.env.ENABLE_CRONS;
+    const draft = (await api(`${base}/reminder-rules`, admin, 'POST', body)).data;
+    assert.equal((await api(`${base}/reminder-rules/${draft._id}/enabled`, admin, 'POST', { enabled: true, expectedRevision: draft.revision })).status, 400);
+    process.env.COMMUNICATION_REMINDER_JOBS_ENABLED = 'true'; process.env.ENABLE_CRONS = 'true';
+    assert.equal((await api(`${base}/reminder-rules/${draft._id}/enabled`, customer, 'POST', { enabled: true, expectedRevision: draft.revision })).status, 403);
+    const activated = await api(`${base}/reminder-rules/${draft._id}/enabled`, admin, 'POST', { enabled: true, expectedRevision: draft.revision });
+    assert.equal(activated.status, 200); assert.equal(activated.data.enabled, true); assert.ok(activated.data.activatedAt);
+    const another = (await api(`${base}/reminder-rules`, admin, 'POST', { ...body, name: 'Another' })).data;
+    assert.equal((await api(`${base}/reminder-rules/${another._id}/enabled`, admin, 'POST', { enabled: true, expectedRevision: another.revision })).status, 409);
+    const entityId = new mongoose.Types.ObjectId();
+    const run = await Runs.create({ ruleId: draft._id, ruleRevision: activated.data.revision, source: 'monthly_package', occurrenceKey: `${entityId}:2`, step: 0,
+      entityId, clientId: customer._id, cycle: 2, anchorAt: new Date(Date.now() + 86400000), dueAt: new Date(), subject: 'Due', text: 'Hello', channel: 'email' });
+    const stopped = await api(`${base}/reminder-rules/${draft._id}/enabled`, admin, 'POST', { enabled: false, expectedRevision: activated.data.revision });
+    assert.equal(stopped.status, 200); assert.equal(stopped.data.enabled, false);
+    assert.equal((await Runs.findById(run._id)).status, 'cancelled');
+    assert.equal(await Queue.countDocuments(), 0);
+  } finally {
+    if (priorReminders === undefined) delete process.env.COMMUNICATION_REMINDER_JOBS_ENABLED; else process.env.COMMUNICATION_REMINDER_JOBS_ENABLED = priorReminders;
+    if (priorCrons === undefined) delete process.env.ENABLE_CRONS; else process.env.ENABLE_CRONS = priorCrons;
+    await Runs.deleteMany({}); await Draft.deleteMany({});
+  }
+});
+test('broadcast reminder preview and activation require admin and enabled schedulers', async () => {
+  const Draft = require('../models/communicationReminderRuleModel');
+  const oldJobs = process.env.COMMUNICATION_REMINDER_JOBS_ENABLED, oldCrons = process.env.ENABLE_CRONS;
+  try {
+    const body = { name: 'Follow up', source: 'broadcast', steps: [{ offsetDays: 1, subject: 'Hello', text: 'Hello {{name}}', channel: 'whatsapp' }] };
+    const draft = (await api(`${base}/reminder-rules`, admin, 'POST', body)).data;
+    assert.equal((await api(`${base}/reminder-rules/${draft._id}/preview`, customer)).status, 403);
+    const preview = await api(`${base}/reminder-rules/${draft._id}/preview`, admin);
+    assert.equal(preview.data.source, 'broadcast'); assert.deepEqual(preview.data.samples, []);
+    process.env.COMMUNICATION_REMINDER_JOBS_ENABLED = 'true'; process.env.ENABLE_CRONS = 'true';
+    assert.equal((await api(`${base}/reminder-rules/${draft._id}/enabled`, customer, 'POST', { enabled: true, expectedRevision: draft.revision })).status, 403);
+    const result = await api(`${base}/reminder-rules/${draft._id}/enabled`, admin, 'POST', { enabled: true, expectedRevision: draft.revision });
+    assert.equal(result.data.enabled, true); assert.ok(result.data.activatedAt);
+    assert.equal((await api(`${base}/reminder-rules/${draft._id}/enabled`, admin, 'POST', { enabled: false, expectedRevision: result.data.revision })).data.enabled, false);
+  } finally {
+    if (oldJobs === undefined) delete process.env.COMMUNICATION_REMINDER_JOBS_ENABLED; else process.env.COMMUNICATION_REMINDER_JOBS_ENABLED = oldJobs;
+    if (oldCrons === undefined) delete process.env.ENABLE_CRONS; else process.env.ENABLE_CRONS = oldCrons;
+    await Draft.deleteMany({});
+  }
 });
 
 test('starts with every switch Off, the owner\'s ad message and the owner\'s reply, unchanged', async () => {

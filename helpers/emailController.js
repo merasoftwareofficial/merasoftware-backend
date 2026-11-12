@@ -126,6 +126,7 @@ async function prepareMail(event, mail, extraValues) {
     attachments: (content.attachments || []).map(a => ({ filename: a.filename, content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content })),
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
+    reminderRunId: mail.reminderRunId,
     leadId: mail.leadId,
     orderId: mail.orderId,
     expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000),
@@ -259,6 +260,10 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   try {
     // Do not contact the provider unless a durable attempt exists first.
     await recordHistory(draft, actor, true);
+    if (draft.reminderRunId) {
+      const eligibility = await require('./communicationReminderEligibility').maySendReminder(draft.reminderRunId, { emails: draft.to });
+      if (!eligibility.allowed) throw new Error(`Reminder not sent: ${eligibility.reason}`);
+    }
     if (!process.env.RESEND_API_KEY || !process.env.FROM_EMAIL) throw new Error('Email provider is not configured');
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST', signal: AbortSignal.timeout(20000),
@@ -382,9 +387,12 @@ async function sendReservationMail(event, reservation, user, dedupeKey) {
 // recorded, then sent through decide() like a reviewed send, so the action's On/Off policy and its
 // "Send via" apply. dedupeKey makes it once-only: a retry or a second caller returns 'sent'.
 // 'sent' = delivered by the action's route; 'not-sent' = that route can't reach this person (never retried).
-async function sendSystemMail(event, mail, dedupeKey, source) {
+async function sendSystemMail(event, mail, dedupeKey, source, options = {}) {
   const history = await EmailHistory.findOne({ dedupeKey }).lean();
-  if (DELIVERED.includes(history?.status)) return 'sent';
+  // For a new rule-step delivery, an email can be accepted while its WhatsApp
+  // copy fails. A history row labeled sent alone does not mean both parts finished.
+  const complete = delivery => !delivery?.channels?.length || delivery.channels.every(channel => channel === 'email' ? delivery.emailStatus === 'sent' : delivery.whatsappStatus === 'queued');
+  if (DELIVERED.includes(history?.status) && (!options.channel || complete(history.delivery))) return 'sent';
   mail.dedupeKey = dedupeKey;
   const scope = { system: true, closed: false, ids: [], req: { method: 'SYSTEM', originalUrl: source, userId: null } };
   const result = await requestScope.run(scope, () => queueMail(event, mail));
@@ -395,9 +403,18 @@ async function sendSystemMail(event, mail, dedupeKey, source) {
   if (!draft || draft.expiresAt <= new Date() || draft.status === 'skipped') return 'expired';
   if (draft.status === 'sending') throw new Error('Confirmation delivery is awaiting reconciliation');
   await recordHistory(draft, null, true);
-  const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text }, { application: 'portal', portalAdmin: true });
+  let channel = options.channel;
+  if (channel && draft.delivery?.channels?.length) channel = require('./reviewDelivery').selectionFor(draft.delivery.channels);
+  if (channel) {
+    const { choices } = await require('./reviewDelivery').availability(draft);
+    const usable = id => choices.find(row => row.id === id)?.enabled;
+    if (channel === 'both' && !usable('both')) channel = usable('email') ? 'email' : usable('whatsapp') ? 'whatsapp' : channel;
+    if (!usable(channel)) return (await markNotSent(draft, choices.find(row => row.id === channel)?.reason || 'Channel unavailable.')).notSent ? 'not-sent' : 'paused';
+  }
+  const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text, ...(channel ? { channels: channel } : {}) }, { application: 'portal', portalAdmin: true });
   // A failed part of a channel send is retried by the caller's job: same draft, same provider key.
   if (decision.status === 'failed') throw new Error(decision.delivery?.failure || 'Delivery failed');
   return DELIVERED.includes(decision.status) ? 'sent' : decision.notSent ? 'not-sent' : 'paused';
 }
-module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail };
+const hasActiveRequestScope = () => { const scope = requestScope.getStore(); return !!scope && !scope.closed && !scope.system && !!scope.req.userId; };
+module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail, hasActiveRequestScope };

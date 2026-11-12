@@ -167,7 +167,7 @@ const applyApprovedOrderPayment = async (transaction) => {
       // Both an initial service payment and a renewal payment settle a service
       // cycle. They must not go through project/installment accounting.
       if (serviceOrder) {
-        const order = await settleServiceCycle({ orderId: serviceOrder._id, invoice: settledInvoice });
+        const order = await require('../../helpers/packagePlanOrder').settleCycleReviewingStart({ orderId: serviceOrder._id, invoice: settledInvoice });
         return { order, invoice: settledInvoice, transaction };
       }
 

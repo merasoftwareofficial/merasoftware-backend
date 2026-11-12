@@ -43,6 +43,22 @@ function dayPassedDue(row, deadline, now) {
   return deadline - now > STAGES[STAGES.length - 1].before + HOUR ? DAY_PASSED : null;
 }
 
+// Read-only forecast for the admin overview. The worker remains authoritative: an
+// extension, new start request, policy switch or downtime can change the outcome.
+function upcomingStage(row, now = new Date()) {
+  if (!row.remindersEnabled || row.projectId || row.confirmedAt || row.startRequestedAt) return null;
+  const deadline = require('./offerReservations').deadlineOf(row);
+  if (!(deadline > now)) return null;
+  const sent = row.remindersSent || [];
+  const keyFor = stage => `${stage.key}:${deadline.toISOString()}`;
+  const candidates = STAGES.map(stage => ({ stage, at: new Date(deadline.getTime() - stage.before) }))
+    .filter(({ stage, at }) => at > now && !sent.includes(keyFor(stage)) && dueStage(row, deadline, at)?.key === stage.key);
+  const afterDay = new Date(new Date(row.reservedAt).getTime() + DAY_PASSED.after);
+  if (afterDay > now && !sent.includes(keyFor(DAY_PASSED)) && dayPassedDue(row, deadline, afterDay)) candidates.push({ stage: DAY_PASSED, at: afterDay });
+  candidates.sort((a, b) => a.at - b.at);
+  return candidates.length ? { event: candidates[0].stage.event, at: candidates[0].at } : null;
+}
+
 async function sendDueReminders({ now = new Date(), limit = 50 } = {}) {
   if (!enabled()) return [];
   const { deadlineOf } = require('./offerReservations');
@@ -81,4 +97,4 @@ async function sendDueReminders({ now = new Date(), limit = 50 } = {}) {
   return results;
 }
 
-module.exports = { sendDueReminders, dueStage, dayPassedDue, STAGES, DAY_PASSED };
+module.exports = { sendDueReminders, dueStage, dayPassedDue, upcomingStage, STAGES, DAY_PASSED };
