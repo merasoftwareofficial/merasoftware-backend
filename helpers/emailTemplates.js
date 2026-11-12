@@ -49,20 +49,31 @@ function validateTemplateVariables(event, subject, text) {
   }
 }
 
+/**
+ * The conditional updates that move an action's Standard copy to its current wording. A copy still holding
+ * wording this action shipped before is upgraded; a copy the owner edited never matches, so it stays exactly
+ * as the owner wrote it. One list serves systemTemplate (one action) and ensureSystemTemplates (all of them).
+ */
+function wordingUpgrades(event) {
+  const filter = { event, system: true };
+  const { subject, text, replaces, replaceUntouched } = definitions[event];
+  const upgrades = [];
+  if (replaces?.length) upgrades.push({ filter: { ...filter, text: { $in: replaces } }, set: { text } });
+  if (replaceUntouched) upgrades.push({ filter: { ...filter, subject: replaceUntouched.subject, text: replaceUntouched.text }, set: { text } });
+  if (event === 'sendProjectUpdateEmail') {
+    const legacy = require('./legacyProjectUpdateTemplate');
+    upgrades.push({ filter: { ...filter, subject: legacy.subject, text: legacy.text }, set: { subject, text } });
+  }
+  return upgrades;
+}
+
 /** The action's editable built-in template, created from the original on first use. */
 async function systemTemplate(event) {
   if (!hasSystemTemplate(event)) return null;
   const filter = { event, system: true };
-  const { subject, text, replaces, replaceUntouched } = definitions[event];
-  // A Standard copy still holding wording this action shipped before moves to the current wording.
-  // A copy the owner edited never matches, so it stays exactly as the owner wrote it.
-  if (replaces?.length) await EmailTemplate.updateOne({ ...filter, text: { $in: replaces } }, { $set: { text } });
-  if (replaceUntouched) await EmailTemplate.updateOne({ ...filter, subject: replaceUntouched.subject, text: replaceUntouched.text }, { $set: { text } });
-  if (event === 'sendProjectUpdateEmail') {
-    const legacy = require('./legacyProjectUpdateTemplate');
-    await EmailTemplate.updateOne({ ...filter, subject: legacy.subject, text: legacy.text }, { $set: { subject, text } });
-    await require('./migrateNodeTemplates').migrateNodeTemplates({ apply: true });
-  }
+  const { subject, text } = definitions[event];
+  for (const { filter: older, set } of wordingUpgrades(event)) await EmailTemplate.updateOne(older, { $set: set });
+  if (event === 'sendProjectUpdateEmail') await require('./migrateNodeTemplates').migrateNodeTemplates({ apply: true });
   try {
     return await EmailTemplate.findOneAndUpdate(filter, { $setOnInsert: { name: SYSTEM_NAME, subject, text } }, { upsert: true, new: true }).lean();
   } catch (error) {
@@ -72,8 +83,26 @@ async function systemTemplate(event) {
   }
 }
 
-const ensureSystemTemplates = application => Promise.all(Object.keys(definitions)
-  .filter(event => byKey.get(event)?.application === application).map(systemTemplate));
+// The Email Templates page calls this on every open and refresh, so it must not cost a database call (and a
+// changed updatedAt) per action. Same wording upgrades and first-use creation as systemTemplate, batched:
+// the upgrades in one write, then only the actions that have no Standard copy yet are created. An existing
+// copy is never rewritten, so an admin's loaded template revision (updatedAt) stays valid across refreshes.
+async function ensureSystemTemplates(application) {
+  const events = Object.keys(definitions).filter(event => byKey.get(event)?.application === application);
+  const upgrades = events.flatMap(wordingUpgrades).map(({ filter, set }) => ({ updateOne: { filter, update: { $set: set } } }));
+  if (upgrades.length) await EmailTemplate.bulkWrite(upgrades, { ordered: true });
+  if (events.includes('sendProjectUpdateEmail')) await require('./migrateNodeTemplates').migrateNodeTemplates({ apply: true });
+  const have = new Set((await EmailTemplate.find({ system: true, event: { $in: events } }).select('event').lean()).map(row => row.event));
+  const creates = events.filter(event => !have.has(event)).map(event => ({ updateOne: { filter: { event, system: true },
+    update: { $setOnInsert: { name: SYSTEM_NAME, subject: definitions[event].subject, text: definitions[event].text } }, upsert: true } }));
+  if (!creates.length) return;
+  try { await EmailTemplate.bulkWrite(creates, { ordered: false }); }
+  catch (error) {
+    // Two first uses at once: the unique index lets one insert win; the others find it already there.
+    const rejected = error?.writeErrors || error?.result?.getWriteErrors?.() || [];
+    if (!(error?.code === 11000 || (rejected.length && rejected.every(entry => (entry.code ?? entry.err?.code) === 11000)))) throw error;
+  }
+}
 
 /** The template a choice means. An id must belong to the action; no id means its system template. */
 async function resolveTemplate(event, templateId) {
