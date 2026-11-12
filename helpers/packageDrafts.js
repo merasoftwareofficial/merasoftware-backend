@@ -7,7 +7,7 @@ const { fail, readPackages, reservedPackageIds, packageIdBase } = require('./sal
 const MAX_BYTES = 300000;
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
-const view = row => row && { packageId: row.packageId, name: row.name, data: row.data, version: row.version, updatedAt: row.updatedAt, updatedBy: row.updatedBy || null };
+const view = row => row && { packageId: row.packageId, name: row.name, data: row.data, version: row.version, createdAt: row.createdAt, updatedAt: row.updatedAt, updatedBy: row.updatedBy || null };
 const conflict = () => fail('Someone else saved this draft meanwhile. Reload the package to see their changes.', 409);
 
 async function listDrafts() {

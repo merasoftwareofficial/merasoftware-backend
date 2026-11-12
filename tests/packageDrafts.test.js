@@ -35,6 +35,8 @@ test('a draft saves with only the name; wrong values are kept as typed', async (
   assert.equal(saved.version, 1);
   assert.equal(saved.data.item.regularPrice, -5);
   assert.equal(saved.data.item.id, 'business-starter');
+  // The admin list sorts a new draft by when it was started and when it was last saved.
+  assert.ok(saved.createdAt instanceof Date && saved.updatedAt instanceof Date, 'a draft carries its dates');
   // Nothing of it is in the live catalogue, for the admin or the public.
   assert.deepEqual(await catalogueWithQuotes([], true), []);
   assert.deepEqual(await catalogueWithQuotes([]), []);
