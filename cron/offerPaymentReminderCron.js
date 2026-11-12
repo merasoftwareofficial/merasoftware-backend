@@ -6,7 +6,7 @@ const { DAY } = require('../helpers/offerPaymentPolicy');
 const { sendScheduledOfferReminder } = require('../helpers/emailController');
 async function processOfferPaymentReminders(now = new Date()) {
   await require('../helpers/offerProjectInvoices').ensureOfferProjectInvoices();
-  const invoices = await Invoice.find({ invoiceType: { $in: ['project', 'plan_renewal'] }, status: { $in: ['unpaid', 'partially_paid', 'overdue'] } });
+  const invoices = await Invoice.find({ invoiceType: { $in: ['project', 'plan_renewal'] }, status: { $in: ['unpaid', 'partially_paid', 'overdue'] }, offerRemindersPaused: { $ne: true } });
   for (const invoice of invoices) {
     const order = await Order.findById(invoice.orderId);
     if (!order?.paymentPolicy || order.orderVisibility === 'cancelled' || order.servicePlanStatus === 'pending_activation') continue;
@@ -16,7 +16,7 @@ async function processOfferPaymentReminders(now = new Date()) {
     if (invoice.installmentNumber) {
       const installment = order.installments.find(item => item.installmentNumber === invoice.installmentNumber);
       // The one due rule (helpers/projectDuePayment.js).
-      if (installment && !require('../helpers/projectDuePayment').isInstallmentDue(order, installment)) continue;
+      if (installment && !require('../helpers/projectDuePayment').isInstallmentDue(order, installment, now)) continue;
     }
     if (new Date(invoice.dueDate) < now && invoice.status !== 'overdue') {
       await Invoice.updateOne({ _id: invoice._id, status: invoice.status }, { $set: { status: 'overdue' } });

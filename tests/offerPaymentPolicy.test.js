@@ -159,6 +159,62 @@ test('recurring pay-later advances without losing old unpaid debt; first-only te
     assert.equal(await Invoice.countDocuments({ orderId: order._id, invoiceType: { $in: ['project', 'plan_renewal'] }, status: 'unpaid' }), 2);
   }
 });
+test('invoice-level pause, durable handoff context and paid invoice history use the existing reminder flow', async () => {
+  const { Queue, State } = require('../whatsapp/src/models.js');
+  const { createSender } = require('../whatsapp/src/sender.js');
+  const { setPaused } = require('../helpers/legacyReminderControls');
+  const { processOfferPaymentReminders } = require('../cron/offerPaymentReminderCron');
+  process.env.ENABLE_WHATSAPP = 'true';
+  await User.updateOne({ _id: client._id }, { $set: { phone: '+919876543210' } });
+  await EmailPolicy.create({ event: 'offer.payment.reminder', channel: 'both' });
+  const order = await project('pay_later', { dueDays: 0, reminderOffsets: [0] });
+  const invoice = await Invoice.findOne({ orderId: order._id, invoiceType: 'project' });
+  await setPaused({ source: 'offer_payment', entityId: invoice._id, paused: true, expectedPaused: false, actorId: admin._id });
+  await assert.rejects(setPaused({ source: 'offer_payment', entityId: invoice._id, paused: true, expectedPaused: false, actorId: admin._id }), /changed/i);
+  await assert.rejects(setPaused({ source: 'offer_payment', entityId: invoice._id, paused: false, expectedPaused: true, actorId: client._id }), /admin access/i);
+  await processOfferPaymentReminders(new Date(Date.now() + 1000));
+  assert.equal(sent.length, 0);
+  const overview = await require('../helpers/offerReminderOverview').offerReminderOverview();
+  assert.equal(overview.rows[0].remindersPaused, true);
+  assert.equal(overview.rows[0].nextMilestone, null);
+  await setPaused({ source: 'offer_payment', entityId: invoice._id, paused: false, expectedPaused: true, actorId: admin._id });
+  await processOfferPaymentReminders(new Date(Date.now() + 1000));
+  assert.equal(sent.length, 1);
+  const queued = await Queue.findOne({ event: 'offer.payment.reminder' }).lean();
+  assert.ok(queued.offerReminderContext);
+  assert.equal(String(queued.offerReminderContext.invoiceId), String(invoice._id));
+  assert.equal(queued.offerReminderContext.expectedAmount, invoice.amount);
+  await EmailDraft.deleteMany({ event: 'offer.payment.reminder' });
+  await Invoice.updateOne({ _id: invoice._id }, { $set: { status: 'paid', amountPaid: invoice.amount } });
+  await State.create({ _id: 'main', settings: { quietHours: false, typing: false } });
+  const wa = { isConnected: () => true, resolve: async () => { throw new Error('Must not resolve a settled reminder'); }, send: async () => { throw new Error('Must not send'); } };
+  const sender = createSender({ Queue, State, transport: wa, config: { timeZone: 'Asia/Kolkata' } });
+  assert.equal((await sender.step()).reason, 'cancelled');
+  const completed = await require('../helpers/offerReminderOverview').offerReminderOverview({ view: 'completed' });
+  assert.equal(completed.rows[0].id, String(invoice._id));
+  assert.equal(completed.rows[0].nextMilestone, null);
+  assert.equal((await Invoice.findById(invoice._id)).offerRemindersPaused, false);
+  delete process.env.ENABLE_WHATSAPP;
+});
+
+test('an already prepared offer reminder is rejected after pause, balance or due date changes', async () => {
+  const { sendScheduledOfferReminder } = require('../helpers/emailController');
+  const { maySendOfferPaymentReminder } = require('../helpers/offerPaymentReminderEligibility');
+  await EmailPolicy.create({ event: 'offer.payment.reminder', channel: 'email' });
+  const order = await project('pay_later', { dueDays: 0, reminderOffsets: [0] });
+  const invoice = await Invoice.findOne({ orderId: order._id, invoiceType: 'project' });
+  const draft = { event: 'offer.payment.reminder', application: 'portal', dedupeKey: `offer-reminder:${invoice._id}:0`, to: [client.email], offerReminderContext: { invoiceId: invoice._id, expectedAmount: invoice.amount, dueAt: invoice.dueDate, offset: 0 } };
+  assert.equal(await maySendOfferPaymentReminder(draft), true);
+  await Invoice.updateOne({ _id: invoice._id }, { $set: { offerRemindersPaused: true } });
+  assert.equal(await maySendOfferPaymentReminder(draft), false);
+  await sendScheduledOfferReminder(invoice, client, 0);
+  assert.equal(sent.length, 0, 'provider not called after the pause');
+  await Invoice.updateOne({ _id: invoice._id }, { $set: { offerRemindersPaused: false, amountPaid: 100, status: 'partially_paid' } });
+  assert.equal(await maySendOfferPaymentReminder(draft), false);
+  await Invoice.updateOne({ _id: invoice._id }, { $set: { amountPaid: 0, status: 'unpaid', dueDate: new Date(+invoice.dueDate + 86400000) } });
+  assert.equal(await maySendOfferPaymentReminder(draft), false);
+});
+
 test('automatic reminders reuse one durable send, stop after payment, and respect global Off', async () => {
   await EmailPolicy.create({ event: 'offer.payment.reminder', channel: 'email' }); // this test counts provider mails
   const order = await project('pay_later', { dueDays: 0, reminderOffsets: [0] });

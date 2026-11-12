@@ -17,7 +17,7 @@ router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }
 router.use(communicationAdmin);
 const handle = fn => async (req, res) => {
   try { res.json({ success: true, data: await fn(req) }); }
-  catch (error) { res.status(error.status || 400).json({ success: false, message: error.message }); }
+  catch (error) { res.status(error.status || error.statusCode || 400).json({ success: false, message: error.message }); }
 };
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const ensureRule = () => Rule.findOneAndUpdate({ key: RULE_KEY }, { $setOnInsert: { key: RULE_KEY, message: DEFAULT_AD_MESSAGE } },
@@ -104,7 +104,19 @@ router.post('/final-message/decision', handle(req => decideReply(req.body?.id, r
 // The Reservation box: counts and the running reservations. The hours live on each offer and the
 // three messages are Email Templates actions, so this box only shows how reservations stand.
 router.get('/reservations', handle(() => require('../helpers/reservationClosure').reservationOverview()));
-router.get('/payment-reminders', handle(req => require('../helpers/offerReminderOverview').offerReminderOverview({ page: req.query.page })));
+router.get('/reservations/:id/paid-projects', handle(req => require('../helpers/reservationPaidReconcile').candidates(req.params.id)));
+router.post('/reservations/:id/reconcile-paid-project', handle(req => require('../helpers/reservationPaidReconcile').reconcile({ reservationId: req.params.id, orderId: req.body?.orderId, actorId: req.userId, confirmSlug: req.body?.confirmSlug, reason: req.body?.reason, acknowledgeMismatch: req.body?.acknowledgeMismatch })));
+router.post('/reminder-controls', handle(req => {
+  if (typeof req.body?.expectedPaused !== 'boolean') fail('Refresh the reminder state before changing it.');
+  return require('../helpers/legacyReminderControls').setPaused({ source: req.body?.source, entityId: req.body?.entityId,
+    paused: req.body?.paused, expectedPaused: req.body.expectedPaused, actorId: req.userId });
+}));
+// Compatibility for already-open clients; both routes use the same owner-level operation.
+router.post('/reservations/:id/reminders', handle(req => require('../helpers/legacyReminderControls').setPaused({ source: 'reservation', entityId: req.params.id,
+  paused: req.body?.paused, expectedPaused: req.body?.expectedPaused, actorId: req.userId })));
+router.post('/package-starts/:id/close', handle(req => require('../helpers/packageStart').closeByTeam({ requestId: req.params.id, actorId: req.userId })));
+router.get('/payment-reminders', handle(req => require('../helpers/offerReminderOverview').offerReminderOverview({ page: req.query.page, view: req.query.view })));
+router.get('/legacy-reminder-history', handle(req => require('../helpers/legacyReminderHistory').legacyReminderHistory({ source: req.query.source, entityId: req.query.entityId, page: req.query.page })));
 router.get('/business-activity', handle(() => require('../helpers/communicationActivity').recentActivity()));
 router.get('/reminder-rules', handle(() => require('../helpers/communicationReminderRules').listDrafts()));
 router.get('/reminder-runs', handle(req => require('../helpers/communicationReminderHistory').reminderHistory({ page: req.query.page, view: req.query.view })));

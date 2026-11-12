@@ -176,14 +176,14 @@ async function deliverPackageStartNotices({ requestId = null, now = new Date(), 
 // A request nobody acted on: the team is told again after each full day, at most 3 times.
 async function alertPendingPackageStarts({ now = new Date(), limit = 20 } = {}) {
   if (!enabled()) return [];
-  const rows = await StartRequest.find({ closedAt: null, alerts: { $lt: MAX_ALERTS }, requestedAt: { $lte: new Date(now.getTime() - DAY) } })
+  const rows = await StartRequest.find({ closedAt: null, remindersPaused: { $ne: true }, alerts: { $lt: MAX_ALERTS }, requestedAt: { $lte: new Date(now.getTime() - DAY) } })
     .sort({ requestedAt: 1 }).limit(limit).lean();
   const results = [];
   for (const row of rows) {
     const days = Math.floor((now - new Date(row.requestedAt)) / DAY);
     const alerts = row.alerts || 0;
     if (days <= alerts) continue;
-    const claimed = await StartRequest.updateOne({ _id: row._id, closedAt: null, alerts }, { $set: { alerts: alerts + 1 } });
+    const claimed = await StartRequest.updateOne({ _id: row._id, closedAt: null, remindersPaused: { $ne: true }, alerts }, { $set: { alerts: alerts + 1 } });
     if (!claimed.modifiedCount) continue;
     try {
       const { user, request } = await messageContext(row, { waitingDays: days });

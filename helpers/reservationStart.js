@@ -120,7 +120,7 @@ async function deliverStartNotices({ reservationId = null, now = new Date(), lim
 // A request nobody acted on: the team is told again after each full day, at most 3 times.
 async function alertPendingStarts({ now = new Date(), limit = 20 } = {}) {
   if (!enabled()) return [];
-  const rows = await Reservation.find({ startRequestedAt: { $lte: new Date(now.getTime() - DAY) }, projectId: null, confirmedAt: null })
+  const rows = await Reservation.find({ startRequestedAt: { $lte: new Date(now.getTime() - DAY) }, teamRemindersPaused: { $ne: true }, projectId: null, confirmedAt: null })
     .sort({ startRequestedAt: 1 }).limit(limit).lean();
   const results = [];
   for (const row of rows) {
@@ -130,7 +130,7 @@ async function alertPendingStarts({ now = new Date(), limit = 20 } = {}) {
     const days = Math.floor((now - new Date(row.startRequestedAt)) / DAY);
     if (!entry || entry.ended || alerts >= MAX_ALERTS || days <= alerts) continue;
     const path = `startRequests.${index}.alerts`;
-    const claimed = await Reservation.updateOne({ _id: row._id, startRequestedAt: row.startRequestedAt, [path]: entry.alerts ?? 0 }, { $set: { [path]: alerts + 1 } });
+    const claimed = await Reservation.updateOne({ _id: row._id, startRequestedAt: row.startRequestedAt, projectId: null, confirmedAt: null, teamRemindersPaused: { $ne: true }, [path]: entry.alerts ?? 0 }, { $set: { [path]: alerts + 1 } });
     if (!claimed.modifiedCount) continue;
     try {
       const { user, reservation } = await messageContext(row, index, { waitingDays: days });

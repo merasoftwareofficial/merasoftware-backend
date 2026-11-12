@@ -7,6 +7,9 @@ import expiry from '../../helpers/finalMessageExpiry.js';
 import stopFinalMessage from '../../helpers/stopFinalMessage.js';
 import whatsappQueue from '../../helpers/whatsappQueue.js';
 import contacts from '../../helpers/contactNumbers.js';
+import reservationEligibility from '../../helpers/reservationReminderEligibility.js';
+import packageEligibility from '../../helpers/packageStartReminderEligibility.js';
+import offerPaymentEligibility from '../../helpers/offerPaymentReminderEligibility.js';
 
 const INTERRUPTED = 'The service restarted while sending this message, so it may or may not have arrived. Not sent again automatically, to avoid a duplicate.';
 async function broadcastEligible(item) {
@@ -25,6 +28,30 @@ const TOO_OLD = 'Not sent: it waited more than a day (WhatsApp was paused or not
 async function reminderEligible(item) {
   if (!item.reminderRunId) return true;
   return (await (await import('../../helpers/communicationReminderEligibility.js')).default.maySendReminder(item.reminderRunId, { phone: item.to })).allowed;
+}
+
+// Reservation reminders use permanent email history to identify their original reservation.
+// A project, request or extension can change eligibility after the message enters the queue.
+const RESERVATION_STAGES = reservationEligibility.EVENTS;
+async function reservationReminderEligible(item, time) {
+  if (!RESERVATION_STAGES.has(item.event) || item.application !== 'portal') return true;
+  if (!item.emailDraftId) return false;
+  const { EmailHistory } = await import('../../models/emailControlModel.js').then(value => value.default);
+  const history = await EmailHistory.findOne({ draftId: item.emailDraftId, event: item.event }).select('dedupeKey').lean();
+  return reservationEligibility.maySendReservationReminder({ event: item.event, application: item.application, dedupeKey: history?.dedupeKey }, time);
+}
+
+async function packageStartReminderEligible(item) {
+  if (item.event !== 'package.start.request.admin' || item.application !== 'portal') return true;
+  if (!item.emailDraftId) return false;
+  const { EmailHistory } = await import('../../models/emailControlModel.js').then(value => value.default);
+  const history = await EmailHistory.findOne({ draftId: item.emailDraftId, event: item.event }).select('dedupeKey').lean();
+  return packageEligibility.maySendPackageStartReminder({ event: item.event, application: item.application, dedupeKey: history?.dedupeKey });
+}
+
+async function offerPaymentReminderEligible(item, time) {
+  return offerPaymentEligibility.maySendOfferPaymentReminder({ event: item.event, application: item.application,
+    offerReminderContext: item.offerReminderContext, ...(item.email ? { to: [item.email] } : {}) }, time);
 }
 
 export function dayKey(date, timeZone) {
@@ -103,7 +130,7 @@ export function createSender({
       await OutgoingAttempt.create({ _id: item.attemptMessageId, queueId: item._id, to: item.to, source,
         cycleDraftId: item.finalMessageExpiryId || (item.event === 'lead.finalMessage' ? item.emailDraftId : undefined), phase: 'preparing' });
       await Queue.updateOne({ _id: item._id, status: 'sending', attemptMessageId: item.attemptMessageId }, { $set: { source } });
-      const reminderStillEligible = await reminderEligible(item);
+      const reminderStillEligible = await reminderEligible(item) && await reservationReminderEligible(item, now()) && await packageStartReminderEligible(item) && await offerPaymentReminderEligible(item, now());
       if (!reminderStillEligible || (item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item)) {
         await Queue.updateOne({ _id: item._id, status: 'sending' }, { $set: { status: 'cancelled', lastError: reminderStillEligible ? expiry.CANCELLED : 'Reminder eligibility changed before sending.', expiresAt: finishedExpiry(now()) } });
         await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'cancelled' } });
@@ -120,7 +147,7 @@ export function createSender({
           ...(item.media?.url ? { media: item.media } : {}),
           ...(item.finalMessageExpiryId ? { quoted: { key: { remoteJid: item.quotedMessage.chat, id: item.quotedMessage.id, fromMe: true }, message: { conversation: item.quotedMessage.text } } } : {}),
           beforeSend: async () => {
-            if (!await reminderEligible(item) || (item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await broadcastEligible(item) || !await stopFinalMessage.claimHandoff(item)) return false;
+            if (!await reminderEligible(item) || !await reservationReminderEligible(item, now()) || !await packageStartReminderEligible(item) || !await offerPaymentReminderEligible(item, now()) || (item.alt && !contacts.altSendingEnabled()) || !await expiry.canSend(item) || !await broadcastEligible(item) || !await stopFinalMessage.claimHandoff(item)) return false;
             handedOff = true;
             await OutgoingAttempt.updateOne({ _id: item.attemptMessageId }, { $set: { phase: 'handoff', handedOffAt: now() } });
             return true;
@@ -131,7 +158,7 @@ export function createSender({
     } catch (error) {
       const message = error?.message || 'Unknown sending error';
       outcome = error?.code === 'FINAL_MESSAGE_CHANGED'
-        ? { status: 'cancelled', lastError: item.reminderRunId ? 'Reminder eligibility changed before sending.' : item.broadcastRecipientId ? 'Broadcast eligibility changed before sending.' : expiry.CANCELLED }
+        ? { status: 'cancelled', lastError: item.reminderRunId || RESERVATION_STAGES.has(item.event) || item.event === 'package.start.request.admin' || item.event === 'offer.payment.reminder' ? 'Reminder eligibility changed before sending.' : item.broadcastRecipientId ? 'Broadcast eligibility changed before sending.' : expiry.CANCELLED }
         : handedOff || item.attempts >= rules.maxAttempts
         ? { status: 'failed', lastError: message }
         : { status: 'pending', lastError: message, nextAttemptAt: new Date(now().getTime() + rules.retryDelayMin * 60_000) };

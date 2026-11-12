@@ -231,6 +231,32 @@ test('client: the Won lead gets the follow-up; two clicks at once make one reque
   assert.ok(lead, 'the client has their Won lead');
   assert.match(lead.followUps.at(-1).note, /package Business Starter/);
 });
+test('package team reminder pause preserves the request and resumes its existing daily rule', async () => {
+  await savePackage({ ...item, id: '' }, true, []); await ask();
+  const row = await StartRequest.findOne();
+  const { setPaused } = require('../helpers/legacyReminderControls');
+  await setPaused({ source: 'package_request', entityId: row._id, paused: true, expectedPaused: false, actorId: admin._id });
+  await age(DAY + 60000); await start.alertPendingPackageStarts();
+  let fresh = await StartRequest.findById(row._id);
+  assert.equal(fresh.closedAt, null); assert.equal(fresh.alerts, 0);
+  await setPaused({ source: 'package_request', entityId: row._id, paused: false, expectedPaused: true, actorId: admin._id });
+  await start.alertPendingPackageStarts();
+  fresh = await StartRequest.findById(row._id);
+  assert.equal(fresh.alerts, 1);
+  await start.closeByTeam({ requestId: row._id, actorId: admin._id });
+  await assert.rejects(setPaused({ source: 'package_request', entityId: row._id, paused: false, expectedPaused: false, actorId: admin._id }), /changed/i);
+});
+
+test('a closed request is checked before a queued team reminder reaches providers', async () => {
+  await savePackage({ ...item, id: '' }, true, []);
+  await ask();
+  const row = await StartRequest.findOne().lean();
+  await StartRequest.updateOne({ _id: row._id }, { $set: { alerts: 1, closedAt: new Date(), closedReason: 'closed_by_team' } });
+  await assert.rejects(require('../helpers/emailController').sendReservationMail('package.start.request.admin', { ...row, waitingDays: 1 }, member, `package-start-pending:${row._id}:1`), /no longer eligible/i);
+  assert.equal(emails, 0);
+  assert.equal(await Queue.countDocuments({ event: 'package.start.request.admin' }), 0);
+});
+
 test('the team is reminded once a day, at most 3 times, until the request is closed', async () => {
   await savePackage({ ...item, id: '' }, true, []);
   await ask(); await start.deliverPackageStartNotices();

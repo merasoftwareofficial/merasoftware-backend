@@ -21,6 +21,7 @@ const schema = new mongoose.Schema({
   releases: [{ _id: false, projectId: mongoose.Schema.Types.ObjectId, actorId: mongoose.Schema.Types.ObjectId,
     at: Date, reason: String, resolution: mongoose.Schema.Types.Mixed }],
   confirmedAt: { type: Date, default: null },
+  manualReconciliation: { actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' }, at: Date, reason: String, categoryMismatch: Boolean },
   // What happened to the linked project after an unpaid deadline, set once by the shared operation.
   resolution: {
     type: new mongoose.Schema({
@@ -54,11 +55,17 @@ const schema = new mongoose.Schema({
   // reservations made after they shipped get remindersEnabled. Each sent one is kept as "<stage>:<deadline ISO>",
   // so an extension (a new deadline) gets its own reminders and one deadline never gets the same one twice.
   remindersEnabled: { type: Boolean, default: false },
+  remindersPaused: { type: Boolean, default: false },
+  remindersPauseChangedAt: { type: Date, default: null },
+  remindersPauseChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', default: null },
   remindersSent: { type: [String], default: [] },
   // "Start my project" (helpers/reservationStart.js). While startRequestedAt is set and no project is
   // attached, the clock is paused: no reminder, no closing message, and the deadline is not in force.
   // pausedRemainingMs is the time that was left. A project created on it, or the admin's "Extend deadline",
   // resumes the clock and clears the pause. Every request stays in startRequests as history.
+  teamRemindersPaused: { type: Boolean, default: false },
+  teamRemindersPauseChangedAt: { type: Date, default: null },
+  teamRemindersPauseChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', default: null },
   startRequestedAt: { type: Date, default: null },
   pausedRemainingMs: { type: Number, default: 0 },
   startRequests: [{ _id: false, at: Date, remainingMs: Number,

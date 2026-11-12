@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
+const offerReminderContextSchema = new Schema({ invoiceId: Schema.Types.ObjectId, expectedAmount: Number, dueAt: Date, offset: Number }, { _id: false });
 const templateSchema = new Schema({
   legacySourceId: { type: Schema.Types.ObjectId, unique: true, sparse: true },
   event: { type: String, required: true, index: true },
@@ -61,6 +62,7 @@ const draftSchema = new Schema({
   reminderInvoice: Schema.Types.ObjectId,
   // Only new configurable reminder drafts carry this; legacy messages are unchanged.
   reminderRunId: Schema.Types.ObjectId,
+  offerReminderContext: { type: offerReminderContextSchema, default: undefined },
   // Set only by Send message on a lead's page (helpers/leadMessage.js).
   leadId: Schema.Types.ObjectId,
   // Set only by Send Upgrade on a project's page (helpers/complimentaryUpgrade.js).
@@ -78,6 +80,7 @@ const historySchema = new Schema({
   expiresAt: Date, sentAt: Date,
   source: String, sender: String, templateName: String,
   delivery: Schema.Types.Mixed,
+  offerReminderContext: { type: offerReminderContextSchema, default: undefined },
   attemptCount: { type: Number, default: 0 }, lastAttemptAt: Date,
   attempts: [{ _id: false, at: Date, status: String, failure: String }],
 }, { timestamps: true });

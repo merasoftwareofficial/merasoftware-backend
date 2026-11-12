@@ -50,6 +50,18 @@ beforeEach(async () => {
   await setRules({});
 });
 
+async function offerPaymentFixture() {
+  const { default: User } = await import('../../models/userModel.js');
+  const { default: Order } = await import('../../models/orderProductModel.js');
+  const { default: Invoice } = await import('../../models/invoiceModel.js');
+  const userId = new mongoose.Types.ObjectId(), orderId = new mongoose.Types.ObjectId(), invoiceId = new mongoose.Types.ObjectId(), dueAt = new Date(clock - 3600000);
+  await User.collection.insertOne({ _id: userId, email: `payment-${invoiceId}@example.test`, isActive: true });
+  await Order.collection.insertOne({ _id: orderId, userId, orderVisibility: 'approved', paymentPolicy: { reminderOffsets: [0] } });
+  await Invoice.collection.insertOne({ _id: invoiceId, userId, orderId, invoiceNumber: `SENDER-${invoiceId}`, invoiceType: 'project', status: 'unpaid', amount: 500, amountPaid: 0, dueDate: dueAt });
+  const item = await Queue.create({ to: '919876543210', text: 'Payment reminder', event: 'offer.payment.reminder', application: 'portal', createdAt: now(), nextAttemptAt: now(), offerReminderContext: { invoiceId, expectedAmount: 500, dueAt, offset: 0 } });
+  return { Invoice, invoiceId, item };
+}
+
 describe('sender', () => {
   it('cancels a new reminder whose run is unavailable before contacting WhatsApp', async () => {
     const wa = fakeWhatsApp();
@@ -58,6 +70,120 @@ describe('sender', () => {
     assert.equal((await sender.step()).reason, 'cancelled');
     assert.equal(wa.sent.length, 0);
     assert.match((await Queue.findById(row._id)).lastError, /Reminder eligibility changed/);
+  });
+  it('checks a queued reservation reminder again after a project is attached', async () => {
+    const { default: Reservation } = await import('../../models/offerReservationModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const deadline = new Date(clock + 20 * 3600000), draftId = new mongoose.Types.ObjectId();
+    const reservation = await Reservation.create({ userId: new mongoose.Types.ObjectId(), offerSlug: 'queue-test', periodEndsAt: deadline,
+      offerSnapshot: { title: 'Test' }, regularPrice: 100, reservedPrice: 50, reservedAt: new Date(clock - 28 * 3600000),
+      expiresAt: deadline, origin: 'customer', remindersEnabled: true, remindersSent: [`24h:${deadline.toISOString()}`] });
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'offer.reservation.reminder', dedupeKey: `offer-reservation-reminder:${reservation._id}:24h:${deadline.toISOString()}` });
+    const wa = fakeWhatsApp(), sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    const item = await Queue.create({ to: '919876543210', text: 'Reminder', event: 'offer.reservation.reminder', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    await Reservation.updateOne({ _id: reservation._id }, { $set: { projectId: new mongoose.Types.ObjectId() } });
+    assert.equal((await sender.step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+    assert.equal((await Queue.findById(item._id)).status, 'cancelled');
+    await Reservation.updateOne({ _id: reservation._id }, { $set: { projectId: null } });
+    await Queue.create({ to: '919876543211', text: 'Reminder', event: 'offer.reservation.reminder', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    advance(60000);
+    assert.equal((await sender.step()).reason, 'sent');
+    assert.equal(wa.sent.length, 1);
+  });
+  it('cancels an already queued reminder when that reservation is paused', async () => {
+    const { default: Reservation } = await import('../../models/offerReservationModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const deadline = new Date(clock + 20 * 3600000), draftId = new mongoose.Types.ObjectId();
+    const reservation = await Reservation.create({ userId: new mongoose.Types.ObjectId(), offerSlug: 'paused-test', periodEndsAt: deadline,
+      offerSnapshot: { title: 'Test' }, regularPrice: 100, reservedPrice: 50, reservedAt: new Date(clock - 28 * 3600000),
+      expiresAt: deadline, origin: 'customer', remindersEnabled: true, remindersPaused: true, remindersSent: [`24h:${deadline.toISOString()}`] });
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'offer.reservation.reminder', dedupeKey: `offer-reservation-reminder:${reservation._id}:24h:${deadline.toISOString()}` });
+    const wa = fakeWhatsApp();
+    await Queue.create({ to: '919876543210', text: 'Reminder', event: 'offer.reservation.reminder', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    assert.equal((await createSender({ Queue, State, transport: wa, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+  });
+  it('rechecks a reservation reminder immediately before WhatsApp handoff', async () => {
+    const { default: Reservation } = await import('../../models/offerReservationModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const deadline = new Date(clock + 20 * 3600000), draftId = new mongoose.Types.ObjectId();
+    const reservation = await Reservation.create({ userId: new mongoose.Types.ObjectId(), offerSlug: 'handoff-test', periodEndsAt: deadline,
+      offerSnapshot: { title: 'Test' }, regularPrice: 100, reservedPrice: 50, reservedAt: new Date(clock - 28 * 3600000),
+      expiresAt: deadline, origin: 'customer', remindersEnabled: true, remindersSent: [`24h:${deadline.toISOString()}`] });
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'offer.reservation.reminder', dedupeKey: `offer-reservation-reminder:${reservation._id}:24h:${deadline.toISOString()}` });
+    const wa = { isConnected: () => true, resolve: async () => 'fake', send: async (_jid, _text, _delay, options) => {
+      await Reservation.updateOne({ _id: reservation._id }, { $set: { projectId: new mongoose.Types.ObjectId() } });
+      if (!await options.beforeSend()) throw Object.assign(new Error('cancelled'), { code: 'FINAL_MESSAGE_CHANGED' });
+      throw new Error('Unexpected handoff');
+    } };
+    const item = await Queue.create({ to: '919876543210', text: 'Reminder', event: 'offer.reservation.reminder', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    assert.equal((await createSender({ Queue, State, transport: wa, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.match((await Queue.findById(item._id)).lastError, /Reminder eligibility changed/);
+  });
+  it('cancels a queued package team reminder after the request is closed', async () => {
+    const { default: StartRequest } = await import('../../models/packageStartRequestModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const row = await StartRequest.create({ userId: new mongoose.Types.ObjectId(), packageId: 'sender-closed-test', packageSnapshot: { name: 'Test' }, requestedAt: new Date(clock - 2 * 86400000), kind: 'callback', alerts: 1, closedAt: now() });
+    const draftId = new mongoose.Types.ObjectId();
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'package.start.request.admin', dedupeKey: `package-start-pending:${row._id}:1` });
+    const wa = fakeWhatsApp();
+    await Queue.create({ to: '919876543210', text: 'Team reminder', event: 'package.start.request.admin', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    assert.equal((await createSender({ Queue, State, transport: wa, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+  });
+  it('an offline offer payment reminder is cancelled after invoice pause or partial payment before reconnect', async () => {
+    const { Invoice, invoiceId, item } = await offerPaymentFixture();
+    const wa = fakeWhatsApp(); wa.connected = false;
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    assert.equal((await sender.step()).reason, 'offline');
+    await Invoice.updateOne({ _id: invoiceId }, { $set: { offerRemindersPaused: true } });
+    wa.connected = true;
+    assert.equal((await sender.step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0); assert.equal((await Queue.findById(item._id)).status, 'cancelled');
+    advance(60000);
+    const next = await offerPaymentFixture();
+    await next.Invoice.updateOne({ _id: next.invoiceId }, { $set: { amountPaid: 100, status: 'partially_paid' } });
+    assert.equal((await sender.step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+  });
+  it('checks payment again at the transport handoff and sends a still-eligible invoice once', async () => {
+    const { Invoice, invoiceId } = await offerPaymentFixture();
+    let calls = 0;
+    const transport = { isConnected: () => true, resolve: async () => 'fake', send: async (_jid, _text, _delay, options) => {
+      await Invoice.updateOne({ _id: invoiceId }, { $set: { status: 'paid', amountPaid: 500 } });
+      if (!await options.beforeSend()) throw Object.assign(new Error('cancelled'), { code: 'FINAL_MESSAGE_CHANGED' });
+      calls++; return 'fake-sent';
+    } };
+    assert.equal((await createSender({ Queue, State, transport, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.equal(calls, 0);
+    advance(60000); await offerPaymentFixture();
+    const wa = fakeWhatsApp();
+    const sender = createSender({ Queue, State, transport: wa, config, now, random: () => 0 });
+    assert.equal((await sender.step()).reason, 'sent');
+    assert.equal(wa.sent.length, 1);
+  });
+  it('stops a queued reservation team reminder after its request ends or is paused', async () => {
+    const { default: Reservation } = await import('../../models/offerReservationModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const at = new Date(clock - 86400000), draftId = new mongoose.Types.ObjectId();
+    const row = await Reservation.create({ userId: new mongoose.Types.ObjectId(), offerSlug: 'team-pause-queue', offerSnapshot: { title: 'Test' }, periodEndsAt: new Date(clock + 3600000), regularPrice: 100, reservedPrice: 50, reservedAt: new Date(clock - 2 * 86400000), expiresAt: new Date(clock + 86400000), origin: 'customer', startRequestedAt: at, startRequests: [{ at, remainingMs: 86400000, alerts: 1 }], teamRemindersPaused: true });
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'offer.start.request.admin', dedupeKey: `offer-start-pending:${row._id}:1:1` });
+    await Queue.create({ to: '919876543210', text: 'Team reminder', event: 'offer.start.request.admin', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    const wa = fakeWhatsApp();
+    assert.equal((await createSender({ Queue, State, transport: wa, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
+  });
+  it('cancels a queued expiry notice when its reservation was extended', async () => {
+    const { default: Reservation } = await import('../../models/offerReservationModel.js');
+    const { default: controls } = await import('../../models/emailControlModel.js');
+    const draftId = new mongoose.Types.ObjectId();
+    const row = await Reservation.create({ userId: new mongoose.Types.ObjectId(), offerSlug: 'expiry-queue', offerSnapshot: { title: 'Test' }, periodEndsAt: now(), regularPrice: 100, reservedPrice: 50, reservedAt: new Date(clock - 2 * 86400000), expiresAt: new Date(clock - 3600000), extendedUntil: new Date(clock + 86400000), origin: 'customer' });
+    await controls.EmailHistory.create({ draftId, application: 'portal', event: 'offer.reservation.expired', dedupeKey: `offer-reservation-expired:${row._id}` });
+    await Queue.create({ to: '919876543210', text: 'Expired', event: 'offer.reservation.expired', application: 'portal', emailDraftId: draftId, createdAt: now(), nextAttemptAt: now() });
+    const wa = fakeWhatsApp();
+    assert.equal((await createSender({ Queue, State, transport: wa, config, now, random: () => 0 }).step()).reason, 'cancelled');
+    assert.equal(wa.sent.length, 0);
   });
   it('sends one message, then waits at least 30 seconds before the next', async () => {
     const wa = fakeWhatsApp();

@@ -19,6 +19,11 @@ const categoryBasePriceModel = require('../models/categoryBasePriceModel');
 const authToken = require('../middleware/authToken');
 const { seedStarterPackages } = require('./fixtures/salesPackages');
 
+test('a selected reservation cannot be silently discarded when its offer is missing', async () => {
+  const { resolveProjectPricing } = require('../helpers/projectPricing');
+  await assert.rejects(resolveProjectPricing({ body: { offerReservationId: new mongoose.Types.ObjectId().toString() }, category: 'standard_websites', basePrice: 10000, features: [], referenceTotal: 10000, userId: new mongoose.Types.ObjectId() }), /Select the reserved offer/);
+});
+
 const nativeFetch = global.fetch;
 let db, server, base, admin, customer, websiteCalls, app;
 const LIVE_OFFERS = [

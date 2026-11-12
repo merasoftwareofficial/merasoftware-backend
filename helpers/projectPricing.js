@@ -25,6 +25,7 @@ function endedOfferFor(packageItem, offers, now = Date.now()) {
 // Resolve the commercial agreement before writing an order, invoice or payment.
 // `actorId`: the admin creating the project (adminCreateProjectOrder.js), recorded when an ended offer is applied.
 async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal, userId, actorId = null }) {
+  if (body.offerReservationId && !body.offerSlug) fail("Select the reserved offer before creating this project", 400);
   if (!body.packageId && !body.offerSlug) return null; // Existing custom-project pricing stays available.
   if (body.offerSlug && userId) await require('./reservationRelease').repairUserReservationLinks(userId);
   let reserved = null;

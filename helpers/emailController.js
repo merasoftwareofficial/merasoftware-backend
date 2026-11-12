@@ -37,6 +37,7 @@ async function recordHistory(draft, decidedBy, required = false) {
     await EmailHistory.updateOne({ draftId: draft._id }, { $set: {
       application: byKey.get(draft.event).application, event: draft.event, actor: draft.actor,
       ...(draft.dedupeKey ? { dedupeKey: draft.dedupeKey } : {}),
+      ...(draft.offerReminderContext ? { offerReminderContext: draft.offerReminderContext } : {}),
       ...(decidedBy ? { decidedBy } : {}), to: draft.to, subject: draft.subject,
       status: draft.delivery?.channels?.length ? (draft.delivery.channels.includes('email') ? (draft.delivery.emailStatus === 'sent' ? 'sent' : draft.status) : (draft.status === 'failed' ? 'skipped' : draft.status)) : draft.status,
       delivery: draft.delivery?.channels?.length ? { channels: draft.delivery.channels, emailStatus: draft.delivery.emailStatus, whatsappStatus: draft.delivery.whatsappStatus, failure: draft.delivery.failure } : undefined,
@@ -127,6 +128,7 @@ async function prepareMail(event, mail, extraValues) {
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
     reminderRunId: mail.reminderRunId,
+    offerReminderContext: mail.offerReminderContext,
     leadId: mail.leadId,
     orderId: mail.orderId,
     expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000),
@@ -264,6 +266,9 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
       const eligibility = await require('./communicationReminderEligibility').maySendReminder(draft.reminderRunId, { emails: draft.to });
       if (!eligibility.allowed) throw new Error(`Reminder not sent: ${eligibility.reason}`);
     }
+    if (!await require('./reservationReminderEligibility').maySendReservationReminder(draft)) throw new Error('Reservation reminder is no longer eligible.');
+    if (!await require('./packageStartReminderEligibility').maySendPackageStartReminder(draft)) throw new Error('Package request reminder is no longer eligible.');
+    if (!await require('./offerPaymentReminderEligibility').maySendOfferPaymentReminder(draft)) throw new Error('Offer payment reminder is no longer eligible.');
     if (!process.env.RESEND_API_KEY || !process.env.FROM_EMAIL) throw new Error('Email provider is not configured');
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST', signal: AbortSignal.timeout(20000),
@@ -360,6 +365,7 @@ async function sendScheduledOfferReminder(invoice, customer, offset) {
     'Your agreed offer payment is pending. Please pay the outstanding amount.');
   if (!mail) return;
   mail.dedupeKey = `offer-reminder:${invoice._id}:${offset}`;
+  mail.offerReminderContext = { invoiceId: invoice._id, expectedAmount: Math.max(0, Number(invoice.amount) - Number(invoice.amountPaid || 0)), dueAt: invoice.dueDate, offset };
   const scope = { system: true, closed: false, ids: [], req: { method: 'CRON', originalUrl: '/offer-payment-reminders', userId: null } };
   const result = await requestScope.run(scope, () => queueMail(event, mail));
   if (!result.draftId) return;

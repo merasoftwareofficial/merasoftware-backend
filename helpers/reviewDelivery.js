@@ -114,6 +114,9 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
           const eligibility = await require('./communicationReminderEligibility').maySendReminder(current.reminderRunId);
           if (!eligibility.allowed) throw new Error(`Reminder not queued: ${eligibility.reason}`);
         }
+        if (!await require('./reservationReminderEligibility').maySendReservationReminder(current)) throw new Error('Reservation reminder is no longer eligible.');
+        if (!await require('./packageStartReminderEligibility').maySendPackageStartReminder(current)) throw new Error('Package request reminder is no longer eligible.');
+        if (!await require('./offerPaymentReminderEligibility').maySendOfferPaymentReminder(current)) throw new Error('Offer payment reminder is no longer eligible.');
         await enqueueWhatsAppForEmail({ ...current, subject: delivery.subject }, { recipients: delivery.recipients, strict: true });
         delivery.whatsappStatus = 'queued';
       } catch (error) { delivery.whatsappStatus = 'failed'; errors.push(error.message); }

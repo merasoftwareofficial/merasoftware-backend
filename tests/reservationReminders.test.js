@@ -93,6 +93,125 @@ async function projectOn(reservationId) {
 }
 
 // --- Reminders ----------------------------------------------------------------------------------------
+test('paid project reconciliation requires explicit mismatch confirmation and preserves paid amounts', async () => {
+  await reserve(customer);
+  const row = await Reservation.findOne().lean();
+  const orderId = new mongoose.Types.ObjectId(), invoiceId = new mongoose.Types.ObjectId();
+  await Order.collection.insertOne({ _id: orderId, userId: customer._id, isWebsiteProject: true, isServicePlan: false, orderVisibility: 'approved', price: 5000, totalAmount: 5000, createdAt: new Date(), projectSnapshot: { category: 'other_category' }, orderItems: [{ name: 'Test project' }] });
+  await Invoice.collection.insertOne({ _id: invoiceId, orderId, userId: customer._id, invoiceType: 'project', status: 'paid', amount: 5000, amountPaid: 5000 });
+  await Transaction.collection.insertOne({ orderId, invoiceId, userId: customer._id, type: 'payment', status: 'completed', amount: 5000, createdAt: new Date() });
+  const helper = require('../helpers/reservationPaidReconcile');
+  const preview = await helper.candidates(row._id);
+  assert.equal(preview.candidates.length, 1);
+  assert.equal(preview.candidates[0].categoryMismatch, true);
+  await Invoice.collection.updateOne({ _id: invoiceId }, { $set: { amountPaid: 4999 } });
+  assert.equal((await helper.candidates(row._id)).candidates.length, 0, 'partial payment is never proposed');
+  await Invoice.collection.updateOne({ _id: invoiceId }, { $set: { amountPaid: 5000 } });
+  const input = { reservationId: row._id, orderId, actorId: admin._id, confirmSlug: row.offerSlug, reason: 'Verified paid project', acknowledgeMismatch: false };
+  await assert.rejects(helper.reconcile({ ...input, actorId: member._id, acknowledgeMismatch: true }), /admin access/i);
+  await assert.rejects(helper.reconcile(input), /category mismatch/i);
+  await Invoice.collection.updateOne({ _id: invoiceId }, { $set: { amountPaid: 4999 } });
+  await assert.rejects(helper.reconcile({ ...input, acknowledgeMismatch: true }), /changed/i);
+  await Invoice.collection.updateOne({ _id: invoiceId }, { $set: { amountPaid: 5000 } });
+  assert.equal((await Reservation.findById(row._id)).projectId, null);
+  await helper.reconcile({ ...input, acknowledgeMismatch: true });
+  const updated = await Reservation.findById(row._id).lean();
+  const order = await Order.findById(orderId).lean();
+  const invoice = await Invoice.findById(invoiceId).lean();
+  assert.equal(String(updated.projectId), String(orderId));
+  assert.equal(String(order.offerReservationId), String(row._id));
+  assert.ok(updated.confirmedAt);
+  assert.equal(updated.manualReconciliation.reason, 'Verified paid project');
+  assert.equal(order.totalAmount, 5000);
+  assert.equal(invoice.amountPaid, 5000);
+  const finished = await reservationOverview();
+  assert.equal(finished.counts.running, 0);
+  assert.equal(finished.recentClosed.find(item => item.id === String(row._id)).status, 'project_linked');
+  await assert.rejects(helper.reconcile({ ...input, acknowledgeMismatch: true }), /changed/i);
+});
+
+test('package request overview reports only saved message records and live queue state', async () => {
+  const StartRequest = require('../models/packageStartRequestModel');
+  const row = await StartRequest.create({ userId: customer._id, packageId: 'test-package', packageSnapshot: { name: 'Test package' }, requestedAt: new Date(), kind: 'callback', alerts: 2 });
+  const draftId = new mongoose.Types.ObjectId();
+  await EmailHistory.create({ draftId, application: 'portal', event: 'package.start.request.admin', status: 'queued', dedupeKey: `package-start-pending:${row._id}:1` });
+  await Queue.create({ emailDraftId: draftId, to: '919876500001', text: 'Team reminder', status: 'pending', event: 'package.start.request.admin', application: 'portal' });
+  const overview = await reservationOverview();
+  const request = overview.packageStarts.find(item => item.id === String(row._id));
+  assert.equal(request.messageHistory.length, 1, 'a claimed counter is not an invented delivery record');
+  assert.equal(request.messageHistory[0].status, 'queued');
+  assert.deepEqual(request.messageHistory[0].whatsapp, ['pending']);
+});
+
+test('reservation overview identifies a disabled reminder action and scheduler status', async () => {
+  await reserve();
+  await EmailPolicy.create({ event: 'offer.reservation.reminder', mode: 'off' });
+  const overview = await reservationOverview();
+  assert.equal(overview.running[0].upcomingReminder.event, 'offer.reservation.reminder');
+  assert.equal(overview.running[0].upcomingReminder.actionEnabled, false);
+  assert.equal(overview.reservationScheduler.confirmationsEnabled, true);
+  assert.equal(overview.reservationScheduler.jobsEnabled, process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true');
+});
+
+test('reservation team reminder pause stops only the team recurrence and rejects stale controls', async () => {
+  await reserve(); await start();
+  const row = await Reservation.findOne();
+  const controls = require('../helpers/legacyReminderControls');
+  await controls.setPaused({ source: 'reservation_team', entityId: row._id, paused: true, expectedPaused: false, actorId: admin._id });
+  await age(24 * HOUR + 60000);
+  await alertPendingStarts();
+  assert.equal((await Reservation.findById(row._id)).startRequests[0].alerts, 0);
+  assert.equal((await reservationOverview()).running[0].teamReminder, null);
+  await controls.setPaused({ source: 'reservation_team', entityId: row._id, paused: false, expectedPaused: true, actorId: admin._id });
+  await alertPendingStarts();
+  const fresh = await Reservation.findById(row._id).lean();
+  assert.equal(fresh.startRequests[0].alerts, 1);
+  const draft = { event: 'offer.start.request.admin', application: 'portal', dedupeKey: `offer-start-pending:${row._id}:1:1` };
+  assert.equal(await require('../helpers/reservationReminderEligibility').maySendReservationReminder(draft), true);
+  await controls.setPaused({ source: 'reservation_team', entityId: row._id, paused: true, expectedPaused: false, actorId: admin._id });
+  assert.equal(await require('../helpers/reservationReminderEligibility').maySendReservationReminder(draft), false);
+  await Reservation.updateOne({ _id: row._id }, { $set: { projectId: new mongoose.Types.ObjectId() } });
+  await assert.rejects(controls.setPaused({ source: 'reservation_team', entityId: row._id, paused: false, expectedPaused: true, actorId: admin._id }), /no longer|changed/i);
+});
+
+test('per-reservation pause stops the forecast and worker until resumed', async () => {
+  await reserve();
+  const row = await Reservation.findOne();
+  await Reservation.updateOne({ _id: row._id }, { $set: { remindersPaused: true } });
+  await age(24 * HOUR + 60000);
+  assert.equal((await reservationOverview()).running[0].upcomingReminder, null);
+  await sendDueReminders();
+  assert.equal((await queued('offer.reservation.reminder')).length, 0);
+  await Reservation.updateOne({ _id: row._id }, { $set: { remindersPaused: false } });
+  await sendDueReminders();
+  assert.equal((await queued('offer.reservation.reminder')).length, 1);
+});
+
+test('a paused reservation reminder is stopped before email or WhatsApp provider handoff', async () => {
+  await reserve();
+  await age(24 * HOUR + 60000);
+  const row = await Reservation.findOne().lean();
+  const key = `24h:${row.expiresAt.toISOString()}`;
+  await Reservation.updateOne({ _id: row._id }, { $set: { remindersPaused: true }, $addToSet: { remindersSent: key } });
+  await assert.rejects(require('../helpers/emailController').sendReservationMail('offer.reservation.reminder', row, member, `offer-reservation-reminder:${row._id}:${key}`), /no longer eligible/i);
+  assert.equal(emails, 0);
+  assert.equal((await queued('offer.reservation.reminder')).length, 0);
+});
+
+test('reservation overview distinguishes a stage claim from recorded delivery and WhatsApp queue state', async () => {
+  await reserve();
+  await age(24 * HOUR + 60000);
+  await sendDueReminders();
+  const overview = await reservationOverview();
+  assert.equal(overview.running[0].reminderHistory.length, 1);
+  assert.equal(overview.running[0].reminderHistory[0].event, 'offer.reservation.reminder');
+  assert.deepEqual(overview.running[0].reminderHistory[0].whatsapp, ['pending']);
+  await EmailHistory.deleteMany({});
+  const missing = await reservationOverview();
+  assert.equal(missing.running[0].reminderHistory[0].status, 'no_delivery_record');
+  assert.deepEqual(missing.running[0].reminderHistory[0].whatsapp, []);
+});
+
 test('a 48-hour reservation gets one reminder at 24 hours left and one at 1 hour left, with the offer page', async () => {
   await reserve();
   await age(23 * HOUR); await sendDueReminders();

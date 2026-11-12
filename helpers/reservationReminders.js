@@ -46,7 +46,7 @@ function dayPassedDue(row, deadline, now) {
 // Read-only forecast for the admin overview. The worker remains authoritative: an
 // extension, new start request, policy switch or downtime can change the outcome.
 function upcomingStage(row, now = new Date()) {
-  if (!row.remindersEnabled || row.projectId || row.confirmedAt || row.startRequestedAt) return null;
+  if (!row.remindersEnabled || row.remindersPaused || row.projectId || row.confirmedAt || row.startRequestedAt) return null;
   const deadline = require('./offerReservations').deadlineOf(row);
   if (!(deadline > now)) return null;
   const sent = row.remindersSent || [];
@@ -62,7 +62,7 @@ function upcomingStage(row, now = new Date()) {
 async function sendDueReminders({ now = new Date(), limit = 50 } = {}) {
   if (!enabled()) return [];
   const { deadlineOf } = require('./offerReservations');
-  const open = { remindersEnabled: true, projectId: null, confirmedAt: null, startRequestedAt: null };
+  const open = { remindersEnabled: true, remindersPaused: { $ne: true }, projectId: null, confirmedAt: null, startRequestedAt: null };
   const soon = new Date(now.getTime() + STAGES[STAGES.length - 1].before);
   const [ending, dayOld] = await Promise.all([
     Reservation.find({ ...open, $or: [{ extendedUntil: null, expiresAt: { $gt: now, $lte: soon } }, { extendedUntil: { $gt: now, $lte: soon } }] })
@@ -79,7 +79,7 @@ async function sendDueReminders({ now = new Date(), limit = 50 } = {}) {
     const key = `${stage.key}:${deadline.toISOString()}`;
     if (row.remindersSent?.includes(key)) continue;
     // Claimed only while the reservation is still untouched by a project or a start request.
-    const claimed = await Reservation.updateOne({ _id: row._id, remindersSent: { $ne: key }, projectId: null, confirmedAt: null, startRequestedAt: null },
+    const claimed = await Reservation.updateOne({ _id: row._id, remindersSent: { $ne: key }, remindersEnabled: true, remindersPaused: { $ne: true }, projectId: null, confirmedAt: null, startRequestedAt: null },
       { $addToSet: { remindersSent: key } });
     if (!claimed.modifiedCount) continue;
     try {

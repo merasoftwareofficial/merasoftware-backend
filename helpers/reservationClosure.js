@@ -69,41 +69,80 @@ async function closeDueReservations({ now = new Date(), limit = 20 } = {}) {
 async function reservationOverview({ now = new Date(), limit = 100 } = {}) {
   const open = { projectId: null, confirmedAt: null };
   const runningQuery = { ...open, $or: [{ startRequestedAt: { $ne: null } }, { extendedUntil: null, expiresAt: { $gt: now } }, { extendedUntil: { $gt: now } }] };
-  const [running, used, expired, closures] = await Promise.all([
+  const [running, used, expired, closures, recentClosed] = await Promise.all([
     Reservation.find(runningQuery).sort({ startRequestedAt: -1, expiresAt: 1 }).limit(limit)
-      .select('userId offerSnapshot.title reservedAt expiresAt extendedUntil extensions origin startRequestedAt startRequests remindersEnabled remindersSent projectId confirmedAt').lean(),
+      .select('userId offerSnapshot.title reservedAt expiresAt extendedUntil extensions origin startRequestedAt startRequests remindersEnabled remindersPaused teamRemindersPaused remindersSent projectId confirmedAt').lean(),
     Reservation.countDocuments({ $or: [{ projectId: { $ne: null } }, { confirmedAt: { $ne: null } }] }),
     Reservation.countDocuments({ ...open, startRequestedAt: null, ...duePast(now) }),
     Reservation.aggregate([{ $match: { closureStatus: { $in: ['sent', 'not-sent', 'late', 'failed'] } } }, { $group: { _id: '$closureStatus', count: { $sum: 1 } } }]),
+    Reservation.find({ $or: [{ projectId: { $ne: null } }, { confirmedAt: { $ne: null } }, { ...open, startRequestedAt: null, ...duePast(now) }] }).sort({ updatedAt: -1, _id: -1 }).limit(50)
+      .select('userId offerSnapshot.title remindersSent projectId confirmedAt closureStatus updatedAt').lean(),
   ]);
   // Open "Start my project" requests on packages without an offer (helpers/packageStart.js), oldest first.
   const starts = await require('../models/packageStartRequestModel').find({ closedAt: null }).sort({ requestedAt: 1 }).limit(limit)
-    .select('userId packageSnapshot requestedAt kind alerts').lean();
-  const users = await User.find({ _id: { $in: [...running, ...starts].map(row => row.userId) } }).select('name email phone').lean();
+    .select('userId packageSnapshot requestedAt kind alerts remindersPaused').lean();
+  // The stage keys are claims, not proof of delivery. Match permanent delivery records
+  // and current WhatsApp queue rows; do not invent a history for missing records.
+  const reminderKeys = [...running, ...recentClosed].flatMap(row => (row.remindersSent || []).map(key => `offer-reservation-reminder:${row._id}:${key}`));
+  const packageKeys = starts.flatMap(row => [
+    `package-start-request:${row._id}`, `package-start-received:${row._id}`,
+    ...[1, 2, 3].map(number => `package-start-pending:${row._id}:${number}`),
+  ]);
+  const { EmailHistory, EmailPolicy } = require('../models/emailControlModel');
+  const reminderEvents = ['offer.reservation.dayPassed', 'offer.reservation.reminder', 'offer.reservation.sixHours', 'offer.reservation.lastHour', 'offer.start.request.admin', 'package.start.request.admin'];
+  const reminderPolicies = await EmailPolicy.find({ event: { $in: reminderEvents } }).select('event mode').lean();
+  const policyByEvent = new Map(reminderPolicies.map(policy => [policy.event, policy.mode]));
+  const histories = reminderKeys.length || packageKeys.length ? await EmailHistory.find({ dedupeKey: { $in: [...reminderKeys, ...packageKeys] } }).select('dedupeKey event status sentAt updatedAt draftId delivery').lean() : [];
+  const { Queue } = require('../whatsapp/src/models.js');
+  const queue = histories.length ? await Queue.find({ emailDraftId: { $in: histories.map(row => row.draftId) } }).select('emailDraftId status').lean() : [];
+  const historyByKey = new Map(histories.map(row => [row.dedupeKey, row]));
+  const users = await User.find({ _id: { $in: [...running, ...recentClosed, ...starts].map(row => row.userId) } }).select('name email phone').lean();
   const runningCount = running.length < limit ? running.length
     : await Reservation.countDocuments(runningQuery);
   // Paused first, the longest-waiting request at the top; then by deadline.
   running.sort((a, b) => (a.startRequestedAt ? 0 : 1) - (b.startRequestedAt ? 0 : 1)
     || (a.startRequestedAt && b.startRequestedAt ? new Date(a.startRequestedAt) - new Date(b.startRequestedAt) : 0)
     || new Date(a.extendedUntil || a.expiresAt) - new Date(b.extendedUntil || b.expiresAt));
+  const reminderHistory = row => (row.remindersSent || []).map(key => {
+    const history = historyByKey.get(`offer-reservation-reminder:${row._id}:${key}`);
+    return { key, event: history?.event || null, status: history?.status || 'no_delivery_record',
+      at: history?.sentAt || history?.updatedAt || null,
+      whatsapp: history ? queue.filter(item => String(item.emailDraftId) === String(history.draftId)).map(item => item.status) : [] };
+  });
   return {
     serverNow: now,
+    reservationScheduler: { jobsEnabled: process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true', confirmationsEnabled: process.env.OFFER_RESERVATION_CONFIRMATIONS_ENABLED === 'true' },
+    packageRequestScheduler: { jobsEnabled: process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true', requestsEnabled: process.env.PACKAGE_START_REQUESTS_ENABLED === 'true' },
     counts: { running: runningCount, used, expired, closures: Object.fromEntries(closures.map(row => [row._id, row.count])) },
     running: running.map(row => {
       const user = users.find(item => String(item._id) === String(row.userId));
       // Digits only, the WhatsApp queue's format, which the website's phoneLabel shows as +91 98765 43210.
-      return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '', offer: row.offerSnapshot?.title || '',
+      return { id: String(row._id), userId: String(row.userId), remindersEnabled: !!row.remindersEnabled, remindersPaused: !!row.remindersPaused, teamRemindersPaused: !!row.teamRemindersPaused, teamControlAvailable: !!row.startRequestedAt && !!row.startRequests?.length && !row.startRequests.at(-1).ended, teamReminderAttempts: Number(row.startRequests?.at(-1)?.alerts || 0), teamActionEnabled: policyByEvent.get('offer.start.request.admin') !== 'off', customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '', offer: row.offerSnapshot?.title || '',
         reservedAt: row.reservedAt, deadline: row.extendedUntil || row.expiresAt, extended: !!row.extendedUntil, startRequestedAt: row.startRequestedAt || null,
         hours: Math.round((new Date(row.expiresAt) - new Date(row.reservedAt)) / 3600000),
-        teamReminder: row.startRequestedAt && row.startRequests?.length && !row.startRequests.at(-1)?.ended ? teamReminder(row.startRequestedAt, row.startRequests.at(-1)?.alerts || 0) : null,
-        upcomingReminder: require('./reservationReminders').upcomingStage(row, now) };
+        teamReminder: !row.teamRemindersPaused && row.startRequestedAt && row.startRequests?.length && !row.startRequests.at(-1)?.ended ? teamReminder(row.startRequestedAt, row.startRequests.at(-1)?.alerts || 0) : null,
+        upcomingReminder: (() => { const next = require('./reservationReminders').upcomingStage(row, now); return next ? { ...next, actionEnabled: policyByEvent.get(next.event) !== 'off' } : null; })(),
+        reminderHistory: reminderHistory(row) };
+
+    }),
+    recentClosed: recentClosed.map(row => {
+      const user = users.find(item => String(item._id) === String(row.userId));
+      return { id: String(row._id), userId: String(row.userId), customer: user?.name || user?.email || '', offer: row.offerSnapshot?.title || '',
+        status: row.projectId || row.confirmedAt ? 'project_linked' : 'expired', closureStatus: row.closureStatus || null,
+        updatedAt: row.updatedAt, reminderHistory: reminderHistory(row) };
     }),
     packageStarts: starts.map(row => {
       const user = users.find(item => String(item._id) === String(row.userId));
       return { id: String(row._id), customer: user?.name || user?.email || '', phone: normalizePhone(user?.phone) || '',
         package: row.packageSnapshot?.name || '', price: row.packageSnapshot?.price ?? null, choice: row.packageSnapshot?.choice || null,
-        billing: row.packageSnapshot?.billing || null, kind: row.kind || 'callback', userId: String(row.userId), requestedAt: row.requestedAt,
-        teamReminder: teamReminder(row.requestedAt, row.alerts || 0) };
+        billing: row.packageSnapshot?.billing || null, kind: row.kind || 'callback', userId: String(row.userId), requestedAt: row.requestedAt, remindersPaused: !!row.remindersPaused, teamReminderAttempts: Number(row.alerts || 0), teamActionEnabled: policyByEvent.get('package.start.request.admin') !== 'off',
+        teamReminder: row.remindersPaused ? null : teamReminder(row.requestedAt, row.alerts || 0),
+        messageHistory: [`package-start-request:${row._id}`, `package-start-received:${row._id}`,
+          ...[1, 2, 3].map(number => `package-start-pending:${row._id}:${number}`)].flatMap(key => {
+          const history = historyByKey.get(key);
+          return history ? [{ key, event: history.event, status: history.status, at: history.sentAt || history.updatedAt || null,
+            whatsapp: queue.filter(item => String(item.emailDraftId) === String(history.draftId)).map(item => item.status) }] : [];
+        }) };
     }),
   };
 }

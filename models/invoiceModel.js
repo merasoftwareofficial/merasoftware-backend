@@ -7,6 +7,9 @@ const invoiceLineItemSchema = new mongoose.Schema({
 
 const invoiceSchema = new mongoose.Schema({
   paymentPolicyKey: { type: String, unique: true, sparse: true },
+  offerRemindersPaused: { type: Boolean, default: false },
+  offerRemindersPauseChangedAt: { type: Date, default: null },
+  offerRemindersPauseChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', default: null },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "user",

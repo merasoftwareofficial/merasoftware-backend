@@ -19,6 +19,9 @@ const schema = new mongoose.Schema({
   noticeNextAttemptAt: { type: Date, default: null },
   noticeFailure: { type: String, default: '' },
   alerts: { type: Number, default: 0 },
+  remindersPaused: { type: Boolean, default: false },
+  remindersPauseChangedAt: { type: Date, default: null },
+  remindersPauseChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', default: null },
   // Closed when the team creates a project on this package for this person, or closes it by hand.
   closedAt: { type: Date, default: null },
   // callback_requested: an open buy that the customer replaced by asking for a callback.
