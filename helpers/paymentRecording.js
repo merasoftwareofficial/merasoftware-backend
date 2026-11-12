@@ -81,8 +81,13 @@ const markProjectInvoicePaid = async ({
   // caller creates anything). Omit to have it validated here.
   preparedEvidence = null,
   session = null,
+  // When the money was received, if earlier than now: a project the admin creates back-dated
+  // (adminCreateProjectOrder.js billingDate). Sets the payment's `date` and the invoice's paidDate;
+  // the transaction's own createdAt and verificationDate stay the real time it was recorded.
+  paidAt = null,
 }) => {
   const amountNow = Number(amount != null ? amount : invoice.amount);
+  const receivedAt = paidAt ? new Date(paidAt) : new Date();
 
   let transaction = existingTransaction;
   if (!transaction) {
@@ -112,7 +117,7 @@ const markProjectInvoicePaid = async ({
       paymentMethod: paymentMethod || "cash",
       verifiedBy: actorId,
       verificationDate: new Date(),
-      date: new Date(),
+      date: receivedAt,
     });
     await transaction.save({ session });
   } else if (!transaction.invoiceId) {
@@ -142,7 +147,7 @@ const markProjectInvoicePaid = async ({
   );
   invoice.status = deriveInvoiceStatus(invoice.amountPaid, invoice.amount);
   if (invoice.status === "paid") {
-    invoice.paidDate = new Date();
+    invoice.paidDate = receivedAt;
   }
   invoice.paymentMethod = paymentMethod || invoice.paymentMethod || "cash";
   invoice.transactionReference = transactionReference || invoice.transactionReference || null;

@@ -17,7 +17,9 @@ const handle = fn => async (req, res) => {
 };
 const adminRead = handle(async (req, res) => {
   await requireAdmin(req);
-  const { offers } = await fetchWebsiteCatalogue();
+  // packagePages: the website's package pages (slug + title), so the portal's Create from Package form can
+  // list packages page by page (a package's `pages` holds only the slugs).
+  const { offers, packagePages } = await fetchWebsiteCatalogue();
   const plans = await Product.find({ category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null }).select('_id serviceName servicePlan.purchaseType servicePlan.capability').lean();
   // Project categories come from the SSOT so the website offer/package editors never hardcode them.
   // The package form also prices a package from them (base price) and edits them in a dialog (the other fields,
@@ -32,7 +34,7 @@ const adminRead = handle(async (req, res) => {
     .map(row => ({ id: String(row._id), name: row.serviceName, unitPrice: row.sellingPrice ?? row.price ?? 0, description: row.formattedDescriptions?.[0]?.content || '',
       isHidden: !!row.isHidden, isQuantityBased: !!row.isQuantityBased, compatibleWith: Array.isArray(row.compatibleWith) ? row.compatibleWith : [],
       terms: Array.isArray(row.terms) ? row.terms : [] }));
-  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, plans, categories, addOns, drafts: await drafts.listDrafts() } });
+  res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, packagePages, plans, categories, addOns, drafts: await drafts.listDrafts() } });
 });
 // Package working copies (helpers/packageDrafts.js): save, delete after publish or discard, forget an ended offer.
 const adminDraft = handle(async (req, res) => {
@@ -94,11 +96,14 @@ const integrationQuote = handle(async (req, res) => {
 });
 // PATCH /api/admin/sales-packages/quote: the same choice quote for the portal's create-project form, so a
 // monthly package project is priced as its creation prices it (projectPricing.js), with a customer's
-// reservation at the offer it froze. { packageId, choice, customerId?, offerReservationId? }
+// reservation at the offer it froze, or with the package's ended offer the admin applies.
+// { packageId, choice, customerId?, offerReservationId?, endedOfferSlug? }
+// `packageQuote` is the package price itself (what a one-time project is priced from, with its quoteKey);
+// `quote` is the choice quote, given for a package that has a billing type.
 const adminQuote = handle(async (req, res) => {
   await requireAdmin(req);
   const { quoteChoice } = require('../../helpers/salesPackages');
-  const { quotePackageForProject } = require('../../helpers/projectPricing');
+  const { quotePackageForProject, endedOfferFor } = require('../../helpers/projectPricing');
   const item = (await readPackages()).find(row => row.id === req.body?.packageId && row.status === 'published');
   if (!item) fail('This package is not available.', 404);
   let reserved = null;
@@ -109,6 +114,15 @@ const adminQuote = handle(async (req, res) => {
     if (!reserved || reserved.offerSnapshot?.packageId !== item.id) fail('This reservation belongs to another package', 409);
   }
   const offers = reserved ? [] : (await fetchWebsiteCatalogue()).offers;
-  res.set('Cache-Control', 'no-store').json({ success: true, data: { quote: quoteChoice(item, quotePackageForProject(item, reserved, offers), req.body?.choice || {}) } });
+  let endedOffer = null;
+  if (req.body?.endedOfferSlug) {
+    if (reserved) fail('Use either the reservation or the ended offer, not both');
+    endedOffer = endedOfferFor(item, offers);
+    if (!endedOffer || endedOffer.slug !== req.body.endedOfferSlug) fail('This package has no ended offer to apply. Refresh packages.', 409);
+  }
+  const quoted = quotePackageForProject(item, reserved, offers, endedOffer);
+  const data = { packageQuote: { quote: quoted.quote, quoteKey: quoted.quoteKey } };
+  if (item.billing === 'monthly' || (item.billing && req.body?.choice?.paymentOption)) data.quote = quoteChoice(item, quoted, req.body?.choice || {});
+  res.set('Cache-Control', 'no-store').json({ success: true, data });
 });
 module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };

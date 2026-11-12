@@ -79,6 +79,20 @@ const adminCreateProjectOrderController = async (req, res) => {
       });
     }
 
+    // Back-dated start (owner decision 12 Nov 2026): the admin may record work that really began earlier, so the
+    // portal, invoice, payment and client mail show that date. Never in the future; a reserved offer runs on
+    // today's clock, so it cannot be back-dated. Now (or a moment ago) means not back-dated.
+    let startDate = null;
+    if (req.body.billingDate) {
+      const picked = new Date(req.body.billingDate);
+      const now = Date.now();
+      if (!Number.isFinite(picked.getTime())) return res.status(400).json({ message: "Enter a valid start date", error: true, success: false });
+      if (picked.getTime() > now + 2 * 60 * 1000) return res.status(400).json({ message: "The start date cannot be in the future", error: true, success: false });
+      if (picked.getTime() < now - 5 * 365 * 24 * 60 * 60 * 1000) return res.status(400).json({ message: "The start date is more than 5 years ago. Check the year.", error: true, success: false });
+      if (picked.getTime() < now - 2 * 60 * 1000) startDate = picked;
+      if (startDate && req.body.offerReservationId) return res.status(400).json({ message: "A reserved offer starts today; it cannot be back-dated", error: true, success: false });
+    }
+
     // Active category from the SSOT (helpers/projectCategories.js); an archived or unknown one is refused.
     const categoryEntry = await requireCategoryForNewProject(category);
     const resolvedStartingNodeTitle = startingNodeTitle?.trim() || categoryEntry.startingNodeTitle || DEFAULT_STARTING_NODE_TITLE;
@@ -149,7 +163,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     const clientProjectFeatures = featureLines(featureDocs, featureQuantities);
     const featuresTotal = clientProjectFeatures.reduce((sum, feature) => sum + (feature.price || 0), 0);
     let referenceTotal = basePrice + featuresTotal;
-    const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal, userId: client._id });
+    const commercial = await resolveProjectPricing({ body: req.body, category, basePrice, features: clientProjectFeatures, referenceTotal, userId: client._id, actorId: req.userId });
     if (commercial) {
       finalPrice = commercial.finalPrice;
       basePrice = commercial.basePrice;
@@ -170,13 +184,13 @@ const adminCreateProjectOrderController = async (req, res) => {
     if (monthlyTerm) {
       const packageItem = (await require('../../helpers/salesPackages').readPackages()).find(row => row.id === req.body.packageId);
       const { buildPackagePlanOrderData, persistPackagePlanOrder, startPaidPackagePlan } = require('../../helpers/packagePlanOrder');
-      const orderData = buildPackagePlanOrderData({ userId: customerId, item: packageItem, commercial });
+      const orderData = buildPackagePlanOrderData({ userId: customerId, item: packageItem, commercial, ...(startDate ? { startDate } : {}) });
       if (creationKey) { orderData.projectCreationKey = creationKey; orderData.projectCreationHash = creationHash; }
       // Agreed pay-later offer terms: the plan works before payment (as customerCreateServicePlanOrder.js).
       if (!shouldRecordPayment && require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(commercial.paymentPolicy)) orderData.orderVisibility = 'approved';
       const { order, invoice, reused } = await persistPackagePlanOrder({
         orderData, actorId: req.userId, sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
-        payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null,
+        payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null, startDate,
       });
       const saved = reused ? order : await startPaidPackagePlan({ order, invoice });
       // Pay-later terms: the plan is working before payment, so it has started (the paid case is told by the cycle settlement).
@@ -235,7 +249,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     const { order, invoice, reused } = await persistAdminProject({
       orderData, startingNodeTitle: resolvedStartingNodeTitle, actorId: req.userId,
       recordPayment: shouldRecordPayment ? recordPayment : null, preparedEvidence,
-      sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId,
+      sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId, startDate,
     });
     // Keep request-scoped review drafts outside the retryable financial transaction.
     if (!reused) await sendProjectCreatedEmail(client, order, invoice);

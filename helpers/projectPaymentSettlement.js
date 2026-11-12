@@ -218,14 +218,15 @@ async function rejectProjectPayment(transactionId, actorId, reason) {
   });
 }
 
-async function recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session, preparedPrice = null }) {
+// `paidAt`: when the money was received, for a back-dated project (adminProjectCreation.js); omitted = now.
+async function recordAdminProjectPaymentInSession({ order, actorId, payment, preparedEvidence, session, preparedPrice = null, paidAt = null }) {
   const { invoice, installment } = await dueInvoice(order, {}, session);
   const amount = (cents(invoice.amount) - cents(invoice.amountPaid)) / 100;
   validAmount(amount);
   const result = await markProjectInvoicePaid({ invoice, customerId: order.userId,
     paymentMethod: payment.paymentMethod, transactionReference: payment.transactionReference,
     paymentDetails: payment.paymentDetails || {}, preparedEvidence,
-    notes: payment.notes, actorId, amount, session });
+    notes: payment.notes, actorId, amount, session, paidAt });
   return applyReceived(order, result.invoice, installment, result.transaction, session, ACTOR_TYPE.ADMIN, true, preparedPrice);
 }
 

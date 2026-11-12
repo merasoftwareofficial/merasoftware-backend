@@ -45,7 +45,10 @@ function buildPackagePlanOrderData({ userId, item, commercial, startDate = new D
 //          | { kind: 'admin', recordPayment, preparedEvidence }   (money already received, with evidence)
 //          | null                                                (the client pays the bill later)
 // `beforeCreate({ client, session })` runs inside the transaction before anything is written.
-async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = false, sourceOffer = null, sourceReservationId = null, payment = null, beforeCreate = null }) {
+// `startDate` (optional): an admin's back-dated monthly package; build the order data with the same date
+// (buildPackagePlanOrderData startDate), so the plan's cycles run from it. The order's createdAt, the first
+// cycle's invoice date and an admin-recorded payment are set to it; omitted = now, as before.
+async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = false, sourceOffer = null, sourceReservationId = null, payment = null, beforeCreate = null, startDate = null }) {
   const orderId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -63,12 +66,12 @@ async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = fa
       }
     }
     if (beforeCreate) await beforeCreate({ client, session });
-    const order = new Order({ ...orderData, _id: orderId, projectCreationComplete: true });
+    const order = new Order({ ...orderData, _id: orderId, projectCreationComplete: true, ...(startDate ? { createdAt: startDate } : {}) });
     await require('./offerReservations').attachProjectReservation({ order, offer: sourceOffer, reservationId: sourceReservationId, session });
     await require('./packageStart').closeOnProject({ order, session });
     await order.save({ session });
 
-    const invoiceDate = new Date();
+    const invoiceDate = startDate ? new Date(startDate) : new Date();
     const due = cents(order.totalAmount);
     // The first bill as a plan's (customerCreateServicePlanOrder.js); renewals add "Cycle n" bills (servicePlanRenewalCron.js).
     let invoice = await createProjectInvoice({ customerId: order.userId, orderId: order._id, amount: due / 100,
@@ -94,7 +97,7 @@ async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = fa
         upiPending = upiPart / 100;
       }
     } else if (payment?.kind === 'admin') {
-      ({ invoice } = await markProjectInvoicePaid({ invoice, customerId: order.userId, actorId, amount: due / 100, session,
+      ({ invoice } = await markProjectInvoicePaid({ invoice, customerId: order.userId, actorId, amount: due / 100, session, paidAt: startDate,
         paymentMethod: payment.recordPayment.paymentMethod, transactionReference: payment.recordPayment.transactionReference,
         paymentDetails: payment.recordPayment.paymentDetails || {}, preparedEvidence: payment.preparedEvidence }));
     }

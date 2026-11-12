@@ -467,3 +467,103 @@ if (process.env.TEST_SALES_BROWSER === '1') test('offer editor package ticks and
     assert.deepEqual(errors, []); console.log('Offer links browser evidence: ' + folder);
   } finally { if (browser) await browser.close(); }
 });
+
+// ── Back-dated start and the ended-offer override (Projects & Plans form, owner decisions 12 Nov 2026) ──
+const DAY_MS = 24 * 60 * 60 * 1000;
+const sameTime = (a, b, label) => assert.equal(new Date(a).getTime(), new Date(b).getTime(), label);
+
+test('back-dated custom project: order, first step, invoice, payment and client mail carry the chosen date', async () => {
+  const startedAt = new Date(Date.now() - 20 * DAY_MS);
+  const created = await create({ sellingPrice: 8000, paymentType: 'full', billingDate: startedAt.toISOString(),
+    recordPayment: { paymentMethod: 'upi', transactionReference: '412345678909' } });
+  assert.equal(created.status, 201, created.message);
+  const order = await orderModel.findById(created.data._id).lean();
+  sameTime(order.createdAt, startedAt, 'order.createdAt');
+  sameTime(order.projectNodes?.[0]?.createdAt ?? order.projectTimeline?.nodes?.[0]?.createdAt ?? order.projectRuns?.[0]?.startedAt, startedAt, 'first timeline step');
+  assert.equal(order.orderVisibility, 'approved');
+  const invoice = await invoiceModel.findOne({ orderId: order._id, invoiceType: 'project' }).lean();
+  sameTime(invoice.invoiceDate, startedAt, 'invoiceDate'); sameTime(invoice.dueDate, startedAt, 'dueDate'); sameTime(invoice.paidDate, startedAt, 'paidDate');
+  const payment = await transactionModel.findOne({ orderId: order._id, type: 'payment' }).lean();
+  sameTime(payment.date, startedAt, 'payment date');
+  assert.ok(Date.now() - new Date(payment.verificationDate).getTime() < 60000, 'verification stays the real recording time');
+  const draft = await EmailDraft.findById(created.emailDraftIds[0]).lean();
+  const shown = startedAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  assert.ok(draft.text.includes(shown.split(' ')[0]) && draft.text.includes(shown.split(' ')[1]), `mail shows the start date (${shown}): ${draft.text}`);
+});
+
+test('start date: future refused, a typo year refused, today is not back-dated, a reservation cannot be back-dated', async () => {
+  assert.equal((await create({ sellingPrice: 8000, paymentType: 'full', billingDate: new Date(Date.now() + DAY_MS).toISOString() })).status, 400);
+  assert.equal((await create({ sellingPrice: 8000, paymentType: 'full', billingDate: '0202-01-01T00:00:00.000Z' })).status, 400);
+  assert.equal((await create({ sellingPrice: 8000, paymentType: 'full', billingDate: 'not a date' })).status, 400);
+  const today = await create({ sellingPrice: 8000, paymentType: 'full', billingDate: new Date().toISOString() });
+  assert.equal(today.status, 201, today.message);
+  const order = await orderModel.findById(today.data._id).lean();
+  assert.ok(Date.now() - new Date(order.createdAt).getTime() < 60000);
+  const reserved = await create({ sellingPrice: 699, paymentType: 'full', billingDate: new Date(Date.now() - 5 * DAY_MS).toISOString(),
+    packageId: 'starter', packageQuoteKey: 'x', offerSlug: 'page', offerReservationId: new mongoose.Types.ObjectId().toString() });
+  assert.equal(reserved.status, 400);
+  assert.match(reserved.message, /reserved offer/i);
+});
+
+test('ended offer: the package price stays regular until the admin applies its own ended offer, with a reason', async () => {
+  app.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
+  const page = LIVE_OFFERS.find(offer => offer.slug === 'page');
+  const liveEnd = page.endsAt;
+  page.endsAt = new Date(Date.now() - 3 * DAY_MS).toISOString();
+  try {
+    const catalog = await api('/admin/sales-packages', null, 'GET');
+    const starter = catalog.data.packages.find(item => item.id === 'starter');
+    assert.equal(starter.quote.offer, null, 'an ended offer no longer prices the package');
+    assert.equal(starter.quote.finalPrice, 10000);
+    assert.ok(catalog.data.offers.some(offer => offer.slug === 'page'), 'the admin list still has the ended offer');
+    // Without the override the regular price is the only one accepted.
+    assert.equal((await create({ sellingPrice: 699, paymentType: 'full', packageId: 'starter', packageQuoteKey: starter.quoteKey })).status, 409);
+    // The override needs a reason, and only the package's own offer.
+    const quoted = await api('/admin/sales-packages/quote', { packageId: 'starter', endedOfferSlug: 'page' }, 'PATCH');
+    assert.equal(quoted.status, 200, quoted.message);
+    assert.equal(quoted.data.packageQuote.quote.finalPrice, 699);
+    assert.equal(quoted.data.packageQuote.quote.offer.slug, 'page');
+    const body = { sellingPrice: 699, paymentType: 'full', packageId: 'starter', packageQuoteKey: quoted.data.packageQuote.quoteKey, offerSlug: 'page', endedOfferSlug: 'page' };
+    assert.equal((await create(body)).status, 400, 'reason required');
+    assert.equal((await create({ ...body, endedOfferSlug: 'diwali', endedOfferReason: 'x' })).status, 409, 'not the package offer');
+    const made = await create({ ...body, endedOfferReason: 'Client paid during the offer; added late' });
+    assert.equal(made.status, 201, made.message);
+    const order = await orderModel.findById(made.data._id).lean();
+    const agreement = order.projectSnapshot.salesAgreement;
+    assert.equal(agreement.finalPrice, 699);
+    assert.equal(agreement.offer.slug, 'page');
+    assert.equal(agreement.offer.appliedAfterEnd.reason, 'Client paid during the offer; added late');
+    assert.equal(agreement.offer.appliedAfterEnd.by, String(admin._id));
+    assert.equal(order.offerReservationId ?? null, null, 'no reservation row for an ended offer');
+  } finally { page.endsAt = liveEnd; }
+  // While the offer is live there is nothing to override.
+  assert.equal((await api('/admin/sales-packages/quote', { packageId: 'starter', endedOfferSlug: 'page' }, 'PATCH')).status, 409);
+});
+
+test('back-dated monthly package: the plan, its first cycle and payment start on the date; an ended cycle bills the next', async () => {
+  const { savePackage } = require('../helpers/salesPackages');
+  app.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
+  const care = await savePackage({ name: 'Monthly Care', description: 'Care', status: 'published', category: 'standard_websites', billing: 'monthly', portalUploads: true,
+    regularPrice: 1500, discountedPrice: 1000, offerExtraPrice: 0, offerSlug: '', inclusions: ['Care'], terms: [], linkedPlanIds: [], order: 9, pages: [], id: '',
+    monthly: { billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12, uploadsPerMonth: 2 } }, true, []);
+  const choice = { billingCycle: 'monthly', tenureMonths: 6 };
+  const quoted = await api('/admin/sales-packages/quote', { packageId: care.id, choice }, 'PATCH');
+  assert.equal(quoted.status, 200, quoted.message);
+  const startedAt = new Date(Date.now() - 40 * DAY_MS);
+  const made = await create({ sellingPrice: quoted.data.quote.finalPrice, paymentType: 'monthly', monthlyChoice: choice, packageId: care.id,
+    packageQuoteKey: quoted.data.packageQuote.quoteKey, billingDate: startedAt.toISOString(), recordPayment: { paymentMethod: 'upi', transactionReference: '412345678908' } });
+  assert.equal(made.status, 201, made.message);
+  const plan = await orderModel.findById(made.data._id).lean();
+  assert.equal(plan.isServicePlan, true);
+  sameTime(plan.createdAt, startedAt, 'plan createdAt'); sameTime(plan.servicePlanStartDate, startedAt, 'plan start');
+  sameTime(plan.serviceCurrentCycleStart, startedAt, 'cycle 1 start');
+  assert.ok(new Date(plan.serviceCurrentCycleEnd) < new Date(), 'cycle 1 (one month) has already ended');
+  assert.equal(plan.servicePlanStatus, 'active');
+  const invoice = await invoiceModel.findOne({ orderId: plan._id, serviceCycleNumber: 1 }).lean();
+  sameTime(invoice.invoiceDate, startedAt, 'cycle 1 invoice'); sameTime(invoice.paidDate, startedAt, 'cycle 1 paid');
+  // The renewal run bills cycle 2 and pauses the plan until it is paid (the form warns about this).
+  await require('../cron/servicePlanRenewalCron').processServicePlanRenewals(new Date());
+  const after = await orderModel.findById(plan._id).lean();
+  assert.equal(after.servicePlanStatus, 'paused');
+  assert.equal(await invoiceModel.countDocuments({ orderId: plan._id, invoiceType: 'plan_renewal', serviceCycleNumber: 2 }), 1);
+});

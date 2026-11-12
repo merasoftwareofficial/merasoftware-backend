@@ -682,7 +682,8 @@ const definitions = {
       const due = `${money(invoice?.amount ?? total)}${invoice?.invoiceNumber ? ` (invoice ${invoice.invoiceNumber})` : ''}`;
       return { to: [user.email], values: {
         name: user.name || 'Customer', project: getOrderDisplayName(order), price: isFree ? 'FREE' : money(total),
-        offer: order.projectSnapshot?.offer?.title || '', startedOn: formatIndiaDateTime(Date.now()), paymentPlan,
+        // The project's own start: its creation date, which an admin may back-date (adminCreateProjectOrder.js billingDate).
+        offer: order.projectSnapshot?.offer?.title || '', startedOn: formatIndiaDateTime(order.createdAt || Date.now()), paymentPlan,
         receivedSoFar: !isFree && paidNow > 0 ? money(paidNow) : '', dueNow: !isFree && paidNow <= 0 ? due : '',
       } };
     },
@@ -1385,12 +1386,13 @@ definitions['plan.started'] = {
   subject: 'Your plan {{plan}} has started',
   text: lines('Hello {{name}},', '',
     'Your plan **{{plan}}** is now active.', '',
-    '**What you get:** {{gets}}', '**Billing:** {{billing}}', '**Paid now:** {{paid}}', '**Plan runs until:** {{endsOn}}', '',
+    '**What you get:** {{gets}}', '**Billing:** {{billing}}', '**Paid now:** {{paid}}', '**Started on:** {{startedOn}}', '**Plan runs until:** {{endsOn}}', '',
     'You can send your data from your plan page whenever you are ready. We will tell you at every step.',
     '**Your plan:** {{link}}', '', ...SIGN_OFF),
   variables: {
     name: NAME, plan: PLAN, gets: detail('What the customer gets', '3 update(s) per billing period, 20 files per update', 'Empty for a plan without uploads'),
     billing: detail('Billing', 'Every 3 months', '“One-time” for a one-time plan'), paid: detail('Paid now', '₹4,336', 'Empty when nothing was paid yet'),
+    startedOn: detail('Plan start date', '1 Oct 2026', 'The date the plan started; an admin may back-date it'),
     endsOn: detail('Plan end date', '28 Apr 2027', 'Empty when the plan has no end date'), link: PLAN_LINK,
   },
   blocks: {},
@@ -1401,7 +1403,7 @@ definitions['plan.started'] = {
     return { to: [user.email], values: {
       name: text(user.name), plan: planTitle(order), gets: planGets(order),
       billing: CYCLE_WORDS[s.selectedBillingCycle] || 'One-time', paid: invoice?.status === 'paid' ? money(invoice.amount) : '',
-      endsOn: day(order.servicePlanEndDate), link: planLink(order),
+      startedOn: day(order.servicePlanStartDate || order.createdAt), endsOn: day(order.servicePlanEndDate), link: planLink(order),
     } };
   },
 };

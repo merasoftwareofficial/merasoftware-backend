@@ -4,13 +4,27 @@ const { addMonths } = require('./projectInstallments');
 const { freezePaymentPolicy } = require('./offerPaymentPolicy');
 
 // A package quoted for a project: with a reservation, at the offer it froze (as it was when reserved), even
-// after the offer ended or the package let it go; otherwise at the live package and offers.
-const quotePackageForProject = (packageItem, reserved, offers) => (reserved
-  ? quotePackage({ ...packageItem, offerSlug: reserved.offerSlug, regularPrice: Number(reserved.offerSnapshot.mainPrice ?? packageItem.regularPrice), offerExtraPrice: 0 }, [reserved.offerSnapshot], new Date(reserved.reservedAt).getTime())
-  : quotePackage(packageItem, offers));
+// after the offer ended or the package let it go; with an ended offer the admin applies (endedOfferFor below),
+// at that offer as it was on its last moment; otherwise at the live package and offers.
+const quotePackageForProject = (packageItem, reserved, offers, endedOffer = null) => {
+  if (reserved) return quotePackage({ ...packageItem, offerSlug: reserved.offerSlug, regularPrice: Number(reserved.offerSnapshot.mainPrice ?? packageItem.regularPrice), offerExtraPrice: 0 }, [reserved.offerSnapshot], new Date(reserved.reservedAt).getTime());
+  if (endedOffer) return quotePackage(packageItem, [endedOffer], Date.parse(endedOffer.endsAt) - 1);
+  return quotePackage(packageItem, offers);
+};
+
+// The package's OWN offer once it has ended (owner decision 12 Nov 2026: an admin may still sell a package at
+// its ended offer, with a reason; only the offer the package is linked to, never another one). It must still be
+// published (an archived offer was withdrawn) and have applied to this package's category while it ran.
+// `offers` is the website's whole catalogue (fetchWebsiteCatalogue keeps ended offers).
+function endedOfferFor(packageItem, offers, now = Date.now()) {
+  const offer = (offers || []).find(row => row.slug === packageItem?.offerSlug);
+  if (!offer || !offer.endsAt || Date.parse(offer.endsAt) > now) return null;
+  return offerEligible(offer, packageItem.category, Date.parse(offer.endsAt) - 1) ? offer : null;
+}
 
 // Resolve the commercial agreement before writing an order, invoice or payment.
-async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal, userId }) {
+// `actorId`: the admin creating the project (adminCreateProjectOrder.js), recorded when an ended offer is applied.
+async function resolveProjectPricing({ body, category, basePrice, features, referenceTotal, userId, actorId = null }) {
   if (!body.packageId && !body.offerSlug) return null; // Existing custom-project pricing stays available.
   if (body.offerSlug && userId) await require('./reservationRelease').repairUserReservationLinks(userId);
   let reserved = null;
@@ -24,15 +38,29 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
     // A paused reservation (the customer asked to start) is still open whatever its old deadline says.
     if (!reserved || reserved.offerSlug !== body.offerSlug || reserved.projectId || (!isPaused(reserved) && deadlineOf(reserved) <= new Date())) fail('This customer reservation is unavailable or expired', 409);
   }
+  // An ended offer the admin applies anyway (endedOfferFor): only with a package, never with a reservation
+  // (an expired reservation is extended instead), and always with a written reason kept on the agreement.
+  let endedOffer = null;
+  const endedOfferReason = String(body.endedOfferReason || '').trim();
+  if (body.endedOfferSlug) {
+    if (reserved) fail('Use either the reservation or the ended offer, not both');
+    if (!body.packageId) fail('An ended offer can only be applied to a package');
+    if (!actorId) fail('Only an admin can apply an ended offer', 403);
+    if (!endedOfferReason || endedOfferReason.length > 300) fail('Enter why the ended offer is applied (up to 300 characters)');
+  }
   const { offers } = reserved ? { offers: [reserved.offerSnapshot] } : await fetchWebsiteCatalogue();
   const extrasTotal = money(features.reduce((sum, item) => sum + item.price, 0));
   let packageItem = null, quote, scope, packageQuoteKey = null, monthly = null;
   if (body.packageId) {
     packageItem = (await readPackages()).find(item => item.id === body.packageId && item.status === 'published');
     if (!packageItem || packageItem.category !== category) fail('This package is unavailable for the selected project category');
+    if (body.endedOfferSlug) {
+      endedOffer = endedOfferFor(packageItem, offers);
+      if (!endedOffer || endedOffer.slug !== body.endedOfferSlug) fail('This package has no ended offer to apply. Refresh packages.', 409);
+    }
     // With a reservation the package is quoted with the frozen offer, as it was when reserved, even after
     // the offer ended or the package let it go; the reservation's own key is the version check.
-    const quoted = quotePackageForProject(packageItem, reserved, offers);
+    const quoted = quotePackageForProject(packageItem, reserved, offers, endedOffer);
     if (reserved) {
       if (!quoted.quote.offer) fail('This reservation does not apply to this package', 409);
       if (!body.offerQuoteKey || body.offerQuoteKey !== reserved.offerSnapshot.quoteKey) fail('Offer changed. Refresh offers and review the price.', 409);
@@ -68,9 +96,11 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
   const term = monthly ? { ...monthly.monthly, unitPrice: monthly.unitPrice, regularUnitPrice: monthly.regularUnitPrice,
     startsAt: now, endsAt: addMonths(now, monthly.monthly.tenureMonths) } : null;
   // Recheck at the final decision point, including requests crossing the deadline.
-  if (quote.offer && !reserved && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
+  if (quote.offer && !reserved && !endedOffer && Date.parse(quote.offer.endsAt) <= now.getTime()) fail('Offer has expired. Refresh the price before continuing.', 409);
   return {
-    sourceOffer: quote.offer || null,
+    // An ended offer is not attached to the reservation system (offerReservations.js attachProjectReservation
+    // refuses an ended offer): the agreement keeps the offer and how it was applied, no reservation row is made.
+    sourceOffer: endedOffer ? null : quote.offer || null,
     sourceReservationId: reserved?._id || null,
     paymentPolicy: freezePaymentPolicy(quote.offer, now),
     finalPrice: calculatedTotal,
@@ -98,8 +128,9 @@ async function resolveProjectPricing({ body, category, basePrice, features, refe
         slug: quote.offer.slug, title: quote.offer.title, endsAt: quote.offer.endsAt,
         pricingRule: quote.offer.pricingRule, mainPrice: quote.offer.mainPrice, offerPrice: quote.offer.offerPrice,
         benefitValue: quote.offer.benefitValue, terms: quote.offer.resolvedTerms || [], appliedAt: now,
+        ...(endedOffer ? { appliedAfterEnd: { reason: endedOfferReason, by: actorId ? String(actorId) : null, at: now } } : {}),
       } : null,
     },
   };
 }
-module.exports = { resolveProjectPricing, quotePackageForProject };
+module.exports = { resolveProjectPricing, quotePackageForProject, endedOfferFor };
