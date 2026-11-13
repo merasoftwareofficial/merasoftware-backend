@@ -15,8 +15,6 @@ const RECENT_ROWS = 20;
 const SWITCHES = ['recognise', 'sendReplies', 'addLeads'];
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(communicationAdmin);
-// Communication > Actions: the list of data-changing actions and the owner's changes to it (admin only, as above).
-router.use('/actions', require('./communicationActions'));
 const handle = fn => async (req, res) => {
   try { res.json({ success: true, data: await fn(req) }); }
   catch (error) { res.status(error.status || error.statusCode || 400).json({ success: false, message: error.message }); }
