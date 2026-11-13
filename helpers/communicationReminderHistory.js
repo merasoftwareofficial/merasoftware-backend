@@ -3,16 +3,18 @@ const Rule = require('../models/communicationReminderRuleModel');
 const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
 
-async function reminderHistory({ page = 1, pageSize = 20, view = 'all', now = new Date() } = {}) {
+async function reminderHistory({ page = 1, pageSize = 20, view = 'all', source = 'all', now = new Date() } = {}) {
   page = Math.max(1, Math.min(100000, Number.parseInt(page, 10) || 1));
   pageSize = Math.max(1, Math.min(50, Number.parseInt(pageSize, 10) || 20));
   if (!['all', 'upcoming', 'today', 'sent', 'sent_today', 'attention'].includes(view)) throw new Error('Choose a valid reminder view.');
+  if (!['all', 'monthly_package', 'broadcast'].includes(source)) throw new Error('Choose a valid reminder source.');
   const dayStart = new Date(Math.floor((+now + 19800000) / 86400000) * 86400000 - 19800000);
   const filter = view === 'upcoming' ? { status: 'scheduled', dueAt: { $gt: now } }
     : view === 'today' ? { dueAt: { $gte: dayStart, $lt: new Date(+dayStart + 86400000) } }
     : view === 'sent_today' ? { status: 'sent', sentAt: { $gte: dayStart, $lt: new Date(+dayStart + 86400000) } }
     : view === 'sent' ? { status: 'sent' }
     : view === 'attention' ? { status: { $in: ['failed', 'partial', 'unknown', 'expired'] } } : {};
+  if (source !== 'all') filter.source = source;
   const [rows, total] = await Promise.all([
     Run.find(filter).sort({ dueAt: view === 'upcoming' ? 1 : -1, _id: view === 'upcoming' ? 1 : -1 }).skip((page - 1) * pageSize).limit(pageSize)
       .select('ruleId clientId source cycle step dueAt sentAt status reason channel channelOutcomes').lean(),

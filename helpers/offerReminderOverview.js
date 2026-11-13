@@ -2,8 +2,7 @@ const Invoice = require('../models/invoiceModel');
 const Order = require('../models/orderProductModel');
 const User = require('../models/userModel');
 const { EmailPolicy, EmailHistory } = require('../models/emailControlModel');
-const { DAY } = require('./offerPaymentPolicy');
-const { isInstallmentDue } = require('./projectDuePayment');
+const { offerReminderState } = require('./offerReminderState');
 
 // This is an invoice list, not a scheduler. It never creates missing invoices or
 // marks overdue records. The worker remains authoritative for all delivery decisions.
@@ -33,21 +32,11 @@ async function offerReminderOverview({ page = 1, pageSize = 20, view = 'active',
     remindersEnabled: policy?.mode !== 'off', cronEnabled: process.env.ENABLE_CRONS === 'true',
     rows: rows.map(invoice => {
       const order = invoice.orders, customer = byId.get(String(invoice.userId));
-      let reason = view === 'completed' ? 'This invoice is closed; no payment reminder is due.' : invoice.offerRemindersPaused ? 'Payment reminders are paused for this invoice.' : '';
-      if (!reason && order.isServicePlan && Number(invoice.serviceCycleNumber) > 1 && order.paymentPolicy.cycleScope !== 'every_cycle') reason = 'Offer terms apply to the first cycle only.';
-      else if (!reason && invoice.installmentNumber && invoice.installmentNumber !== order.currentInstallment) reason = 'This is not the current installment.';
-      else if (!reason && invoice.installmentNumber) {
-        const installment = (order.installments || []).find(item => item.installmentNumber === invoice.installmentNumber);
-        if (installment && !isInstallmentDue(order, installment, now)) reason = 'This installment is not due yet.';
-      }
-      if (!reason && (!customer?.email || customer.isActive === false || customer.deletedAt)) reason = 'Customer account or email is unavailable.';
-      const offsets = order.paymentPolicy.reminderOffsets || [];
-      if (!reason && !offsets.length) reason = 'No reminder days in the saved agreement.';
-      const due = new Date(invoice.dueDate);
-      const future = Number.isFinite(+due) ? offsets.map(offset => ({ offset, at: new Date(+due + offset * DAY) })).filter(item => item.at > now).sort((a, b) => a.at - b.at) : [];
+      const { reason, offsets, nextMilestone } = offerReminderState(invoice, order, customer, now,
+        view === 'completed' ? 'This invoice is closed; no payment reminder is due.' : invoice.offerRemindersPaused ? 'Payment reminders are paused for this invoice.' : '');
       return { id: String(invoice._id), userId: String(invoice.userId), remindersPaused: !!invoice.offerRemindersPaused, orderId: String(invoice.orderId), customer: customer?.name || customer?.email || 'Customer', invoiceNumber: invoice.invoiceNumber,
         dueDate: invoice.dueDate, status: invoice.status, outstanding: Math.max(0, Number(invoice.amount || 0) - Number(invoice.amountPaid || 0)),
-        offsets, reason, nextMilestone: reason ? null : future[0] || null,
+        offsets, reason, nextMilestone,
         reminderHistory: offsets.flatMap(offset => {
           const entry = historyByKey.get(`offer-reminder:${invoice._id}:${offset}`);
           return entry ? [{ offset, status: entry.status, at: entry.sentAt || entry.updatedAt || null,
