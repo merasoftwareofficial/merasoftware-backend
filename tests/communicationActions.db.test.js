@@ -18,7 +18,7 @@ const userId = new mongoose.Types.ObjectId();
 
 test('list shows every catalog action with no changes at first', async () => {
   const { actions, surfaces, categories } = await service.list();
-  assert.equal(actions.length, 178);
+  assert.equal(actions.length, 179);
   assert.deepEqual(surfaces, ['Admin', 'Client', 'Website', 'System']);
   const names = categories.map(item => item.name);
   assert.equal(names[0], 'Admin settings', 'categories keep the page order');

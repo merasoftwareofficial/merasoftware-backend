@@ -10,6 +10,12 @@ const step = new Schema({
   text: { type: String, required: true },
 }, { _id: false });
 
+const doAlsoStep = new Schema({
+  type: { type: String, enum: ['change_lead_stage', 'add_lead_note', 'stop_reminders'], required: true },
+  stage: { type: String, default: '' },
+  note: { type: String, default: '' },
+}, { _id: false });
+
 // "When action X happens, send these steps (and repeats) until a stop action happens" (Reminder.md §4).
 // Saving a change raises `revision`; runs already scheduled keep the text they were planned with.
 const rule = new Schema({
@@ -26,6 +32,7 @@ const rule = new Schema({
   steps: { type: [step], default: [] },
   repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 10, default: 0 } },
   stopOn: { type: [String], default: [] },
+  doAlso: { type: [doAlsoStep], default: [] },
   control: { type: String, enum: ['auto', 'off'], default: 'off' },
   enabled: { type: Boolean, default: false },
   activatedAt: Date,

@@ -1,6 +1,8 @@
 const crypto = require('node:crypto');
 const Lead = require('../models/leadModel');
+const ActionRule = require('../models/communicationActionRuleModel');
 const { AUTO_REPLY_EVENT, FinalMessage, Inbox, Lock, OUR_SIDE_REPLIED, Queue, Rule, State, STATE_ID, finishedExpiry } = require('../whatsapp/src/models.js');
+const { enabled: actionRulesEnabled, whatsappAdReceived } = require('./actionEvents');
 const { RULE_KEY } = require('../whatsapp/src/autoReplyRules.js');
 const { CONTACTED, DEAD, INQUIRY, NEGATIVE } = require('./leadStatuses');
 const { clearClientDead, endFinalMessage, findAccountsByPhone, findLeadsByContactNumber, isKnownPerson, liveFirst, phoneKey } = require('./leadPhone');
@@ -99,12 +101,22 @@ async function recordKnownPerson(row, accounts) {
   return 'created';
 }
 
+const hasActionReplyRule = async () => (actionRulesEnabled()
+  ? Boolean(await ActionRule.exists({ action: 'whatsapp.ad_received', enabled: true, control: 'auto', audience: 'customer' }))
+  : false);
+
 /** Someone the business already knows wrote from an ad: their lead notes it and they get the reply, whatever the stage. */
 async function processKnownPerson(row, switches, rule) {
   const accounts = await findAccountsByPhone(row.phone);
   if (accounts.some(user => !user.deletedAt && !user.isGuest && user.roles?.some(role => TEAM_ROLES.includes(role)))) return 'team-number';
   const recorded = switches.addLeads ? await recordKnownPerson(row, accounts) : null;
-  const replied = switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
+  const client = accounts.find(isClient);
+  if (!row.ourSideReplied && actionRulesEnabled()) {
+    const saved = await Inbox.findById(row._id).select('leadId matchedLeadId').lean();
+    await whatsappAdReceived(row, { leadId: saved?.leadId || saved?.matchedLeadId || null, clientId: client?._id || null });
+  }
+  const managedByAction = await hasActionReplyRule();
+  const replied = !managedByAction && switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
   if (recorded === 'created') return replied ? 'lead-and-reply' : 'lead-only';
   if (recorded) return replied ? 'updated-and-reply' : 'updated-only';
   return replied ? 'reply-only' : 'known-person';
@@ -149,8 +161,12 @@ async function processRow(row, switches, rule) {
   }
   if (known) return processKnownPerson(row, switches, rule);
   const lead = switches.addLeads ? await makeLead(row) : null;
+  if (lead && !row.ourSideReplied && actionRulesEnabled()) {
+    await whatsappAdReceived(row, { leadId: lead });
+  }
+  const managedByAction = await hasActionReplyRule();
   // A message from our side stops the reply, not the lead: the person still wrote in.
-  const replied = switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
+  const replied = !managedByAction && switches.sendReplies && !row.ourSideReplied ? await queueReply(row, rule) : false;
   if (lead && replied) return 'lead-and-reply';
   if (lead) return 'lead-only';
   if (replied) return 'reply-only';

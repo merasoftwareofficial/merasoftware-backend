@@ -5,7 +5,9 @@ const Run = require('../models/communicationReminderRunModel');
 const Invoice = require('../models/invoiceModel');
 const Order = require('../models/orderProductModel');
 const User = require('../models/userModel');
+const Lead = require('../models/leadModel');
 const { ACTIONS, enabled } = require('./actionEvents');
+const { SELECTABLE_LEAD_STATUSES, WON } = require('./leadStatuses');
 const { teamContacts, teamRecipients } = require('./teamContacts');
 
 // Action rules (Reminder.md §4). Every minute (index.js, ACTION_RULES_ENABLED):
@@ -22,6 +24,9 @@ async function orderFullyPaid(orderId) {
 }
 
 async function resolveEventContext(event) {
+  if (event.action === 'whatsapp.ad_received') {
+    return { invoice: null, order: null, isPaid: false, isMonthly: false, packageSlug: '', dueDate: null };
+  }
   let invoice = null;
   let order = null;
   if (event.action === 'invoice.created' || event.action === 'payment.received') {
@@ -87,12 +92,14 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null) {
     occurrenceKey: event.key,
     step,
     entityId: event.entityId,
-    clientId: event.clientId,
+    clientId: event.clientId || null,
+    leadId: event.leadId || null,
     dueAt: send.dueAt,
     channel: send.channel,
     subject: send.subject || ACTIONS[event.action].label,
     text: send.text,
     stopOn: rule.stopOn,
+    doAlso: Array.isArray(rule.doAlso) ? rule.doAlso : [],
     matchKeys: event.matchKeys,
     status: 'scheduled',
   }));
@@ -105,7 +112,7 @@ async function handleEvent(event) {
     await Run.updateMany({ source: 'action', status: 'scheduled', stopOn: event.action, matchKeys: { $in: keys } },
       { $set: { status: 'cancelled', reason: `Stopped: ${ACTIONS[event.action].label}.` } });
   }
-  if (!event.clientId) return;
+  if (!event.clientId && !event.leadId) return;
   const rules = await Rule.find({ action: event.action, enabled: true, control: 'auto', activatedAt: { $lte: event.occurredAt } }).lean();
   if (!rules.length) return;
   const ctx = await resolveEventContext(event);
@@ -141,11 +148,21 @@ async function processEvents(limit = 200) {
 async function stillValid(run) {
   const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: 'auto' }).select('_id condition').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
-  const client = await User.findById(run.clientId).select('name email phone isActive isGuest deletedAt').lean();
-  if (!client || client.isActive === false || client.isGuest || client.deletedAt) return { ok: false, reason: 'Customer is unavailable.' };
+  let client = null;
+  let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
+  if (run.clientId) {
+    client = await User.findById(run.clientId).select('name email phone isActive isGuest deletedAt').lean();
+    if (!client || client.isActive === false || client.isGuest || client.deletedAt) return { ok: false, reason: 'Customer is unavailable.' };
+  } else if (lead && !lead.deletedAt) {
+    client = { name: lead.name || 'Customer', email: lead.email || '', phone: lead.phone || '' };
+  } else {
+    return { ok: false, reason: 'Customer or lead is unavailable.' };
+  }
   const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid';
   let invoice = null, order = null;
-  if (run.action === 'invoice.created' || run.action === 'payment.received') {
+  if (run.action === 'whatsapp.ad_received') {
+    // No invoice or order attached to an incoming WhatsApp message.
+  } else if (run.action === 'invoice.created' || run.action === 'payment.received') {
     invoice = await Invoice.findById(run.entityId).lean();
     if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
     if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
@@ -158,9 +175,9 @@ async function stillValid(run) {
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
     if (!contacts.length) return { ok: false, reason: 'No admin contact configured.' };
-    return { ok: true, client, invoice, order, contacts };
+    return { ok: true, client, lead, invoice, order, contacts };
   }
-  return { ok: true, client, invoice, order };
+  return { ok: true, client, lead, invoice, order };
 }
 
 // Same check for the email provider and WhatsApp handoff (communicationReminderEligibility.js),
@@ -184,6 +201,51 @@ async function actionEligibility(run, target = {}) {
 const day = value => (value ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(value)) : '');
 function portalLink(path) {
   try { const base = new URL(process.env.FORNTEND_URL); return ['http:', 'https:'].includes(base.protocol) ? new URL(path, base).toString() : ''; } catch { return ''; }
+}
+
+async function executeDoAlso(run, check, values, render) {
+  const steps = Array.isArray(run.doAlso) ? run.doAlso : [];
+  if (!steps.length || run.step !== 0) return;
+  try {
+    let lead = check.lead && !check.lead.deletedAt ? check.lead : null;
+    if (!lead && run.clientId) {
+      lead = await Lead.findOne({ convertedToUserId: run.clientId, deletedAt: null }).select('_id status convertedToUserId').lean();
+    }
+    let leadStatus = lead?.status || 'Contacted';
+    const now = new Date();
+    for (const item of steps) {
+      if (item.type === 'change_lead_stage') {
+        if (lead && !lead.convertedToUserId && leadStatus !== WON && SELECTABLE_LEAD_STATUSES.includes(item.stage)) {
+          await Lead.updateOne(
+            { _id: lead._id },
+            { $set: { status: item.stage }, $push: { followUps: { note: 'Stage updated automatically by Action rule.', badge: item.stage, date: now, createdAt: now } } },
+          );
+          leadStatus = item.stage;
+        }
+      } else if (item.type === 'add_lead_note') {
+        const note = render(String(item.note || ''), values, {}, { plain: true }).trim();
+        if (lead && note) {
+          await Lead.updateOne(
+            { _id: lead._id },
+            { $push: { followUps: { note, badge: leadStatus, date: now, createdAt: now } } },
+          );
+        }
+      } else if (item.type === 'stop_reminders') {
+        const targets = [
+          ...(run.clientId ? [{ clientId: run.clientId }] : []),
+          ...(run.leadId ? [{ leadId: run.leadId }] : []),
+        ];
+        if (targets.length) {
+          await Run.updateMany(
+            { _id: { $ne: run._id }, source: 'action', status: 'scheduled', $or: targets },
+            { $set: { status: 'cancelled', reason: 'Stopped automatically by Action rule.' } },
+          );
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[action doAlso]', error.message);
+  }
 }
 
 async function dispatchRun(runId, now = new Date()) {
@@ -224,6 +286,7 @@ async function dispatchRun(runId, now = new Date()) {
     };
     const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', { channel: run.channel });
     if (result === 'sent') {
+      await executeDoAlso(run, check, values, render);
       const { EmailDraft } = require('../models/emailControlModel');
       const draft = await EmailDraft.findOne({ dedupeKey: key }).select('_id delivery sentAt').lean();
       const queued = draft?.delivery?.whatsappStatus === 'queued';
@@ -261,4 +324,4 @@ async function processActionRules(now = new Date()) {
   return { enabled: true, events, dispatched };
 }
 
-module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext };
+module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso };

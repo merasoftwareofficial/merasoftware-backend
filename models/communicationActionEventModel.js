@@ -10,6 +10,7 @@ const event = new Schema({
   action: { type: String, required: true },
   entityId: { type: Schema.Types.ObjectId, required: true },
   clientId: { type: Schema.Types.ObjectId, default: null },
+  leadId: { type: Schema.Types.ObjectId, default: null },
   orderId: { type: Schema.Types.ObjectId, default: null },
   matchKeys: { type: [String], default: [] },
   details: { type: Schema.Types.Mixed, default: {} },

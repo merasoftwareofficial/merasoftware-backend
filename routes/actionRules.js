@@ -2,6 +2,7 @@ const express = require('express');
 const ActionRule = require('../models/communicationActionRuleModel');
 const Run = require('../models/communicationReminderRunModel');
 const User = require('../models/userModel');
+const Lead = require('../models/leadModel');
 const { ACTIONS } = require('../helpers/actionEvents');
 const { createRule, updateRule, setRuleEnabled, deleteRule } = require('../helpers/actionRules');
 
@@ -22,15 +23,18 @@ router.get('/runs', handle(async () => {
   const runs = await Run.find({ source: 'action', status: 'scheduled' }).sort({ dueAt: 1 }).limit(200).lean();
   if (!runs.length) return [];
   const clientIds = [...new Set(runs.map(r => String(r.clientId || '')).filter(Boolean))];
+  const leadIds = [...new Set(runs.filter(r => !r.clientId && r.leadId).map(r => String(r.leadId)))];
   const ruleIds = [...new Set(runs.map(r => String(r.ruleId || '')).filter(Boolean))];
-  const [users, rules] = await Promise.all([
+  const [users, leads, rules] = await Promise.all([
     clientIds.length ? User.find({ _id: { $in: clientIds } }).select('name email phone').lean() : [],
+    leadIds.length ? Lead.find({ _id: { $in: leadIds } }).select('name email phone').lean() : [],
     ruleIds.length ? ActionRule.find({ _id: { $in: ruleIds } }).select('name action audience').lean() : [],
   ]);
   const userById = new Map(users.map(u => [String(u._id), u]));
+  const leadById = new Map(leads.map(l => [String(l._id), l]));
   const ruleById = new Map(rules.map(r => [String(r._id), r]));
   return runs.map(run => {
-    const user = userById.get(String(run.clientId));
+    const user = userById.get(String(run.clientId)) || leadById.get(String(run.leadId));
     const rule = ruleById.get(String(run.ruleId));
     return {
       ...run,

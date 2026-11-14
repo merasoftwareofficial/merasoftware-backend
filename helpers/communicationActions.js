@@ -26,6 +26,7 @@ const TRIGGER_BY_ACTION_ID = {
   A118: 'project.completed',
   A119: 'project.completed',
   A120: 'project.completed',
+  B49: 'whatsapp.ad_received',
 };
 
 const CATEGORY_MAX = 60;

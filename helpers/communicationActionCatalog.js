@@ -183,5 +183,6 @@ const ACTIONS = [
   { id: 'B46', method: 'POST', endpoint: '/api/whatsapp-control/queue/:id/retry', surface: 'Admin', category: 'Broadcast & WhatsApp', note: 'sends messages' },
   { id: 'B47', method: 'POST', endpoint: '/api/whatsapp-control/settings', surface: 'Admin', category: 'Broadcast & WhatsApp', note: '' },
   { id: 'B48', method: 'POST', endpoint: '/api/whatsapp-control/settings/reset', surface: 'Admin', category: 'Broadcast & WhatsApp', note: '' },
+  { id: 'B49', method: 'POST', endpoint: 'system:whatsapp.ad_received', surface: 'System', category: 'Broadcast & WhatsApp', note: 'WhatsApp Auto Reply' },
 ];
 module.exports = { ACTIONS, SURFACES, UNSORTED: [...UNSORTED] };

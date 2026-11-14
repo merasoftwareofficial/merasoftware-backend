@@ -1,10 +1,12 @@
 const Rule = require('../models/communicationActionRuleModel');
 const { ACTIONS } = require('./actionEvents');
+const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 
 const MAX_SENDS = 20;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
 const CONDITIONS = ['anytime', 'unpaid', 'paid'];
 const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package'];
+const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
 const fail = message => { const error = new Error(message); error.status = 400; throw error; };
 const int = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 
@@ -61,6 +63,24 @@ function cleanRule(raw = {}) {
   if (stopOn.some(key => !ACTIONS[key])) fail('Choose a valid stop action.');
   if (!isTemplate && clean.length + times > 1 && !stopOn.length) fail('A reminder needs a stop action.');
 
+  const rawDoAlso = Array.isArray(raw.doAlso) ? raw.doAlso : [];
+  if (rawDoAlso.length > 5) fail('At most 5 automatic steps per rule.');
+  const doAlso = rawDoAlso.map((item, idx) => {
+    const type = item?.type;
+    if (!DO_ALSO_TYPES.includes(type)) fail(`Automatic step ${idx + 1}: invalid action type.`);
+    if (type === 'change_lead_stage') {
+      const stage = String(item.stage || '').trim();
+      if (!SELECTABLE_LEAD_STATUSES.includes(stage)) fail(`Automatic step ${idx + 1}: choose a valid lead stage.`);
+      return { type, stage, note: '' };
+    }
+    if (type === 'add_lead_note') {
+      const note = String(item.note || '').trim().slice(0, 500);
+      if (!note) fail(`Automatic step ${idx + 1}: write a follow-up note.`);
+      return { type, stage: '', note };
+    }
+    return { type: 'stop_reminders', stage: '', note: '' };
+  });
+
   const control = raw.control === 'auto' ? 'auto' : 'off';
   return {
     kind,
@@ -72,6 +92,7 @@ function cleanRule(raw = {}) {
     steps: clean,
     repeat: times ? { everyDays: raw.repeat.everyDays, times } : { times: 0 },
     stopOn,
+    doAlso,
     control,
   };
 }

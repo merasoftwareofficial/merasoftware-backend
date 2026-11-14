@@ -281,3 +281,58 @@ test('action-aware validation rejects unsupported condition or scope for payment
     steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Thanks' }],
   }), /scope is not available/i);
 });
+
+test('doAlso validation rejects Won stage, unknown type, or empty note', () => {
+  assert.throws(() => cleanRule({
+    kind: 'template',
+    action: 'whatsapp.ad_received',
+    doAlso: [{ type: 'change_lead_stage', stage: 'Won' }],
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Hi' }],
+  }), /valid lead stage/i);
+  assert.throws(() => cleanRule({
+    kind: 'template',
+    action: 'whatsapp.ad_received',
+    doAlso: [{ type: 'add_lead_note', note: '   ' }],
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Hi' }],
+  }), /follow-up note/i);
+  const valid = cleanRule({
+    kind: 'template',
+    action: 'whatsapp.ad_received',
+    doAlso: [{ type: 'change_lead_stage', stage: 'Positive' }, { type: 'add_lead_note', note: 'Auto replied' }, { type: 'stop_reminders' }],
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Hi' }],
+  });
+  assert.equal(valid.doAlso.length, 3);
+});
+
+test('whatsapp.ad_received plans lead-only run and executeDoAlso updates non-Won lead', async () => {
+  const Lead = require('../models/leadModel');
+  const lead = await Lead.create({ phone: '+919811122233', status: 'Inquiry', source: 'WhatsApp ad', name: 'Asha' });
+  const rule = await activeRule({
+    kind: 'template',
+    control: 'auto',
+    audience: 'customer',
+    action: 'whatsapp.ad_received',
+    doAlso: [{ type: 'change_lead_stage', stage: 'Positive' }, { type: 'add_lead_note', note: 'Replied to {name}' }],
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Welcome {name}' }],
+  });
+  const { whatsappAdReceived } = require('../helpers/actionEvents');
+  await whatsappAdReceived({ _id: new mongoose.Types.ObjectId(), phone: '919811122233', text: 'Interested', sentAt: new Date() }, { leadId: lead._id });
+  await worker.processEvents();
+  const run = await Run.findOne({ ruleId: rule._id }).lean();
+  assert.ok(run, 'run created for lead');
+  assert.equal(String(run.leadId), String(lead._id));
+  assert.equal(run.clientId, null);
+  assert.equal((await worker.actionEligibility(run, { phone: '+919811122233' })).allowed, true);
+
+  await worker.executeDoAlso(run, { lead }, { name: 'Asha' }, text => text.replace('{name}', 'Asha'));
+  const updated = await Lead.findById(lead._id).lean();
+  assert.equal(updated.status, 'Positive');
+  assert.equal(updated.followUps.length, 2);
+  assert.equal(updated.followUps[1].note, 'Replied to Asha');
+
+  // Won leads never change status via change_lead_stage.
+  const wonLead = await Lead.create({ phone: '+919811122244', status: 'Won', source: 'WhatsApp ad', name: 'Matured', convertedToUserId: customer._id });
+  await worker.executeDoAlso({ ...run, leadId: wonLead._id, clientId: customer._id }, { lead: wonLead }, { name: 'Matured' }, text => text);
+  const wonAfter = await Lead.findById(wonLead._id).lean();
+  assert.equal(wonAfter.status, 'Won');
+});

@@ -6,7 +6,7 @@ const { merge, validatePatch, clean } = require('../helpers/communicationActions
 test('catalog: every action has a unique id, a known surface and a category', () => {
   const ids = ACTIONS.map(action => action.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.equal(ACTIONS.length, 178);
+  assert.equal(ACTIONS.length, 179);
   for (const action of ACTIONS) {
     assert.ok(SURFACES.includes(action.surface), action.id);
     assert.ok(action.category, action.id);

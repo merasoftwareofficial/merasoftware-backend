@@ -180,6 +180,7 @@ const TEXT = [
   ['B46', 'Retry a WhatsApp message', 'Sends a queued or failed WhatsApp message again.', 'When an admin presses Retry.'],
   ['B47', 'Save WhatsApp settings', 'Saves the WhatsApp sending settings.', 'When an admin saves settings.'],
   ['B48', 'Reset WhatsApp settings', 'Restores the default WhatsApp settings.', 'When an admin presses Reset.'],
+  ['B49', 'WhatsApp ad message received', 'Triggered when an incoming WhatsApp message matches the Auto Reply ad text.', 'Automatically, when WhatsApp Auto Reply recognises an ad message.'],
 ];
 
 const TEXT_BY_ID = Object.fromEntries(TEXT.map(([id, title, what, when]) => [id, { title, what, when }]));
