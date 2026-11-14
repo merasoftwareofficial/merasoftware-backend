@@ -6,6 +6,7 @@ const Invoice = require('../models/invoiceModel');
 const Order = require('../models/orderProductModel');
 const User = require('../models/userModel');
 const { ACTIONS, enabled } = require('./actionEvents');
+const { teamContacts, teamRecipients } = require('./teamContacts');
 
 // Action rules (Reminder.md §4). Every minute (index.js, ACTION_RULES_ENABLED):
 // 1. each new action event stops matching scheduled runs, then plans runs for its enabled rules;
@@ -20,16 +21,80 @@ async function orderFullyPaid(orderId) {
   return !await Invoice.exists({ orderId, invoiceType: { $in: BILLED }, status: { $in: OPEN } });
 }
 
-// Steps first, then repeats after the last step. Due times count from the moment of the action.
-function planRuns(rule, event) {
-  const at = days => new Date(+new Date(event.occurredAt) + days * DAY);
-  const sends = rule.steps.map(step => ({ ...step, dueAt: at(step.afterDays) }));
-  const last = rule.steps[rule.steps.length - 1];
-  for (let n = 1; n <= (rule.repeat?.times || 0); n++) sends.push({ ...last, dueAt: at(last.afterDays + n * rule.repeat.everyDays) });
+async function resolveEventContext(event) {
+  let invoice = null;
+  let order = null;
+  if (event.action === 'invoice.created' || event.action === 'payment.received') {
+    invoice = await Invoice.findById(event.entityId).lean();
+    order = invoice?.orderId ? await Order.findById(invoice.orderId).lean() : null;
+  } else {
+    order = await Order.findById(event.entityId).lean();
+    if (order) {
+      invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } })
+        .sort({ createdAt: -1 }).lean();
+    }
+  }
+  const isPaid = invoice ? !OPEN.includes(invoice.status) : await orderFullyPaid(order?._id);
+  const isMonthly = invoice?.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
+  const packageSlug = String(
+    order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
+    order?.servicePlanSnapshot?.packageSlug || '',
+  ).trim();
+  const dueDate = invoice?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
+  return { invoice, order, isPaid, isMonthly, packageSlug, dueDate };
+}
+
+function ruleMatchesContext(rule, ctx) {
+  if (rule.condition === 'unpaid' && ctx.isPaid) return false;
+  if (rule.condition === 'paid' && !ctx.isPaid) return false;
+  const scopeKind = rule.scope?.kind || 'all';
+  if (scopeKind === 'monthly' && !ctx.isMonthly) return false;
+  if (scopeKind === 'one_time' && ctx.isMonthly) return false;
+  if (scopeKind === 'package' && (!rule.scope?.packageSlug || ctx.packageSlug !== rule.scope.packageSlug)) return false;
+  return true;
+}
+
+function stepDueAt(step, occurredAt, dueDate) {
+  const days = step.days !== undefined ? step.days : (step.afterDays || 0);
+  const ref = step.timingRef || 'after_action';
+  if (ref === 'after_action') return new Date(+new Date(occurredAt) + days * DAY);
+  if (!dueDate) return null;
+  const base = +new Date(dueDate);
+  if (ref === 'before_due') return new Date(base - days * DAY);
+  if (ref === 'on_due') return new Date(base);
+  if (ref === 'after_due') return new Date(base + days * DAY);
+  return null;
+}
+
+// Steps first, then repeats after the last step.
+function planRuns(rule, event, dueDate = event.details?.dueDate || null) {
+  const sends = [];
+  for (const step of rule.steps) {
+    const dueAt = stepDueAt(step, event.occurredAt, dueDate);
+    if (dueAt) sends.push({ ...step, dueAt });
+  }
+  if (!sends.length) return [];
+  const last = sends[sends.length - 1];
+  for (let n = 1; n <= (rule.repeat?.times || 0); n++) {
+    sends.push({ ...last, dueAt: new Date(+last.dueAt + n * rule.repeat.everyDays * DAY) });
+  }
   return sends.map((send, step) => ({
-    ruleId: rule._id, ruleRevision: rule.revision, source: 'action', action: event.action, occurrenceKey: event.key, step,
-    entityId: event.entityId, clientId: event.clientId, dueAt: send.dueAt, channel: send.channel,
-    subject: send.subject || ACTIONS[event.action].label, text: send.text, stopOn: rule.stopOn, matchKeys: event.matchKeys, status: 'scheduled',
+    ruleId: rule._id,
+    ruleRevision: rule.revision,
+    source: 'action',
+    action: event.action,
+    audience: rule.audience || 'customer',
+    occurrenceKey: event.key,
+    step,
+    entityId: event.entityId,
+    clientId: event.clientId,
+    dueAt: send.dueAt,
+    channel: send.channel,
+    subject: send.subject || ACTIONS[event.action].label,
+    text: send.text,
+    stopOn: rule.stopOn,
+    matchKeys: event.matchKeys,
+    status: 'scheduled',
   }));
 }
 
@@ -42,8 +107,11 @@ async function handleEvent(event) {
   }
   if (!event.clientId) return;
   const rules = await Rule.find({ action: event.action, enabled: true, control: 'auto', activatedAt: { $lte: event.occurredAt } }).lean();
+  if (!rules.length) return;
+  const ctx = await resolveEventContext(event);
   for (const rule of rules) {
-    for (const run of planRuns(rule, event)) {
+    if (!ruleMatchesContext(rule, ctx)) continue;
+    for (const run of planRuns(rule, event, ctx.dueDate)) {
       const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
       await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
     }
@@ -71,31 +139,43 @@ async function processEvents(limit = 200) {
 // The check right before sending: the reason for the message must still be true, even if the
 // stop action came through a path that records no event.
 async function stillValid(run) {
-  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: 'auto' }).select('_id').lean();
+  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: 'auto' }).select('_id condition').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   const client = await User.findById(run.clientId).select('name email phone isActive isGuest deletedAt').lean();
   if (!client || client.isActive === false || client.isGuest || client.deletedAt) return { ok: false, reason: 'Customer is unavailable.' };
-  const waitsForPayment = (run.stopOn || []).includes('payment.received');
+  const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid';
   let invoice = null, order = null;
   if (run.action === 'invoice.created' || run.action === 'payment.received') {
     invoice = await Invoice.findById(run.entityId).lean();
     if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
     if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
-    order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot orderVisibility').lean() : null;
+    order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot salesPackage orderVisibility serviceNextBillingDate serviceBillingCycleMonths').lean() : null;
   } else {
-    order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot orderVisibility status servicePlanStatus').lean();
+    order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
     if (waitsForPayment && await orderFullyPaid(order._id)) return { ok: false, reason: 'Payment is complete.' };
+  }
+  if (run.audience === 'admin') {
+    const contacts = await teamContacts();
+    if (!contacts.length) return { ok: false, reason: 'No admin contact configured.' };
+    return { ok: true, client, invoice, order, contacts };
   }
   return { ok: true, client, invoice, order };
 }
 
 // Same check for the email provider and WhatsApp handoff (communicationReminderEligibility.js),
-// plus: the destination must still be the customer's current email or phone.
+// plus: the destination must still match the customer or configured admin contacts.
 async function actionEligibility(run, target = {}) {
   const check = await stillValid(run);
   if (!check.ok) return { allowed: false, reason: check.reason };
   const digits = value => String(value || '').replace(/\D/g, '');
+  if (run.audience === 'admin') {
+    const adminEmails = new Set((await teamRecipients()).map(e => e.toLowerCase()));
+    const adminPhones = new Set((check.contacts || []).flatMap(c => c.numbers).map(n => digits(n).slice(-10)).filter(Boolean));
+    if (target.phone && !adminPhones.has(digits(target.phone).slice(-10))) return { allowed: false, reason: 'Admin WhatsApp destination changed.' };
+    if (target.emails?.length && target.emails.some(e => !adminEmails.has(String(e).toLowerCase()))) return { allowed: false, reason: 'Admin email destination changed.' };
+    return { allowed: true, candidate: check };
+  }
   if (target.phone && digits(target.phone).slice(-10) !== digits(check.client.phone).slice(-10)) return { allowed: false, reason: 'WhatsApp destination changed.' };
   if (target.emails?.length && (target.emails.length !== 1 || String(target.emails[0]).toLowerCase() !== String(check.client.email || '').toLowerCase())) return { allowed: false, reason: 'Email destination changed.' };
   return { allowed: true, candidate: check };
@@ -115,14 +195,33 @@ async function dispatchRun(runId, now = new Date()) {
   try {
     const check = await stillValid(run);
     if (!check.ok) { await finish('cancelled', { reason: check.reason }); return 'cancelled'; }
-    const { client, invoice, order } = check;
-    const values = { name: client.name || 'Customer', project: order?.orderItems?.[0]?.name || order?.servicePlanSnapshot?.serviceName || '',
-      amount: invoice ? `₹${Number(invoice.amount - (invoice.amountPaid || 0)).toLocaleString('en-IN')}` : '', dueDate: day(invoice?.dueDate),
-      invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : '' };
+    const { client, invoice, order, contacts } = check;
+    const planName = order?.salesPackage?.packageName || order?.salesPackage?.name || order?.servicePlanSnapshot?.serviceName || order?.orderItems?.[0]?.name || '';
+    const months = order?.salesPackage?.months || order?.serviceBillingCycleMonths || order?.servicePlanSnapshot?.selectedBillingCycleMonths;
+    const duration = months ? `${months} month${months > 1 ? 's' : ''}` : '';
+    const values = {
+      name: client.name || 'Customer',
+      project: order?.orderItems?.[0]?.name || planName,
+      planName,
+      duration,
+      amount: invoice ? `₹${Number(invoice.amount - (invoice.amountPaid || 0)).toLocaleString('en-IN')}` : '',
+      dueDate: day(invoice?.dueDate || order?.serviceNextBillingDate),
+      invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : '',
+    };
     const key = `action-rule:${run._id}`;
     const { render } = require('./emailMarkup');
-    const mail = { reviewed: true, to: client.email ? [client.email] : [], phone: client.phone,
-      subject: render(run.subject, values, {}, { plain: true }), text: run.text, values, reminderRunId: run._id };
+    const isAdmin = run.audience === 'admin';
+    const to = isAdmin ? (contacts || []).map(c => c.email).filter(Boolean) : (client.email ? [client.email] : []);
+    const phone = isAdmin ? ((contacts || []).flatMap(c => c.numbers)[0] || '') : client.phone;
+    const mail = {
+      reviewed: true,
+      to,
+      phone,
+      subject: render(run.subject, values, {}, { plain: true }),
+      text: run.text,
+      values,
+      reminderRunId: run._id,
+    };
     const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', { channel: run.channel });
     if (result === 'sent') {
       const { EmailDraft } = require('../models/emailControlModel');
@@ -162,4 +261,4 @@ async function processActionRules(now = new Date()) {
   return { enabled: true, events, dispatched };
 }
 
-module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility };
+module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext };

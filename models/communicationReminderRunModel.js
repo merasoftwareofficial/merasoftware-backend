@@ -11,6 +11,7 @@ const run = new Schema({
   // Action rules only (helpers/actionRuleWorker.js): the starting action, the actions that stop
   // this run, and the records it belongs to (a stop matches on any shared key).
   action: String,
+  audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
   stopOn: { type: [String], default: undefined },
   matchKeys: { type: [String], default: undefined },
   occurrenceKey: { type: String, required: true },

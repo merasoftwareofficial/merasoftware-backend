@@ -2,7 +2,9 @@ const mongoose = require('mongoose');
 const { Schema } = mongoose;
 
 const step = new Schema({
-  afterDays: { type: Number, required: true, min: 0, max: 365 },
+  timingRef: { type: String, enum: ['after_action', 'before_due', 'on_due', 'after_due'], default: 'after_action' },
+  days: { type: Number, min: 0, max: 365, default: 0 },
+  afterDays: { type: Number, min: 0, max: 365, default: 0 },
   channel: { type: String, enum: ['whatsapp', 'email', 'both'], required: true },
   subject: { type: String, default: '' },
   text: { type: String, required: true },
@@ -12,8 +14,15 @@ const step = new Schema({
 // Saving a change raises `revision`; runs already scheduled keep the text they were planned with.
 const rule = new Schema({
   name: { type: String, required: true, maxlength: 200 },
+  kind: { type: String, enum: ['template', 'reminder'], default: 'reminder' },
   action: { type: String, required: true },
-  audience: { type: String, enum: ['customer'], default: 'customer' },
+  actionId: { type: String, default: '' },
+  audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
+  condition: { type: String, enum: ['anytime', 'unpaid', 'paid'], default: 'anytime' },
+  scope: {
+    kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package'], default: 'all' },
+    packageSlug: { type: String, default: '' },
+  },
   steps: { type: [step], default: [] },
   repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 10, default: 0 } },
   stopOn: { type: [String], default: [] },

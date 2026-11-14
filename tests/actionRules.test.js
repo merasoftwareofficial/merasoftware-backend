@@ -196,3 +196,72 @@ test('project completed: once per round, stopped only when the whole project is 
   await worker.processEvents();
   assert.equal(await Run.countDocuments({ action: 'project.completed', status: 'cancelled' }), 2);
 });
+
+test('due-date relative steps: 3d before due, on due date, and 2d after due', async () => {
+  const due = new Date('2026-12-10T10:00:00.000Z');
+  const rule = await activeRule({
+    action: 'invoice.created',
+    control: 'auto',
+    condition: 'unpaid',
+    stopOn: ['payment.received'],
+    steps: [
+      { timingRef: 'before_due', days: 3, channel: 'whatsapp', text: '3 days left' },
+      { timingRef: 'on_due', days: 0, channel: 'whatsapp', text: 'Due today' },
+      { timingRef: 'after_due', days: 2, channel: 'whatsapp', text: 'Overdue' },
+    ],
+  });
+  await invoice({ dueDate: due });
+  await worker.processEvents();
+  const runs = await Run.find({ ruleId: rule._id }).sort({ step: 1 }).lean();
+  assert.equal(runs.length, 3);
+  assert.equal(runs[0].dueAt.toISOString(), '2026-12-07T10:00:00.000Z');
+  assert.equal(runs[1].dueAt.toISOString(), '2026-12-10T10:00:00.000Z');
+  assert.equal(runs[2].dueAt.toISOString(), '2026-12-12T10:00:00.000Z');
+});
+
+test('condition (paid vs unpaid) and package scope (digital-growth-package) filter rules cleanly', async () => {
+  const Order = require('../models/orderProductModel');
+  const dgpOrder = await Order.create({
+    userId: customer._id,
+    orderNumber: `ORD-DGP-${Date.now()}`,
+    price: 4999,
+    orderItems: [{ name: 'Digital Growth Package', quantity: 1, price: 4999 }],
+    salesPackage: { packageSlug: 'digital-growth-package', packageName: 'Digital Growth Package', months: 1 },
+  });
+  const otherOrder = await Order.create({
+    userId: customer._id,
+    orderNumber: `ORD-OTH-${Date.now()}`,
+    price: 9999,
+    orderItems: [{ name: 'Basic Website', quantity: 1, price: 9999 }],
+  });
+
+  const dgpUnpaidRule = await activeRule({
+    kind: 'template',
+    control: 'auto',
+    action: 'invoice.created',
+    condition: 'unpaid',
+    scope: { kind: 'package', packageSlug: 'digital-growth-package' },
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Pay for Digital Growth Package' }],
+  });
+  await invoice({ orderId: dgpOrder._id });
+  await invoice({ orderId: otherOrder._id });
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: dgpUnpaidRule._id }), 1);
+});
+
+test('admin audience resolves and verifies against configured teamContacts', async () => {
+  await User.updateOne({ _id: admin._id }, { $set: { adminContact: { email: admin.email, whatsappNumbers: ['+919999988888'] } } });
+  const adminRule = await activeRule({
+    kind: 'template',
+    control: 'auto',
+    audience: 'admin',
+    action: 'invoice.created',
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'both', subject: 'Admin alert', text: 'New invoice' }],
+  });
+  await invoice();
+  await worker.processEvents();
+  const run = await Run.findOne({ ruleId: adminRule._id }).lean();
+  assert.equal(run.audience, 'admin');
+  assert.equal((await worker.actionEligibility(run, { emails: [admin.email], phone: '+919999988888' })).allowed, true);
+  assert.equal((await worker.actionEligibility(run, { phone: '+911111122222' })).allowed, false);
+});
