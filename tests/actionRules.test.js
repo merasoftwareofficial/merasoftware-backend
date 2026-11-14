@@ -265,3 +265,19 @@ test('admin audience resolves and verifies against configured teamContacts', asy
   assert.equal((await worker.actionEligibility(run, { emails: [admin.email], phone: '+919999988888' })).allowed, true);
   assert.equal((await worker.actionEligibility(run, { phone: '+911111122222' })).allowed, false);
 });
+
+test('action-aware validation rejects unsupported condition or scope for payment.received', () => {
+  assert.throws(() => cleanRule({
+    kind: 'template',
+    action: 'payment.received',
+    condition: 'unpaid',
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Thanks' }],
+  }), /valid condition/i);
+  assert.throws(() => cleanRule({
+    kind: 'template',
+    action: 'payment.received',
+    condition: 'anytime',
+    scope: { kind: 'monthly' },
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Thanks' }],
+  }), /scope is not available/i);
+});

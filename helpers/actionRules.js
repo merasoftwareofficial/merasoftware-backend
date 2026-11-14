@@ -31,11 +31,15 @@ function normalizeStep(step = {}, index = 0, isTemplate = false) {
 
 // Checks a rule from the form in plain words. Returns the clean fields to save.
 function cleanRule(raw = {}) {
-  if (!ACTIONS[raw.action]?.trigger) fail('Choose the action that starts this message.');
+  const actionMeta = ACTIONS[raw.action];
+  if (!actionMeta?.trigger) fail('Choose the action that starts this message.');
   const kind = raw.kind === 'template' ? 'template' : 'reminder';
   const audience = raw.audience === 'admin' ? 'admin' : 'customer';
-  const condition = CONDITIONS.includes(raw.condition) ? raw.condition : 'anytime';
+  const allowedConditions = (actionMeta.conditions || [{ key: 'anytime' }]).map(c => c.key);
+  const condition = raw.condition || 'anytime';
+  if (!CONDITIONS.includes(condition) || !allowedConditions.includes(condition)) fail('Choose a valid condition for this action.');
   const scopeKind = SCOPE_KINDS.includes(raw.scope?.kind) ? raw.scope.kind : 'all';
+  if (scopeKind !== 'all' && !actionMeta.supportsScope) fail('Package/plan scope is not available for this action.');
   const packageSlug = scopeKind === 'package' ? String(raw.scope?.packageSlug || '').trim() : '';
   if (scopeKind === 'package' && !packageSlug) fail('Choose a specific package.');
 

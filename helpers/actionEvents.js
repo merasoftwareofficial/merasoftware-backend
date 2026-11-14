@@ -1,12 +1,19 @@
 const Event = require('../models/communicationActionEventModel');
 
-// Business actions that action rules can start from or stop on (Reminder.md §4, phase 1).
-// `trigger: false` = usable only as a stop action for now.
+const PAYMENT_CONDITIONS = [
+  { key: 'anytime', label: 'Anytime (always)' },
+  { key: 'unpaid', label: 'Only if payment is pending (unpaid)' },
+  { key: 'paid', label: 'Only if already paid' },
+];
+const ALWAYS_ONLY = [{ key: 'anytime', label: 'Anytime (always)' }];
+
+// Business actions that action rules can start from or stop on (Reminder.md §4, phase 1-2).
+// Each trigger declares its own allowed conditions and whether package/plan scope applies.
 const ACTIONS = {
-  'invoice.created': { label: 'Invoice created', trigger: true },
-  'payment.received': { label: 'Payment received', trigger: true },
-  'project.completed': { label: 'Project completed', trigger: true },
-  'plan.started': { label: 'Plan started', trigger: true },
+  'invoice.created': { label: 'Invoice created', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
+  'payment.received': { label: 'Payment received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'project.completed': { label: 'Project completed', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
+  'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 

@@ -1,6 +1,7 @@
 const Override = require('../models/communicationActionOverrideModel');
 const ActionRule = require('../models/communicationActionRuleModel');
-const { ACTIONS, SURFACES } = require('./communicationActionCatalog');
+const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCatalog');
+const { ACTIONS: TRIGGER_ACTIONS } = require('./actionEvents');
 const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
 const { readPackages } = require('./salesPackages');
@@ -35,6 +36,8 @@ const clean = (text, max) => String(text ?? '').replace(/\s+/g, ' ').trim().slic
 function merge(base, override, rules = []) {
   const o = override || {};
   const text = TEXT_BY_ID[base.id] || { title: base.endpoint, what: '', when: '' };
+  const triggerKey = TRIGGER_BY_ACTION_ID[base.id] || null;
+  const triggerMeta = triggerKey ? TRIGGER_ACTIONS[triggerKey] : null;
   return {
     id: base.id,
     title: text.title,
@@ -48,7 +51,9 @@ function merge(base, override, rules = []) {
     archived: !!o.archived,
     deleted: !!o.deleted,
     changed: !!override,
-    triggerKey: TRIGGER_BY_ACTION_ID[base.id] || null,
+    triggerKey,
+    supportsScope: !!triggerMeta?.supportsScope,
+    conditions: triggerMeta?.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
     rules,
   };
 }
@@ -93,11 +98,11 @@ async function list() {
   const packages = (Array.isArray(catalogue) ? catalogue : [])
     .filter(p => p && p.slug)
     .map(p => ({ slug: p.slug, name: p.name || p.slug }));
-  return { actions: ACTIONS.map(base => merge(base, byId.get(base.id), rulesFor(base.id))), surfaces: SURFACES, categories, packages };
+  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id))), surfaces: SURFACES, categories, packages };
 }
 
 async function update(actionId, body, userId) {
-  const base = ACTIONS.find(action => action.id === actionId);
+  const base = ACTION_CATALOG.find(action => action.id === actionId);
   if (!base) fail('Unknown action.', 404);
   if (body.reset === true) {
     await Override.deleteOne({ actionId });
