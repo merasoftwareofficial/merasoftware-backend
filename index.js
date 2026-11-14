@@ -55,6 +55,11 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
   console.log('Offer reservation jobs initialized');
 }
 
+// Action rules (all docs/Reminder.md §4): records actions and sends rule messages. Own switch, default off.
+if (process.env.ACTION_RULES_ENABLED === 'true') {
+  cron.schedule('* * * * *', () => require('./helpers/actionRuleWorker').processActionRules().catch(error => console.error('[action rules]', error.message)));
+}
+
 // Broadcast feeds the existing WhatsApp queue; this switch never enables other production crons.
 if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
   cron.schedule('* * * * *', () => require('./helpers/broadcastJobs').dispatch().catch(error => console.error('[broadcast]', error.message)));

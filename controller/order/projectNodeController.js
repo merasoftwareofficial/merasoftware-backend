@@ -60,6 +60,7 @@ const saveResponse = async (res, order, message, actorId) => {
   await order.save();
   if (order.projectProgress >= 100) {
     await activateAfterProjectServices({ projectOrderId: order._id, actorId });
+    await require('../../helpers/actionEvents').projectCompleted(order);
   }
   return res.status(200).json({ success: true, error: false, message, data: order });
 };
@@ -69,6 +70,8 @@ async function respondWithSavedNode(req, res, order, node) {
   if (order.projectProgress >= 100) {
     try { await activateAfterProjectServices({ projectOrderId: order._id, actorId: req.userId }); }
     catch (error) { serviceActivationPending = true; console.error('[project-node] Service activation pending:', error.message); }
+    // Action rules (Reminder.md §4): "Project completed", once per completion round.
+    await require('../../helpers/actionEvents').projectCompleted(order);
   }
   const communication = await safePrepareNodeMessage(req, order, node);
   return res.json({ success: true, message: 'Project node saved', data: order, savedNodeId: node.nodeId, serviceActivationPending, ...communication });

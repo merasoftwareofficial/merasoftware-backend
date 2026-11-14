@@ -10,6 +10,8 @@ const { packageReminderCandidate } = require('./packageReminderEligibility');
 async function maySendReminder(runId, target = {}) {
   const run = await Run.findById(runId).lean();
   if (!run || !['scheduled', 'preparing', 'queued', 'failed', 'partial'].includes(run.status)) return { allowed: false, reason: 'Reminder is no longer pending.' };
+  // Action rules have their own rule model and check (helpers/actionRuleWorker.js).
+  if (run.source === 'action') return require('./actionRuleWorker').actionEligibility(run, target);
   const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, revision: run.ruleRevision }).lean();
   if (!rule) return { allowed: false, reason: 'Rule is unavailable.' };
   if (run.status === 'preparing' && run.workerLeaseOwner && (rule.workerLeaseOwner !== run.workerLeaseOwner || !rule.workerLeaseUntil || rule.workerLeaseUntil <= new Date())) return { allowed: false, reason: 'Reminder worker lease expired.' };

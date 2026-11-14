@@ -7,7 +7,12 @@ const { Schema } = mongoose;
 const run = new Schema({
   ruleId: { type: Schema.Types.ObjectId, ref: 'CommunicationReminderRule', required: true },
   ruleRevision: { type: Number, required: true },
-  source: { type: String, enum: ['monthly_package', 'broadcast'], required: true },
+  source: { type: String, enum: ['monthly_package', 'broadcast', 'action'], required: true },
+  // Action rules only (helpers/actionRuleWorker.js): the starting action, the actions that stop
+  // this run, and the records it belongs to (a stop matches on any shared key).
+  action: String,
+  stopOn: { type: [String], default: undefined },
+  matchKeys: { type: [String], default: undefined },
   occurrenceKey: { type: String, required: true },
   step: { type: Number, required: true, min: 0 },
   entityId: { type: Schema.Types.ObjectId, required: true },
@@ -30,4 +35,5 @@ const run = new Schema({
 }, { timestamps: true });
 run.index({ ruleId: 1, ruleRevision: 1, occurrenceKey: 1, step: 1 }, { unique: true });
 run.index({ status: 1, dueAt: 1 });
+run.index({ source: 1, status: 1, matchKeys: 1 });
 module.exports = mongoose.models.CommunicationReminderRun || mongoose.model('CommunicationReminderRun', run);

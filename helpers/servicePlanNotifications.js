@@ -29,7 +29,16 @@ const withCustomer = (orderId) => orderModel.findById(orderId).populate('userId'
 // serviceStartNotifiedAt makes it once-only across purchase, approval, admin start and activation.
 async function claimStart(orderId) {
   const claimed = await orderModel.updateOne({ _id: orderId, serviceStartNotifiedAt: null, servicePlanStatus: 'active' }, { $set: { serviceStartNotifiedAt: new Date() } });
-  return claimed.modifiedCount === 1;
+  if (claimed.modifiedCount !== 1) return false;
+  // Action rules (Reminder.md §4): the same once-only claim is the "Plan started" action.
+  const actions = require('./actionEvents');
+  if (actions.enabled()) {
+    try {
+      const order = await orderModel.findById(orderId).select('userId').lean();
+      if (order) await actions.planStarted(order);
+    } catch (error) { console.error('[action event] plan.started', error.message); }
+  }
+  return true;
 }
 
 async function planStarted(orderId, invoice = null) {

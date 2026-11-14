@@ -154,6 +154,8 @@ const markProjectInvoicePaid = async ({
   invoice.markedPaidBy = actorId || invoice.markedPaidBy || null;
   if (notes) invoice.notes = notes;
   await invoice.save({ session });
+  // Action rules (Reminder.md §4): a fully paid invoice is the "Payment received" action.
+  await require("./actionEvents").paymentReceived(invoice, session);
 
   return { invoice, transaction };
 };
@@ -217,7 +219,10 @@ const createProjectInvoice = async ({
     ...(serviceCycleNumber ? { serviceCycleNumber } : {}),
     lineItems,
   };
-  return session ? (await invoiceModel.create([data], { session }))[0] : invoiceModel.create(data);
+  const invoice = session ? (await invoiceModel.create([data], { session }))[0] : await invoiceModel.create(data);
+  // Action rules (Reminder.md §4): "Invoice created", in the same session as the invoice.
+  if (Number(amount) > 0) await require("./actionEvents").invoiceCreated(invoice, session);
+  return invoice;
 };
 
 module.exports = {

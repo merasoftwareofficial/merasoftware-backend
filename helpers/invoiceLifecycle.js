@@ -167,6 +167,8 @@ const markInvoicePaidAndResumePlan = async ({
     invoice.internalNote = internalNote || null;
   }
   await invoice.save({ session });
+  // Action rules (Reminder.md §4): "Payment received", in the same session as the invoice.
+  await require("./actionEvents").paymentReceived(invoice, session);
 
   const planResumed = await resumeOrderForPaidInvoice(order, session);
 

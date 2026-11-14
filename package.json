@@ -7,6 +7,7 @@
   },
   "scripts": {
     "test:email": "node --test tests/emailControl.test.js tests/reviewDelivery.test.js",
+    "test:action-rules": "node --test tests/actionRules.test.js",
     "test:communication-actions": "node --test tests/communicationActions.test.js tests/communicationActions.db.test.js",
     "test:session": "node --test tests/sessionToken.test.js",
     "test:session:browser": "node --test tests/sessionCookies.browser.test.js",
