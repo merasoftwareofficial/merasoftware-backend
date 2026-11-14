@@ -1,5 +1,7 @@
 const Override = require('../models/communicationActionOverrideModel');
 const { ACTIONS, SURFACES } = require('./communicationActionCatalog');
+const { TEXT_BY_ID } = require('./communicationActionText');
+const { CATEGORIES } = require('./communicationCategories');
 
 const CATEGORY_MAX = 60;
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
@@ -8,8 +10,12 @@ const clean = (text, max) => String(text ?? '').replace(/\s+/g, ' ').trim().slic
 // One action as the page shows it: the catalog row, with the owner's saved changes on top.
 function merge(base, override) {
   const o = override || {};
+  const text = TEXT_BY_ID[base.id] || { title: base.endpoint, what: '', when: '' };
   return {
     id: base.id,
+    title: text.title,
+    what: text.what,
+    when: text.when,
     method: base.method,
     endpoint: base.endpoint,
     note: base.note,
@@ -47,7 +53,9 @@ function validatePatch(body = {}) {
 async function list() {
   const overrides = await Override.find().lean();
   const byId = new Map(overrides.map(item => [item.actionId, item]));
-  const categories = [...new Set([...ACTIONS.map(a => a.category), ...overrides.map(o => o.category).filter(Boolean)])].sort();
+  const known = new Set(CATEGORIES.map(item => item.name));
+  const extra = [...new Set(overrides.map(o => o.category).filter(name => name && !known.has(name)))];
+  const categories = [...CATEGORIES, ...extra.map(name => ({ name, meaning: '' }))];
   return { actions: ACTIONS.map(base => merge(base, byId.get(base.id))), surfaces: SURFACES, categories };
 }
 

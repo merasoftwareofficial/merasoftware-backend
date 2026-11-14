@@ -20,8 +20,12 @@ test('list shows every catalog action with no changes at first', async () => {
   const { actions, surfaces, categories } = await service.list();
   assert.equal(actions.length, 178);
   assert.deepEqual(surfaces, ['Admin', 'Client', 'Website', 'System']);
-  assert.ok(categories.includes('Website preview'));
-  assert.ok(categories.includes('Reservations'));
+  const names = categories.map(item => item.name);
+  assert.equal(names[0], 'Admin settings', 'categories keep the page order');
+  assert.ok(names.includes('Website preview'));
+  assert.ok(names.includes('Offers & reservations'));
+  assert.ok(categories.every(item => item.meaning.length > 10), 'every category has a meaning');
+  assert.ok(actions.every(row => row.title && row.what && row.when), 'every action has plain text');
   assert.ok(actions.every(row => !row.changed && !row.archived && !row.deleted));
 });
 

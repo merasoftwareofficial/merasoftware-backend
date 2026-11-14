@@ -60,3 +60,13 @@ test('clean: collapses spaces and caps the length', () => {
   assert.equal(clean('  a   b  ', 60), 'a b');
   assert.equal(clean('x'.repeat(100), 60).length, 60);
 });
+
+test('categories: every action sits under a known heading, and every heading is used', () => {
+  const { NAMES, MEANING_BY_NAME } = require('../helpers/communicationCategories');
+  const used = new Set(ACTIONS.map(action => action.category));
+  for (const action of ACTIONS) assert.ok(NAMES.includes(action.category), action.id + ' ' + action.category);
+  for (const name of NAMES) {
+    assert.ok(used.has(name), 'unused heading ' + name);
+    assert.ok(MEANING_BY_NAME[name].length > 10, name);
+  }
+});
