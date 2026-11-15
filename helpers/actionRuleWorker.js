@@ -199,8 +199,23 @@ async function actionEligibility(run, target = {}) {
 }
 
 const day = value => (value ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(value)) : '');
-function portalLink(path) {
-  try { const base = new URL(process.env.FORNTEND_URL); return ['http:', 'https:'].includes(base.protocol) ? new URL(path, base).toString() : ''; } catch { return ''; }
+function safeUrl(baseUrl, path) {
+  try {
+    const base = new URL(baseUrl);
+    return ['http:', 'https:'].includes(base.protocol) ? new URL(path, base).toString() : '';
+  } catch {
+    return '';
+  }
+}
+const portalLink = path => safeUrl(process.env.FORNTEND_URL, path);
+const websiteLink = path => safeUrl(process.env.PORTFOLIO_WEBSITE_URL, path);
+
+const KNOWN_PLACEHOLDERS = new Set([
+  'name', 'amount', 'dueDate', 'invoiceLink', 'projectLink', 'packageLink', 'portalLink',
+  'project', 'planName', 'duration', 'email', 'phone',
+]);
+function normalizePlaceholders(text) {
+  return String(text || '').replace(/(?<!\{)\{(\w+)\}(?!\})/g, (m, key) => (KNOWN_PLACEHOLDERS.has(key) ? `{{${key}}}` : m));
 }
 
 async function executeDoAlso(run, check, values, render) {
@@ -259,16 +274,22 @@ async function dispatchRun(runId, now = new Date()) {
     if (!check.ok) { await finish('cancelled', { reason: check.reason }); return 'cancelled'; }
     const { client, invoice, order, contacts } = check;
     const planName = order?.salesPackage?.packageName || order?.salesPackage?.name || order?.servicePlanSnapshot?.serviceName || order?.orderItems?.[0]?.name || '';
+    const packageSlug = order?.salesPackage?.slug || '';
     const months = order?.salesPackage?.months || order?.serviceBillingCycleMonths || order?.servicePlanSnapshot?.selectedBillingCycleMonths;
     const duration = months ? `${months} month${months > 1 ? 's' : ''}` : '';
     const values = {
       name: client.name || 'Customer',
+      email: client.email || '',
+      phone: client.phone || '',
       project: order?.orderItems?.[0]?.name || planName,
       planName,
       duration,
       amount: invoice ? `₹${Number(invoice.amount - (invoice.amountPaid || 0)).toLocaleString('en-IN')}` : '',
       dueDate: day(invoice?.dueDate || order?.serviceNextBillingDate),
       invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : '',
+      projectLink: order?._id ? portalLink(`/project-details/${order._id}`) : '',
+      packageLink: packageSlug ? websiteLink(`/package/${encodeURIComponent(packageSlug)}`) : '',
+      portalLink: portalLink('/'),
     };
     const key = `action-rule:${run._id}`;
     const { render } = require('./emailMarkup');
@@ -279,8 +300,8 @@ async function dispatchRun(runId, now = new Date()) {
       reviewed: true,
       to,
       phone,
-      subject: render(run.subject, values, {}, { plain: true }),
-      text: run.text,
+      subject: render(normalizePlaceholders(run.subject), values, {}, { plain: true }),
+      text: normalizePlaceholders(run.text),
       values,
       reminderRunId: run._id,
     };
@@ -324,4 +345,4 @@ async function processActionRules(now = new Date()) {
   return { enabled: true, events, dispatched };
 }
 
-module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso };
+module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders };

@@ -336,3 +336,23 @@ test('whatsapp.ad_received plans lead-only run and executeDoAlso updates non-Won
   const wonAfter = await Lead.findById(wonLead._id).lean();
   assert.equal(wonAfter.status, 'Won');
 });
+
+test('placeholders and formatting: normalizes single braces, renders new links, bold/italic in email & WhatsApp', () => {
+  const { render, compose } = require('../helpers/emailMarkup');
+  const { messageText } = require('../helpers/whatsappQueue');
+
+  const raw = 'Hi {name}, **{{planName}}** _pending_ {{amount}}\n- View: {{packageLink}}';
+  const normalized = worker.normalizePlaceholders(raw);
+  assert.equal(normalized, 'Hi {{name}}, **{{planName}}** _pending_ {{amount}}\n- View: {{packageLink}}');
+
+  const filled = render(normalized, { name: 'Riya', planName: 'Growth', amount: '₹4,999', packageLink: 'https://merasoftware.com/package/digital_growth' });
+  const mail = compose(filled);
+  assert.match(mail.html, /<strong>Growth<\/strong>/);
+  assert.match(mail.html, /<em>pending<\/em>/);
+  assert.match(mail.html, /href="https:\/\/merasoftware\.com\/package\/digital_growth"/);
+  assert.doesNotMatch(mail.html, /<em>growth<\/em>/);
+
+  const wa = messageText({ subject: 'Payment Due', text: filled, plain: mail.text });
+  assert.match(wa, /^\*Payment Due\*/);
+  assert.match(wa, /\*Growth\* _pending_/);
+});

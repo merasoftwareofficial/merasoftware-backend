@@ -42,10 +42,14 @@ async function teamPhoneRows(draft, email) {
   return numbers && numbers.map((number, index) => ({ email, phone: normalizePhone(number), saved: number, ...(index ? { alt: true } : {}) }));
 }
 
-/** The email as WhatsApp text: its subject in bold on the first line, then the email's own plain text. */
+/** The email as WhatsApp text: its subject in bold on the first line, then the email's own text (preserving WhatsApp *bold* when **bold** markup was used). */
 function messageText(draft) {
   const subject = String(draft.subject || '').replace(/\*/g, '').trim();
-  return `${subject ? `*${subject}*\n\n` : ''}${draft.plain || draft.text || ''}`.slice(0, MAX_TEXT);
+  const raw = String(draft.text || '');
+  const body = /\*\*(.+?)\*\*/.test(raw)
+    ? raw.replace(/^##\s+(.+)$/gm, '*$1*').replace(/\*\*(.+?)\*\*/g, '*$1*')
+    : (draft.plain || raw);
+  return `${subject ? `*${subject}*\n\n` : ''}${body}`.slice(0, MAX_TEXT);
 }
 
 /**

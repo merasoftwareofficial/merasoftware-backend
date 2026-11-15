@@ -64,18 +64,19 @@ function withRequiredLinks(text, links = [], values = {}) {
   return missing.length ? `${text}\n\n${missing.join('\n')}` : text;
 }
 
+const italicHtml = safe => safe.replace(/(^|[^\w])_([^_\n]+?)_(?=$|[^\w])/g, '$1<em>$2</em>');
 function linkedHtml(text) {
   let html = ''; let last = 0;
   for (const match of text.matchAll(URL_PATTERN)) {
     const url = escapeHtml(restore(match[0]));
-    html += `${escapeHtml(text.slice(last, match.index))}<a href="${url}" style="color:${COLORS.link}">${url}</a>`;
+    html += `${italicHtml(escapeHtml(text.slice(last, match.index)))}<a href="${url}" style="color:${COLORS.link}">${url}</a>`;
     last = match.index + match[0].length;
   }
-  return html + escapeHtml(text.slice(last));
+  return html + italicHtml(escapeHtml(text.slice(last)));
 }
 // Both take a protected line.
 const inlineHtml = line => restore(line.split(/\*\*(.+?)\*\*/g).map((part, index) => (index % 2 ? `<strong>${linkedHtml(part)}</strong>` : linkedHtml(part))).join(''));
-const inlineText = line => restore(line.replace(/\*\*(.+?)\*\*/g, '$1'));
+const inlineText = line => restore(line.replace(/\*\*(.+?)\*\*/g, '$1').replace(/(^|[^\w])_([^_\n]+?)_(?=$|[^\w])/g, '$1$2'));
 
 function layout(content) {
   return `<div style="margin:0;padding:24px 12px;background:${COLORS.paper};font-family:Arial,Helvetica,sans-serif;color:${COLORS.ink}">`
