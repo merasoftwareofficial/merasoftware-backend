@@ -113,7 +113,7 @@ async function handleEvent(event) {
       { $set: { status: 'cancelled', reason: `Stopped: ${ACTIONS[event.action].label}.` } });
   }
   if (!event.clientId && !event.leadId) return;
-  const rules = await Rule.find({ action: event.action, enabled: true, control: 'auto', activatedAt: { $lte: event.occurredAt } }).lean();
+  const rules = await Rule.find({ action: event.action, enabled: true, control: { $in: ['auto', 'review'] }, activatedAt: { $lte: event.occurredAt } }).lean();
   if (!rules.length) return;
   const ctx = await resolveEventContext(event);
   for (const rule of rules) {
@@ -146,7 +146,7 @@ async function processEvents(limit = 200) {
 // The check right before sending: the reason for the message must still be true, even if the
 // stop action came through a path that records no event.
 async function stillValid(run) {
-  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: 'auto' }).select('_id condition').lean();
+  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition control').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -175,9 +175,9 @@ async function stillValid(run) {
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
     if (!contacts.length) return { ok: false, reason: 'No admin contact configured.' };
-    return { ok: true, client, lead, invoice, order, contacts };
+    return { ok: true, control: rule.control, client, lead, invoice, order, contacts };
   }
-  return { ok: true, client, lead, invoice, order };
+  return { ok: true, control: rule.control, client, lead, invoice, order };
 }
 
 // Same check for the email provider and WhatsApp handoff (communicationReminderEligibility.js),
@@ -305,7 +305,16 @@ async function dispatchRun(runId, now = new Date()) {
       values,
       reminderRunId: run._id,
     };
-    const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', { channel: run.channel });
+    const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', {
+      channel: run.channel,
+      reviewOnly: check.control === 'review',
+    });
+    if (result === 'staged-review') {
+      const { EmailDraft } = require('../models/emailControlModel');
+      const draft = await EmailDraft.findOne({ dedupeKey: key }).select('_id').lean();
+      await finish('queued', { ...(draft?._id ? { emailDraftId: draft._id } : {}), reason: 'Waiting for admin review.' });
+      return 'queued';
+    }
     if (result === 'sent') {
       await executeDoAlso(run, check, values, render);
       const { EmailDraft } = require('../models/emailControlModel');

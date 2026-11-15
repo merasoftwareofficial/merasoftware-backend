@@ -81,7 +81,7 @@ function cleanRule(raw = {}) {
     return { type: 'stop_reminders', stage: '', note: '' };
   });
 
-  const control = raw.control === 'auto' ? 'auto' : 'off';
+  const control = ['auto', 'review'].includes(raw.control) ? raw.control : 'off';
   return {
     kind,
     action: raw.action,
@@ -121,7 +121,7 @@ const autoName = rule => {
 
 async function createRule(raw, actorId) {
   const fields = cleanRule(raw);
-  const activate = fields.control === 'auto' && raw.enabled === true;
+  const activate = ['auto', 'review'].includes(fields.control) && raw.enabled === true;
   return Rule.create({
     ...fields,
     name: autoName(fields),
@@ -134,7 +134,7 @@ async function createRule(raw, actorId) {
 // Editing always makes a new version: runs already planned keep their frozen text.
 async function updateRule(id, raw) {
   const fields = cleanRule(raw);
-  const activate = fields.control === 'auto' && raw.enabled === true;
+  const activate = ['auto', 'review'].includes(fields.control) && raw.enabled === true;
   const enabledUpdate = raw.enabled === undefined ? {} : activate ? { enabled: true, activatedAt: new Date() } : { enabled: false };
   const rule = await Rule.findOneAndUpdate(
     { _id: id },

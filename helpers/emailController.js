@@ -417,6 +417,7 @@ async function sendSystemMail(event, mail, dedupeKey, source, options = {}) {
     if (channel === 'both' && !usable('both')) channel = usable('email') ? 'email' : usable('whatsapp') ? 'whatsapp' : channel;
     if (!usable(channel)) return (await markNotSent(draft, choices.find(row => row.id === channel)?.reason || 'Channel unavailable.')).notSent ? 'not-sent' : 'paused';
   }
+  if (options.reviewOnly) return 'staged-review';
   const decision = await decide(String(draft._id), null, { choice: 'send', subject: draft.subject, text: draft.text, ...(channel ? { channels: channel } : {}) }, { application: 'portal', portalAdmin: true });
   // A failed part of a channel send is retried by the caller's job: same draft, same provider key.
   if (decision.status === 'failed') throw new Error(decision.delivery?.failure || 'Delivery failed');

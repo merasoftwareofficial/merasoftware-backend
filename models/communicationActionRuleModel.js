@@ -33,7 +33,7 @@ const rule = new Schema({
   repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 10, default: 0 } },
   stopOn: { type: [String], default: [] },
   doAlso: { type: [doAlsoStep], default: [] },
-  control: { type: String, enum: ['auto', 'off'], default: 'off' },
+  control: { type: String, enum: ['auto', 'review', 'off'], default: 'off' },
   enabled: { type: Boolean, default: false },
   activatedAt: Date,
   revision: { type: Number, default: 1, min: 1 },

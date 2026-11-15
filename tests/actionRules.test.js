@@ -356,3 +356,51 @@ test('placeholders and formatting: normalizes single braces, renders new links, 
   assert.match(wa, /^\*Payment Due\*/);
   assert.match(wa, /\*Growth\* _pending_/);
 });
+
+test('review mode: stages pending EmailDraft instead of auto-sending and marks run queued', async () => {
+  const rule = await activeRule({
+    kind: 'template',
+    action: 'plan.started',
+    audience: 'customer',
+    condition: 'anytime',
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Hi {{name}}, plan started.' }],
+    control: 'review',
+    enabled: true,
+  });
+  assert.equal(rule.control, 'review');
+  assert.equal(rule.enabled, true);
+
+  const Order = require('../models/orderProductModel');
+  const order = await Order.create({ userId: customer._id, price: 4999, orderItems: [{ name: 'Review Plan', qty: 1, price: 4999 }] });
+  await require('../helpers/actionEvents').emitAction('plan.started', {
+    key: `plan.started:${order._id}:review-test-${Date.now()}`,
+    entityId: order._id,
+    clientId: customer._id,
+    orderId: order._id,
+    matchKeys: [`order:${order._id}`],
+  });
+  await worker.processEvents();
+  const run = await Run.findOne({ ruleId: rule._id }).lean();
+  assert.ok(run, 'run planned for review rule');
+
+  const check = await worker.stillValid(run);
+  assert.equal(check.ok, true);
+  assert.equal(check.control, 'review');
+
+  const emailController = require('../helpers/emailController');
+  const origSend = emailController.sendSystemMail;
+  let captured = null;
+  emailController.sendSystemMail = async (_event, _mail, _key, _source, opts) => {
+    captured = opts;
+    return 'staged-review';
+  };
+  try {
+    const res = await worker.dispatchRun(run._id, new Date(Date.now() + 1000));
+    assert.equal(res, 'queued');
+    assert.equal(captured?.reviewOnly, true);
+    const after = await Run.findById(run._id).lean();
+    assert.equal(after.status, 'queued');
+  } finally {
+    emailController.sendSystemMail = origSend;
+  }
+});
