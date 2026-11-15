@@ -2,7 +2,7 @@ const Rule = require('../models/communicationActionRuleModel');
 const { ACTIONS } = require('./actionEvents');
 const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 
-const MAX_SENDS = 20;
+const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
 const CONDITIONS = ['anytime', 'unpaid', 'paid'];
 const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package'];
@@ -55,9 +55,11 @@ function cleanRule(raw = {}) {
   }
 
   const times = isTemplate ? 0 : (raw.repeat?.times || 0);
-  if (!int(times, 0, 10)) fail('Repeat can be 0 to 10 times.');
+  const perDay = times ? (raw.repeat?.perDay ?? 1) : 1;
+  if (!int(times, 0, 60)) fail('Repeat can be 0 to 60 times.');
   if (times && !int(raw.repeat.everyDays, 1, 90)) fail('Repeat every 1 to 90 days.');
-  if (clean.length + times > MAX_SENDS) fail(`At most ${MAX_SENDS} messages per action.`);
+  if (times && !int(perDay, 1, 4)) fail('Repeat can be 1 to 4 times a day.');
+  if (clean.length + times * perDay > MAX_SENDS) fail(`At most ${MAX_SENDS} messages per action.`);
 
   const stopOn = isTemplate ? [] : [...new Set(Array.isArray(raw.stopOn) ? raw.stopOn : [])];
   if (stopOn.some(key => !ACTIONS[key])) fail('Choose a valid stop action.');
@@ -90,7 +92,7 @@ function cleanRule(raw = {}) {
     condition,
     scope: { kind: scopeKind, packageSlug },
     steps: clean,
-    repeat: times ? { everyDays: raw.repeat.everyDays, times } : { times: 0 },
+    repeat: times ? { everyDays: raw.repeat.everyDays, times, perDay } : { times: 0, perDay: 1 },
     stopOn,
     doAlso,
     control,
@@ -114,7 +116,7 @@ const autoName = rule => {
   const scope = rule.scope?.kind === 'package' ? ` · ${rule.scope.packageSlug}`
     : rule.scope?.kind === 'monthly' ? ' · monthly'
       : rule.scope?.kind === 'one_time' ? ' · one-time' : '';
-  const more = rule.kind === 'reminder' ? rule.steps.length + (rule.repeat?.times || 0) - 1 : 0;
+  const more = rule.kind === 'reminder' ? rule.steps.length + (rule.repeat?.times || 0) * (rule.repeat?.perDay || 1) - 1 : 0;
   const stop = rule.stopOn?.length ? ` · stop when ${rule.stopOn.map(key => ACTIONS[key].label).join(', ')}` : '';
   return `${ACTIONS[rule.action].label} · ${who} · ${when}${cond}${scope}${more > 0 ? ` +${more} more` : ''}${stop}`.slice(0, 200);
 };

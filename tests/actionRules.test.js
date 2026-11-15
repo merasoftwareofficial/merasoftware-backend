@@ -533,3 +533,33 @@ test('cleanupActionRules previews and removes exact duplicates and links unpaire
 
   await Rule.deleteMany({ _id: { $in: [dupNew._id, cust._id, adm._id] } });
 });
+
+test('repeat supports perDay (1-4x/day) and up to 60 total sends', () => {
+  const { cleanRule } = require('../helpers/actionRules');
+  const { planRuns } = require('../helpers/actionRuleWorker');
+
+  const cleaned = cleanRule({
+    kind: 'reminder',
+    action: 'invoice.created',
+    audience: 'customer',
+    steps: [{ timingRef: 'on_due', days: 0, channel: 'whatsapp', text: 'Due today' }],
+    repeat: { times: 3, everyDays: 2, perDay: 2 },
+    stopOn: ['payment.received'],
+  });
+  assert.deepEqual(cleaned.repeat, { everyDays: 2, times: 3, perDay: 2 });
+
+  const due = new Date('2026-12-01T09:00:00.000Z');
+  const runs = planRuns({ _id: 'r1', revision: 1, ...cleaned }, { action: 'invoice.created', key: 'k1', entityId: 'e1', occurredAt: due, matchKeys: [] }, due);
+  assert.equal(runs.length, 7); // 1 initial + 3 * 2 repeats
+  assert.equal(runs[1].dueAt.toISOString(), '2026-12-03T09:00:00.000Z');
+  assert.equal(runs[2].dueAt.toISOString(), '2026-12-03T21:00:00.000Z');
+
+  assert.throws(() => cleanRule({
+    kind: 'reminder',
+    action: 'invoice.created',
+    audience: 'customer',
+    steps: [{ timingRef: 'on_due', days: 0, channel: 'whatsapp', text: 'Due' }],
+    repeat: { times: 20, everyDays: 1, perDay: 4 },
+    stopOn: ['payment.received'],
+  }), /At most 60 messages/);
+});

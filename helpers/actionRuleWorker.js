@@ -80,8 +80,13 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null) {
   }
   if (!sends.length) return [];
   const last = sends[sends.length - 1];
+  const perDay = Math.max(1, Number(rule.repeat?.perDay || 1));
   for (let n = 1; n <= (rule.repeat?.times || 0); n++) {
-    sends.push({ ...last, dueAt: new Date(+last.dueAt + n * rule.repeat.everyDays * DAY) });
+    const dayBase = +last.dueAt + n * rule.repeat.everyDays * DAY;
+    for (let slot = 0; slot < perDay; slot++) {
+      const offsetMs = Math.round((slot * DAY) / perDay);
+      sends.push({ ...last, dueAt: new Date(dayBase + offsetMs) });
+    }
   }
   return sends.map((send, step) => ({
     ruleId: rule._id,

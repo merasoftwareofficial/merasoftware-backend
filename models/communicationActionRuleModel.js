@@ -30,7 +30,7 @@ const rule = new Schema({
     packageSlug: { type: String, default: '' },
   },
   steps: { type: [step], default: [] },
-  repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 10, default: 0 } },
+  repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 60, default: 0 }, perDay: { type: Number, min: 1, max: 4, default: 1 } },
   stopOn: { type: [String], default: [] },
   doAlso: { type: [doAlsoStep], default: [] },
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'off' },
