@@ -1,5 +1,6 @@
 const LegacyRule = require('../models/communicationReminderRuleModel');
 const ActionRule = require('../models/communicationActionRuleModel');
+const Run = require('../models/communicationReminderRunModel');
 const { createRule } = require('./actionRules');
 
 function mapMonthlyStep(step) {
@@ -58,4 +59,64 @@ async function migrateLegacyReminderRules({ dryRun = false } = {}) {
   return { total: legacyRules.length, migrated, skipped };
 }
 
-module.exports = { migrateLegacyReminderRules };
+const ruleFingerprint = r => JSON.stringify([
+  r.actionId || '', r.action, r.kind, r.audience, r.condition || 'anytime',
+  r.scope?.kind || 'all', r.scope?.packageSlug || '',
+  (r.steps || []).map(s => [s.timingRef, s.days, s.channel, s.subject || '', s.text]),
+  r.repeat?.times || 0, r.repeat?.everyDays || 2,
+  [...(r.stopOn || [])].sort(),
+]);
+
+/**
+ * Removes exact duplicate ActionRules (only when they have no active scheduled/queued runs)
+ * and links unpaired Customer+Admin rules created within 60s on the same action/kind/condition/scope.
+ */
+async function cleanupActionRules({ dryRun = true } = {}) {
+  const all = await ActionRule.find().sort({ updatedAt: -1, createdAt: -1 }).lean();
+  const byPrint = new Map();
+  for (const r of all) {
+    const key = ruleFingerprint(r);
+    if (!byPrint.has(key)) byPrint.set(key, []);
+    byPrint.get(key).push(r);
+  }
+  const duplicateIds = [];
+  for (const group of byPrint.values()) {
+    if (group.length <= 1) continue;
+    group.sort((a, b) => (Number(!!b.enabled) - Number(!!a.enabled)) || (+new Date(b.updatedAt) - +new Date(a.updatedAt)));
+    for (const dup of group.slice(1)) {
+      const hasActiveRuns = await Run.exists({ ruleId: dup._id, status: { $in: ['scheduled', 'preparing', 'queued'] } });
+      if (!hasActiveRuns) duplicateIds.push(dup._id);
+    }
+  }
+  if (!dryRun && duplicateIds.length) {
+    await ActionRule.deleteMany({ _id: { $in: duplicateIds } });
+  }
+
+  const dupSet = new Set(duplicateIds.map(String));
+  const remaining = all.filter(r => !dupSet.has(String(r._id)) && !r.pairId);
+  const byPairScope = new Map();
+  for (const r of remaining) {
+    const key = [r.actionId || '', r.action, r.kind, r.condition || 'anytime', r.scope?.kind || 'all', r.scope?.packageSlug || ''].join('|');
+    if (!byPairScope.has(key)) byPairScope.set(key, []);
+    byPairScope.get(key).push(r);
+  }
+  let pairsLinked = 0;
+  for (const group of byPairScope.values()) {
+    const customers = group.filter(r => r.audience === 'customer');
+    const admins = group.filter(r => r.audience === 'admin');
+    if (customers.length === 1 && admins.length === 1) {
+      const c = customers[0];
+      const a = admins[0];
+      if (Math.abs(+new Date(c.createdAt) - +new Date(a.createdAt)) <= 60000) {
+        if (!dryRun) {
+          const pairId = `pair-migrated-${c._id}`;
+          await ActionRule.updateMany({ _id: { $in: [c._id, a._id] } }, { $set: { pairId } });
+        }
+        pairsLinked++;
+      }
+    }
+  }
+  return { dryRun, duplicatesRemoved: duplicateIds.length, pairsLinked };
+}
+
+module.exports = { migrateLegacyReminderRules, cleanupActionRules };

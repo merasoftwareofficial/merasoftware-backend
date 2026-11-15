@@ -490,3 +490,46 @@ test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and mi
 
   await LegacyRule.deleteMany({ _id: { $in: [legacyMonthly._id, legacyBroadcast._id] } });
 });
+
+test('cleanupActionRules previews and removes exact duplicates and links unpaired customer/admin rules', async () => {
+  const { cleanupActionRules } = require('../helpers/migrateLegacyReminderRules');
+  const actionId = 'A99';
+  const base = {
+    name: 'Cleanup test rule',
+    actionId,
+    action: 'test.cleanup',
+    kind: 'template',
+    condition: 'anytime',
+    scope: { kind: 'all', packageSlug: '' },
+    repeat: { times: 0 },
+    stopOn: [],
+    enabled: false,
+    createdBy: admin._id,
+  };
+  const now = new Date();
+  const [dupOld, dupNew, cust, adm] = await Rule.create([
+    { ...base, audience: 'customer', steps: [{ channel: 'whatsapp', text: 'Dup msg' }], createdAt: new Date(now.getTime() - 10000), updatedAt: new Date(now.getTime() - 10000) },
+    { ...base, audience: 'customer', steps: [{ channel: 'whatsapp', text: 'Dup msg' }], createdAt: new Date(now.getTime() - 5000), updatedAt: new Date(now.getTime() - 5000) },
+    { ...base, actionId: 'A98', action: 'test.cleanup.pair', audience: 'customer', steps: [{ channel: 'whatsapp', text: 'Pair cust' }], createdAt: now, updatedAt: now },
+    { ...base, actionId: 'A98', action: 'test.cleanup.pair', audience: 'admin', steps: [{ channel: 'whatsapp', text: 'Pair admin' }], createdAt: new Date(now.getTime() + 1000), updatedAt: new Date(now.getTime() + 1000) },
+  ]);
+
+  const preview = await cleanupActionRules({ dryRun: true });
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.duplicatesRemoved, 1);
+  assert.equal(preview.pairsLinked, 1);
+  assert.equal(await Rule.countDocuments({ _id: { $in: [dupOld._id, dupNew._id, cust._id, adm._id] } }), 4);
+
+  const applied = await cleanupActionRules({ dryRun: false });
+  assert.equal(applied.dryRun, false);
+  assert.equal(applied.duplicatesRemoved, 1);
+  assert.equal(applied.pairsLinked, 1);
+
+  assert.equal(await Rule.findById(dupOld._id), null);
+  assert.ok(await Rule.findById(dupNew._id));
+  const [updatedCust, updatedAdm] = await Promise.all([Rule.findById(cust._id), Rule.findById(adm._id)]);
+  assert.ok(updatedCust.pairId);
+  assert.equal(updatedCust.pairId, updatedAdm.pairId);
+
+  await Rule.deleteMany({ _id: { $in: [dupNew._id, cust._id, adm._id] } });
+});

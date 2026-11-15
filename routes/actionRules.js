@@ -5,6 +5,7 @@ const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
 const { ACTIONS } = require('../helpers/actionEvents');
 const { createRule, updateRule, setRuleEnabled, deleteRule } = require('../helpers/actionRules');
+const { cleanupActionRules } = require('../helpers/migrateLegacyReminderRules');
 
 // Mounted under /api/auto-reply/action-rules (admin only, via routes/autoReply.js).
 const router = express.Router();
@@ -18,6 +19,7 @@ router.post('/', handle(req => createRule(req.body || {}, req.userId)));
 router.put('/:id', handle(req => updateRule(req.params.id, req.body || {})));
 router.post('/:id/enabled', handle(req => setRuleEnabled(req.params.id, !!req.body?.enabled)));
 router.post('/:id/delete', handle(req => deleteRule(req.params.id)));
+router.post('/cleanup', handle(req => cleanupActionRules({ dryRun: req.body?.dryRun !== false })));
 
 router.get('/runs', handle(async () => {
   const runs = await Run.find({ source: 'action', status: 'scheduled' }).sort({ dueAt: 1 }).limit(200).lean();
