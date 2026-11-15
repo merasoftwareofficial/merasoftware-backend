@@ -12,6 +12,14 @@ const ACTIVE = ['waiting', 'releasing', 'pending', 'sending'];
 const QUEUED = ['releasing', 'pending', 'sending'];
 const nameRule = broadcast => ({ requireName: compositionUsesName(readComposition(broadcast.message)) });
 
+async function maybeEmitBroadcastSent(broadcastId, leadId) {
+  if (!broadcastId || !leadId) return;
+  const rows = await Recipient.find({ broadcastId, leadId }).select('state sentAt').lean();
+  if (!rows.length || rows.some(r => r.state !== 'sent' || !r.sentAt)) return;
+  const anchorAt = new Date(Math.max(...rows.map(r => +new Date(r.sentAt))));
+  await require('./actionEvents').broadcastSent(broadcastId, leadId, { anchorAt }).catch(err => console.error('[action broadcast.sent]', err.message));
+}
+
 async function reconcile() {
   for (const recipient of await Recipient.find({ channel: { $ne: 'email' }, state: { $in: QUEUED } }).lean()) {
     const queued = await Queue.findById(recipient._id).lean();
@@ -25,7 +33,10 @@ async function reconcile() {
       await Queue.updateOne({ _id: queued._id, status: 'pending' }, { $set: { status: 'cancelled', lastError: 'Lead left the selected group or its number changed.', expiresAt: finishedExpiry(new Date()) } });
     }
     const latest = await Queue.findById(recipient._id).lean();
-    if (latest) await Recipient.updateOne({ _id: recipient._id }, { $set: { state: latest.status, queuedAt: recipient.queuedAt || latest.createdAt, reason: latest.lastError || '', ...(latest.sentAt ? { sentAt: latest.sentAt } : {}) } });
+    if (latest) {
+      await Recipient.updateOne({ _id: recipient._id }, { $set: { state: latest.status, queuedAt: recipient.queuedAt || latest.createdAt, reason: latest.lastError || '', ...(latest.sentAt ? { sentAt: latest.sentAt } : {}) } });
+      if (latest.status === 'sent') await maybeEmitBroadcastSent(recipient.broadcastId, recipient.leadId);
+    }
   }
   // A finished send stays in Broadcast history even after the shared queue TTL.
   for (const row of await Broadcast.find({ state: 'ready' }).select('_id').lean()) {
@@ -125,6 +136,7 @@ async function dispatch({ now = new Date() } = {}) {
     // Recover the actual outcome if the worker claimed it immediately.
     const queued = await Queue.findById(recipient._id).lean();
     await Recipient.updateOne({ _id: recipient._id }, { $set: { state: queued.status, queuedAt: queued.createdAt, reason: queued.lastError || '', ...(queued.sentAt ? { sentAt: queued.sentAt } : {}) } });
+    if (queued.status === 'sent') await maybeEmitBroadcastSent(recipient.broadcastId, recipient.leadId);
     return { reason: 'queued', recipientId: recipient._id };
   } finally {
     clearInterval(renew);
@@ -152,7 +164,9 @@ async function releaseEmail(ownsLease) {
   let draft = await EmailDraft.findById(recipient._id).lean();
   const audit = await EmailHistory.findOne({ draftId: recipient._id, status: 'sent', providerId: { $nin: [null, ''] } }).select('sentAt providerId').lean();
   if (draft?.status === 'sent' || draft?.providerId || audit) {
-    return Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'sent', sentAt: draft?.sentAt || audit?.sentAt, reason: '' } });
+    await Recipient.updateOne({ _id: recipient._id }, { $set: { state: 'sent', sentAt: draft?.sentAt || audit?.sentAt, reason: '' } });
+    await maybeEmitBroadcastSent(recipient.broadcastId, recipient.leadId);
+    return;
   }
   if (draft?.status === 'sending') {
     // Provider outcome is uncertain; never automatically resend after its idempotency window.

@@ -15,6 +15,7 @@ const ACTIONS = {
   'project.completed': { label: 'Project completed', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
   'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
   'whatsapp.ad_received': { label: 'WhatsApp ad message received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'broadcast.sent': { label: 'Broadcast sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 
@@ -79,4 +80,15 @@ const whatsappAdReceived = (row, { leadId = null, clientId = null } = {}) => {
   });
 };
 
-module.exports = { ACTIONS, enabled, emitAction, invoiceCreated, paymentReceived, projectCompleted, planStarted, whatsappAdReceived };
+const broadcastSent = (broadcastId, leadId, { anchorAt = new Date() } = {}) => {
+  if (!broadcastId || !leadId) return Promise.resolve(false);
+  return emitAction('broadcast.sent', {
+    key: `broadcast.sent:${id(broadcastId)}:${id(leadId)}`,
+    entityId: broadcastId,
+    leadId,
+    matchKeys: [`lead:${id(leadId)}`],
+    occurredAt: anchorAt,
+  });
+};
+
+module.exports = { ACTIONS, enabled, emitAction, invoiceCreated, paymentReceived, projectCompleted, planStarted, whatsappAdReceived, broadcastSent };

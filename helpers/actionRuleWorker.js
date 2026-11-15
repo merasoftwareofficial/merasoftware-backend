@@ -24,7 +24,7 @@ async function orderFullyPaid(orderId) {
 }
 
 async function resolveEventContext(event) {
-  if (event.action === 'whatsapp.ad_received') {
+  if (event.action === 'whatsapp.ad_received' || event.action === 'broadcast.sent') {
     return { invoice: null, order: null, isPaid: false, isMonthly: false, packageSlug: '', dueDate: null };
   }
   let invoice = null;
@@ -153,20 +153,39 @@ async function stillValid(run) {
   if (run.clientId) {
     client = await User.findById(run.clientId).select('name email phone isActive isGuest deletedAt').lean();
     if (!client || client.isActive === false || client.isGuest || client.deletedAt) return { ok: false, reason: 'Customer is unavailable.' };
-  } else if (lead && !lead.deletedAt) {
+  } else if (lead && !lead.deletedAt && !lead.convertedToUserId) {
+    if (run.action === 'broadcast.sent') {
+      const blocks = await require('./leadContactBlock').contactBlocks();
+      const { normalizePhone } = require('./whatsappQueue');
+      const phoneKey = normalizePhone(lead.phone || '');
+      const emailKey = String(lead.email || '').trim().toLowerCase();
+      if ((phoneKey && blocks.phones?.has(phoneKey)) || (emailKey && blocks.emails?.has(emailKey))) {
+        return { ok: false, reason: 'Contact is blocked.' };
+      }
+    }
     client = { name: lead.name || 'Customer', email: lead.email || '', phone: lead.phone || '' };
   } else {
     return { ok: false, reason: 'Customer or lead is unavailable.' };
   }
   const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid';
   let invoice = null, order = null;
-  if (run.action === 'whatsapp.ad_received') {
-    // No invoice or order attached to an incoming WhatsApp message.
+  if (run.action === 'whatsapp.ad_received' || run.action === 'broadcast.sent') {
+    // No invoice or order attached to an incoming WhatsApp message or broadcast.
   } else if (run.action === 'invoice.created' || run.action === 'payment.received') {
-    invoice = await Invoice.findById(run.entityId).lean();
-    if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
-    if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
-    order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot salesPackage orderVisibility serviceNextBillingDate serviceBillingCycleMonths').lean() : null;
+    if (String(run.occurrenceKey || '').startsWith('projected:')) {
+      order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber').lean();
+      const { isFinalCycle } = require('./serviceBillingSchedule');
+      if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled' || order.servicePlanStatus !== 'active' || order.serviceAutoRenewalStoppedAt || isFinalCycle(order, order.serviceCurrentCycleNumber)) {
+        return { ok: false, reason: 'Renewal is stopped or paused.' };
+      }
+      invoice = await Invoice.findOne({ orderId: order._id, invoiceType: 'plan_renewal', status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
+      if (invoice && waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
+    } else {
+      invoice = await Invoice.findById(run.entityId).lean();
+      if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
+      if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
+      order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot salesPackage orderVisibility serviceNextBillingDate serviceBillingCycleMonths').lean() : null;
+    }
   } else {
     order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
@@ -347,11 +366,64 @@ async function dispatchDue(now = new Date(), limit = 100) {
   return sent;
 }
 
+// Plans due-date steps for upcoming monthly cycles before the renewal invoice is created.
+async function planProjectedMonthlyRuns() {
+  const rules = await Rule.find({
+    action: { $in: ['invoice.created', 'plan.started'] },
+    kind: 'reminder',
+    enabled: true,
+    control: { $in: ['auto', 'review'] },
+    'scope.kind': { $in: ['monthly', 'package'] },
+    'steps.timingRef': { $in: ['before_due', 'on_due', 'after_due'] },
+  }).lean();
+  if (!rules.length) return 0;
+  const { packageReminderCandidate } = require('./packageReminderEligibility');
+  const orders = await Order.find({
+    isServicePlan: true,
+    'salesPackage.package.id': { $exists: true, $ne: null },
+    paymentPolicy: null,
+    orderVisibility: { $ne: 'cancelled' },
+    servicePlanStatus: 'active',
+    serviceAutoRenewalStoppedAt: null,
+  }).lean();
+  let planned = 0;
+  for (const order of orders) {
+    const candidate = packageReminderCandidate(order, null);
+    if (!candidate) continue;
+    const packageSlug = String(order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId || '').trim();
+    const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, dueDate: candidate.due };
+    for (const rule of rules) {
+      if (!rule.activatedAt || candidate.due <= new Date(rule.activatedAt)) continue;
+      if (!ruleMatchesContext(rule, ctx)) continue;
+      const dueSteps = (rule.steps || []).filter(st => ['before_due', 'on_due', 'after_due'].includes(st.timingRef));
+      if (!dueSteps.length) continue;
+      const fakeEvent = {
+        action: rule.action,
+        key: `projected:${order._id}:${candidate.cycle}`,
+        entityId: order._id,
+        clientId: order.userId,
+        leadId: null,
+        occurredAt: new Date(rule.activatedAt),
+        matchKeys: [`order:${order._id}`],
+        details: { dueDate: candidate.due },
+      };
+      for (const run of planRuns({ ...rule, steps: dueSteps }, fakeEvent, candidate.due)) {
+        if (run.dueAt < new Date(rule.activatedAt)) continue;
+        const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
+        await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
+        planned++;
+      }
+    }
+  }
+  return planned;
+}
+
 async function processActionRules(now = new Date()) {
   if (!enabled()) return { enabled: false };
   const events = await processEvents();
+  const projected = await planProjectedMonthlyRuns();
   const dispatched = await dispatchDue(now);
-  return { enabled: true, events, dispatched };
+  return { enabled: true, events, projected, dispatched };
 }
 
-module.exports = { processActionRules, processEvents, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders };
+module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders };

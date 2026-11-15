@@ -34,7 +34,6 @@ const BUILTIN_BY_ACTION_ID = {
   A92: { templates: ['plan.payment.rejected'] },
   A104: { templates: ['sendAdminUPIPendingNotification'] },
   A105: { templates: ['plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
-  A109: { reminders: [{ panel: 'reminders', label: 'Monthly Reminders (stop)' }] },
   A111: { templates: ['invoice.project'] },
   A112: { templates: ['sendMonthlyInvoiceEmail'] },
   A113: { templates: ['invoice.reminder'] },
@@ -45,7 +44,7 @@ const BUILTIN_BY_ACTION_ID = {
   A118: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
   A119: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
   A120: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
-  B05: { templates: ['broadcast.manual'], reminders: [{ panel: 'reminders', label: 'Broadcast follow-up' }] },
+  B05: { templates: ['broadcast.manual'] },
   B06: { templates: ['broadcast.manual'] },
   B07: { templates: ['website.subscription.confirm', 'website.subscription.manage'] },
   B21: { templates: ['lead.finalMessage'], reminders: [{ panel: 'final-message', label: 'Final Message' }] },
@@ -54,7 +53,6 @@ const BUILTIN_BY_ACTION_ID = {
   B37: { templates: ['offer.start.request.admin', 'offer.start.request.received'], reminders: [{ panel: 'reservation', label: 'Team start alerts' }] },
   B39: { templates: ['package.start.request.admin', 'package.start.request.received'], reminders: [{ panel: 'reminders', label: 'Package start alerts' }] },
   B41: { templates: ['package.purchase.admin', 'package.purchase.received', 'plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
-  B49: { reminders: [{ panel: 'auto-reply', label: 'WhatsApp Auto Reply' }] },
 };
 
 function builtInFor(actionId) {
@@ -92,6 +90,7 @@ const TRIGGER_BY_ACTION_ID = {
   A118: 'project.completed',
   A119: 'project.completed',
   A120: 'project.completed',
+  B05: 'broadcast.sent',
   B49: 'whatsapp.ad_received',
 };
 

@@ -83,6 +83,7 @@ test('builtIn: every mapped action has valid emailCatalog keys and routes websit
   assert.equal(byId.A58.builtIn.templates[0].app, 'portal');
   assert.equal(byId.B07.builtIn.templates[0].app, 'website');
   assert.equal(byId.B05.builtIn.templates[0].panel, 'broadcast');
-  assert.equal(byId.B49.builtIn.reminders[0].panel, 'auto-reply');
+  assert.equal(byId.B35.builtIn.reminders[0].panel, 'reservation');
+  assert.equal(byId.B49.triggerKey, 'whatsapp.ad_received');
   assert.deepEqual(byId.A01.builtIn, { templates: [], reminders: [] });
 });

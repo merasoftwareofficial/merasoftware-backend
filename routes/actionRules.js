@@ -28,7 +28,7 @@ router.get('/runs', handle(async () => {
   const [users, leads, rules] = await Promise.all([
     clientIds.length ? User.find({ _id: { $in: clientIds } }).select('name email phone').lean() : [],
     leadIds.length ? Lead.find({ _id: { $in: leadIds } }).select('name email phone').lean() : [],
-    ruleIds.length ? ActionRule.find({ _id: { $in: ruleIds } }).select('name action audience').lean() : [],
+    ruleIds.length ? ActionRule.find({ _id: { $in: ruleIds } }).lean() : [],
   ]);
   const userById = new Map(users.map(u => [String(u._id), u]));
   const leadById = new Map(leads.map(l => [String(l._id), l]));
@@ -40,6 +40,8 @@ router.get('/runs', handle(async () => {
       ...run,
       ruleName: rule?.name || ACTIONS[run.action]?.label || run.action || 'Action rule',
       actionLabel: ACTIONS[run.action]?.label || run.action || '',
+      origin: rule?.origin || 'new',
+      rule: rule || null,
       customer: user ? { name: user.name || 'Customer', email: user.email || '', phone: user.phone || '' } : { name: 'Unknown customer', email: '', phone: '' },
     };
   });

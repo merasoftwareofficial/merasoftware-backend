@@ -404,3 +404,89 @@ test('review mode: stages pending EmailDraft instead of auto-sending and marks r
     emailController.sendSystemMail = origSend;
   }
 });
+
+test('origin tracking and turning on a draft rule: new stays new, migrated becomes migrated_edited, off promotes to auto', async () => {
+  const newRule = await createRule({
+    kind: 'template',
+    action: 'plan.started',
+    steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Draft hi {{name}}' }],
+    control: 'off',
+    enabled: false,
+  }, admin._id);
+  assert.equal(newRule.origin, 'new');
+  assert.equal(newRule.control, 'off');
+
+  const turnedOn = await setRuleEnabled(newRule._id, true);
+  assert.equal(turnedOn.enabled, true);
+  assert.equal(turnedOn.control, 'auto');
+
+  const migrated = await createRule({
+    kind: 'reminder',
+    action: 'invoice.created',
+    origin: 'migrated',
+    migratedFrom: 'old-rule-123',
+    steps: [{ timingRef: 'before_due', days: 3, channel: 'whatsapp', text: 'Due soon' }],
+    stopOn: ['payment.received'],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+  assert.equal(migrated.origin, 'migrated');
+  assert.equal(migrated.migratedFrom, 'old-rule-123');
+
+  const edited = await updateRule(migrated._id, {
+    kind: 'reminder',
+    action: 'invoice.created',
+    steps: [{ timingRef: 'before_due', days: 2, channel: 'whatsapp', text: 'Due in 2d' }],
+    stopOn: ['payment.received'],
+    control: 'auto',
+    enabled: true,
+  });
+  assert.equal(edited.origin, 'migrated_edited');
+  assert.equal(edited.migratedFrom, 'old-rule-123');
+});
+
+test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and migrates legacy rules idempotently', async () => {
+  const Lead = require('../models/leadModel');
+  const LegacyRule = require('../models/communicationReminderRuleModel');
+  const { migrateLegacyReminderRules } = require('../helpers/migrateLegacyReminderRules');
+
+  const legacyMonthly = await LegacyRule.create({
+    name: 'Legacy monthly',
+    source: 'monthly_package',
+    enabled: false,
+    createdBy: admin._id,
+    steps: [{ offsetDays: -3, channel: 'whatsapp', subject: 'Due', text: 'Pay {{name}}' }],
+  });
+  const legacyBroadcast = await LegacyRule.create({
+    name: 'Legacy broadcast',
+    source: 'broadcast',
+    enabled: true,
+    activatedAt: new Date(Date.now() - 1000),
+    createdBy: admin._id,
+    steps: [{ offsetDays: 2, channel: 'whatsapp', subject: 'Follow up', text: 'Hi {{name}}' }],
+  });
+
+  const firstRun = await migrateLegacyReminderRules();
+  assert.equal(firstRun.migrated, 2);
+  const secondRun = await migrateLegacyReminderRules();
+  assert.equal(secondRun.migrated, 0);
+  assert.equal(secondRun.skipped, 2);
+
+  const migratedBroadcast = await Rule.findOne({ migratedFrom: String(legacyBroadcast._id) }).lean();
+  assert.equal(migratedBroadcast.action, 'broadcast.sent');
+  assert.equal(migratedBroadcast.origin, 'migrated');
+  assert.equal(migratedBroadcast.enabled, true);
+
+  const lead = await Lead.create({ name: 'Broadcast Lead', phone: '9876500011', status: 'Inquiry' });
+  await require('../helpers/actionEvents').broadcastSent(new mongoose.Types.ObjectId(), lead._id);
+  await worker.processEvents();
+  const run = await Run.findOne({ ruleId: migratedBroadcast._id, leadId: lead._id }).lean();
+  assert.ok(run, 'broadcast.sent run planned');
+  assert.equal((await worker.stillValid(run)).ok, true);
+
+  await Lead.updateOne({ _id: lead._id }, { $set: { convertedToUserId: customer._id } });
+  const afterConvert = await worker.stillValid(run);
+  assert.equal(afterConvert.ok, false);
+
+  await LegacyRule.deleteMany({ _id: { $in: [legacyMonthly._id, legacyBroadcast._id] } });
+});

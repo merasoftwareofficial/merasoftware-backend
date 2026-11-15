@@ -36,6 +36,8 @@ const rule = new Schema({
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'off' },
   enabled: { type: Boolean, default: false },
   activatedAt: Date,
+  origin: { type: String, enum: ['new', 'migrated', 'migrated_edited'], default: 'new' },
+  migratedFrom: { type: String, default: '' },
   revision: { type: Number, default: 1, min: 1 },
   createdBy: { type: Schema.Types.ObjectId, ref: 'user', required: true },
 }, { timestamps: true });
