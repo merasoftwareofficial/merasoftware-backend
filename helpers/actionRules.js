@@ -124,12 +124,14 @@ async function createRule(raw, actorId) {
   const activate = ['auto', 'review'].includes(fields.control) && raw.enabled === true;
   const origin = ['new', 'migrated', 'migrated_edited'].includes(raw.origin) ? raw.origin : 'new';
   const migratedFrom = String(raw.migratedFrom || '').trim();
+  const pairId = String(raw.pairId || '').trim().slice(0, 64);
   return Rule.create({
     ...fields,
     name: autoName(fields),
     createdBy: actorId,
     origin,
     migratedFrom,
+    pairId,
     enabled: activate,
     ...(activate ? { activatedAt: new Date() } : {}),
   });
@@ -137,15 +139,16 @@ async function createRule(raw, actorId) {
 
 // Editing always makes a new version: runs already planned keep their frozen text.
 async function updateRule(id, raw) {
-  const existing = await Rule.findById(id).select('origin migratedFrom').lean();
+  const existing = await Rule.findById(id).select('origin migratedFrom pairId').lean();
   if (!existing) fail('Rule not found.');
   const fields = cleanRule(raw);
   const activate = ['auto', 'review'].includes(fields.control) && raw.enabled === true;
   const enabledUpdate = raw.enabled === undefined ? {} : activate ? { enabled: true, activatedAt: new Date() } : { enabled: false };
   const origin = existing.origin === 'migrated' || existing.origin === 'migrated_edited' ? 'migrated_edited' : (existing.origin || 'new');
+  const pairId = raw.pairId !== undefined ? String(raw.pairId || '').trim().slice(0, 64) : (existing.pairId || '');
   const rule = await Rule.findOneAndUpdate(
     { _id: id },
-    { $set: { ...fields, ...enabledUpdate, origin, name: autoName(fields) }, $inc: { revision: 1 } },
+    { $set: { ...fields, ...enabledUpdate, origin, pairId, name: autoName(fields) }, $inc: { revision: 1 } },
     { new: true },
   );
   if (!rule) fail('Rule not found.');
