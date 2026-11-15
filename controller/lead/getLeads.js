@@ -1,5 +1,6 @@
 const leadModel = require("../../models/leadModel");
 const { LABELS, contactBlocks, reasonFor } = require("../../helpers/leadContactBlock");
+const { healOrphanedLeads } = require("../../helpers/leadClientLink");
 
 const getLeadsController = async (req, res) => {
   try {
@@ -17,7 +18,10 @@ const getLeadsController = async (req, res) => {
       .sort({ updatedAt: -1 })
       .lean();
 
-    const blocks = await contactBlocks();
+    const [, blocks] = await Promise.all([
+      healOrphanedLeads(leads),
+      contactBlocks(),
+    ]);
 
     return res.json({
       message: "Leads fetched successfully",

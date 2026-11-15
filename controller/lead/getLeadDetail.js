@@ -1,5 +1,5 @@
-const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
+const { inspectLeadClient } = require("../../helpers/leadClientLink");
 const { FinalMessage, Queue } = require("../../whatsapp/src/models.js");
 const { EmailDraft } = require("../../models/emailControlModel");
 const { LABELS, MESSAGES, blockForLead } = require("../../helpers/leadContactBlock");
@@ -36,12 +36,21 @@ const getLeadDetailController = async (req, res) => {
       });
     }
 
-    const [finalMessage, blocked, offerTargets, clientAccount] = await Promise.all([
+    const [finalMessage, blocked, offerTargets, clientLink] = await Promise.all([
       FinalMessage.findOne({ leadId: lead._id }).select("status sentAt deadlineAt lastReplyAt lastReplyText replySeenAt decision subjectKind draftId hours stoppedAt stopReason stopSource expiryEnabled expiryQueuedAt originalMessage.id").lean(),
       blockForLead(lead),
       targetsForLead(lead._id),
-      lead.convertedToUserId ? userModel.findOne({ _id: lead.convertedToUserId, deletedAt: null, isGuest: { $ne: true }, roles: "customer" }).select("name email phone").lean() : null,
+      inspectLeadClient(lead),
     ]);
+    const clientAccount =
+      clientLink.status === "active" &&
+      clientLink.user &&
+      !clientLink.user.isGuest &&
+      Array.isArray(clientLink.user.roles) &&
+      clientLink.user.roles.includes("customer")
+        ? clientLink.user
+        : null;
+    if (clientLink.status === "trashed") lead.clientInTrash = true;
     // Present the latest delivery result without waiting for the minute job or changing tracking.
     if (finalMessage && ['review', 'queued'].includes(finalMessage.status)) {
       // Every copy (main and alternate number) counts, as the minute job follows them (helpers/finalMessageCopies.js).

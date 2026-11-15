@@ -13,6 +13,7 @@ const { sendClientAccountCreatedEmail } = require("../../helpers/emailService");
 const { NO_MARKETING_STATUSES, behaviourFromStatus } = require("../../helpers/leadStatuses");
 const { hasConfirmedName } = require("../../helpers/leadName");
 const { findAccountsByPhone } = require("../../helpers/leadPhone");
+const { inspectLeadClient } = require("../../helpers/leadClientLink");
 
 const convertLeadController = async (req, res) => {
   try {
@@ -39,9 +40,17 @@ const convertLeadController = async (req, res) => {
       });
     }
 
-    if (lead.convertedToUserId) {
+    const clientLink = await inspectLeadClient(lead);
+    if (clientLink.status === "active") {
       return res.status(409).json({
         message: "This lead is already converted to a client",
+        error: true,
+        success: false,
+      });
+    }
+    if (clientLink.status === "trashed") {
+      return res.status(409).json({
+        message: "This lead's client is currently in Trash. Restore or permanently delete the client from Trash first.",
         error: true,
         success: false,
       });

@@ -2,6 +2,7 @@ const userModel = require("../../models/userModel");
 const leadModel = require("../../models/leadModel");
 const { expiryCutoff, daysLeft } = require("./trashConstants");
 const { DEFAULT_LEAD_STATUS } = require("../../helpers/leadStatuses");
+const { unlinkDeletedClients } = require("../../helpers/leadClientLink");
 
 // Returns everything currently in Trash — soft-deleted clients + leads — merged and
 // badge-tagged (type: "client" | "lead"), each with daysLeft before auto-purge.
@@ -15,10 +16,12 @@ const getTrashController = async (req, res) => {
 
     // 1. Lazy purge: permanently remove records trashed before the retention cutoff.
     const cutoff = expiryCutoff();
+    const expiredClientIds = await userModel.find({ deletedAt: { $ne: null, $lt: cutoff } }).distinct("_id");
     await Promise.all([
       userModel.deleteMany({ deletedAt: { $ne: null, $lt: cutoff } }),
       leadModel.deleteMany({ deletedAt: { $ne: null, $lt: cutoff } }),
     ]);
+    if (expiredClientIds.length) await unlinkDeletedClients(expiredClientIds);
 
     // 2. List what remains in Trash.
     const [clients, leads] = await Promise.all([

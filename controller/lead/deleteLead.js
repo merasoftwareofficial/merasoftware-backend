@@ -1,4 +1,5 @@
 const leadModel = require("../../models/leadModel");
+const { inspectLeadClient } = require("../../helpers/leadClientLink");
 
 const deleteLeadController = async (req, res) => {
   try {
@@ -21,9 +22,11 @@ const deleteLeadController = async (req, res) => {
       });
     }
 
-    // Converted leads are the historical/audit trail behind a real client; deleting
-    // one would drop that trail. Block it — the client (userModel) is untouched anyway.
-    if (lead.convertedToUserId) {
+    // Converted leads with an active client are the audit trail behind a real client;
+    // block deleting those. If the client was permanently deleted (auto-healed) or is
+    // already in Trash, allow moving this lead to Trash.
+    const clientLink = await inspectLeadClient(lead);
+    if (clientLink.status === "active") {
       return res.status(409).json({
         message: "This lead is converted to a client and cannot be deleted",
         error: true,
