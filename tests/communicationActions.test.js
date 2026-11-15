@@ -70,3 +70,19 @@ test('categories: every action sits under a known heading, and every heading is 
     assert.ok(MEANING_BY_NAME[name].length > 10, name);
   }
 });
+
+test('builtIn: every mapped action has valid emailCatalog keys and routes website/broadcast cleanly', () => {
+  const { byKey } = require('../helpers/emailCatalog');
+  const byId = Object.fromEntries(ACTIONS.map(action => [action.id, merge(action, null)]));
+  for (const row of Object.values(byId)) {
+    for (const tpl of row.builtIn.templates) {
+      assert.ok(byKey.has(tpl.event), `${row.id} unknown template ${tpl.event}`);
+    }
+  }
+  assert.equal(byId.A58.builtIn.templates[0].event, 'lead.created');
+  assert.equal(byId.A58.builtIn.templates[0].app, 'portal');
+  assert.equal(byId.B07.builtIn.templates[0].app, 'website');
+  assert.equal(byId.B05.builtIn.templates[0].panel, 'broadcast');
+  assert.equal(byId.B49.builtIn.reminders[0].panel, 'auto-reply');
+  assert.deepEqual(byId.A01.builtIn, { templates: [], reminders: [] });
+});

@@ -4,7 +4,73 @@ const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCata
 const { ACTIONS: TRIGGER_ACTIONS } = require('./actionEvents');
 const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
+const { byKey: EMAIL_BY_KEY } = require('./emailCatalog');
 const { readPackages } = require('./salesPackages');
+
+// Maps Actions-list IDs (Reminder-mapping.md §A) to built-in templates and legacy reminders/automations.
+// Template labels and portal/website app routing come from emailCatalog (SSOT).
+const BUILTIN_BY_ACTION_ID = {
+  A13: { templates: ['sendUpdateRequestNotification', 'sendUserConfirmation'] },
+  A15: { templates: ['plan.request.admin', 'plan.request.received'] },
+  A26: { templates: ['sendUpdateRequestNotification', 'sendUserConfirmation'] },
+  A29: { templates: ['sendProjectCreatedEmail', 'plan.started'] },
+  A39: { templates: ['plan.request.admin', 'plan.request.received'] },
+  A44: { templates: ['sendProjectCancellationEmail'] },
+  A45: { templates: ['project.upgrade.offer', 'project.upgrade.started', 'project.upgrade.completed'] },
+  A51: { templates: ['plan.started'] },
+  A53: { templates: ['plan.work_update'] },
+  A54: { templates: ['plan.upload.in_progress', 'plan.upload.completed', 'plan.upload.rejected'] },
+  A58: { templates: ['lead.created'] },
+  A60: { templates: ['lead.finalMessage'], reminders: [{ panel: 'final-message', label: 'Final Message' }] },
+  A62: { templates: ['sendClientAccountCreatedEmail'] },
+  A63: { templates: ['lead.proposal'] },
+  A64: { templates: ['lead.proposal'] },
+  A65: { templates: ['lead.finalMessage'], reminders: [{ panel: 'final-message', label: 'Final Message' }] },
+  A66: { templates: ['lead.finalMessage'], reminders: [{ panel: 'final-message', label: 'Final Message' }] },
+  A67: { reminders: [{ panel: 'final-message', label: 'Final Message (stop)' }] },
+  A68: { templates: ['lead.message'] },
+  A82: { templates: ['sendUpdateRequestNotification', 'sendUserConfirmation'] },
+  A91: { templates: ['plan.payment.received'] },
+  A92: { templates: ['plan.payment.rejected'] },
+  A104: { templates: ['sendAdminUPIPendingNotification'] },
+  A105: { templates: ['plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
+  A109: { reminders: [{ panel: 'reminders', label: 'Monthly Reminders (stop)' }] },
+  A111: { templates: ['invoice.project'] },
+  A112: { templates: ['sendMonthlyInvoiceEmail'] },
+  A113: { templates: ['invoice.reminder'] },
+  A114: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A115: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A116: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A117: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A118: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A119: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  A120: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
+  B05: { templates: ['broadcast.manual'], reminders: [{ panel: 'reminders', label: 'Broadcast follow-up' }] },
+  B06: { templates: ['broadcast.manual'] },
+  B07: { templates: ['website.subscription.confirm', 'website.subscription.manage'] },
+  B21: { templates: ['lead.finalMessage'], reminders: [{ panel: 'final-message', label: 'Final Message' }] },
+  B35: { templates: ['offer.reserved'], reminders: [{ panel: 'reservation', label: 'Reservation countdown' }] },
+  B36: { templates: ['offer.reservation.extended'] },
+  B37: { templates: ['offer.start.request.admin', 'offer.start.request.received'], reminders: [{ panel: 'reservation', label: 'Team start alerts' }] },
+  B39: { templates: ['package.start.request.admin', 'package.start.request.received'], reminders: [{ panel: 'reminders', label: 'Package start alerts' }] },
+  B41: { templates: ['package.purchase.admin', 'package.purchase.received', 'plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
+  B49: { reminders: [{ panel: 'auto-reply', label: 'WhatsApp Auto Reply' }] },
+};
+
+function builtInFor(actionId) {
+  const entry = BUILTIN_BY_ACTION_ID[actionId];
+  if (!entry) return { templates: [], reminders: [] };
+  const templates = (entry.templates || []).map(key => {
+    const meta = EMAIL_BY_KEY.get(key);
+    return {
+      event: key,
+      label: meta?.label || key,
+      app: meta?.application || 'portal',
+      panel: key === 'broadcast.manual' ? 'broadcast' : 'email-templates',
+    };
+  });
+  return { templates, reminders: entry.reminders || [] };
+}
 
 // Maps Actions-list IDs (Reminder-mapping.md §A) to backend action-rule trigger keys.
 const TRIGGER_BY_ACTION_ID = {
@@ -55,6 +121,7 @@ function merge(base, override, rules = []) {
     triggerKey,
     supportsScope: !!triggerMeta?.supportsScope,
     conditions: triggerMeta?.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
+    builtIn: builtInFor(base.id),
     rules,
   };
 }
