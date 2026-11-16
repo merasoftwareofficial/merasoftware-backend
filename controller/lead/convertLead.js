@@ -249,6 +249,7 @@ const convertLeadController = async (req, res) => {
     // "Client account created" mail: prepared for the admin's Send / Don't Send review and
     // dropped if this response fails. It never carries the default password.
     await sendClientAccountCreatedEmail(clientUser);
+    await require("../../helpers/actionEvents").clientAccountCreated(clientUser).catch(err => console.error('[action client.account_created]', err.message));
     // A final message the lead had running belongs to the lead, not the new client: it ends here.
     await require("../../helpers/finalMessageCycle").reconcileCycle(leadId, { actor: req.userId });
 

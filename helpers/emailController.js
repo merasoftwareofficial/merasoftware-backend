@@ -80,10 +80,19 @@ function validateContent(subject, text) {
   if (typeof subject !== 'string' || !subject.trim() || subject.length > 300 || /[\r\n]/.test(subject)) throw new Error('Subject must be 1–300 characters on one line');
   if (typeof text !== 'string' || !text.trim() || text.length > 100000) throw new Error('Message must be 1–100000 characters');
 }
+async function isTemplateMigratedAndActive(event) {
+  if (process.env.ACTION_RULES_ENABLED !== 'true' || !event || event === 'reminder.automated') return false;
+  const ActionRule = require('../models/communicationActionRuleModel');
+  return !!(await ActionRule.exists({ migratedFrom: `template:${event}`, enabled: true, control: { $in: ['auto', 'review'] } }));
+}
+
 async function prepareMail(event, mail, extraValues) {
   const scope = requestScope.getStore();
   // Background jobs, cron, anonymous requests and old unintegrated callers fail closed.
   if (!scope || scope.closed || !byKey.has(event)) return suppressed();
+  if (!mail?.fromActionRule && await isTemplateMigratedAndActive(event)) {
+    return { data: null, error: null, suppressed: true, handledByActionRule: true };
+  }
   // Only events the catalog registers as system-triggered may send from a background scope.
   if (scope.system && byKey.get(event).trigger !== 'system') return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';

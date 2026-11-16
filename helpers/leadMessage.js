@@ -61,6 +61,7 @@ async function prepare(lead) {
   const first = (await typesFor(lead)).find(type => type.enabled);
   if (!first) return false;
   const { draftId } = await queueMail(first.id, await mailFor(first.id, lead));
+  await require('./actionEvents').leadMessageSent(lead).catch(err => console.error('[action lead.message]', err.message));
   return !!draftId;
 }
 

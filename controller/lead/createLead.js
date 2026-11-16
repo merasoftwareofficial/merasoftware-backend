@@ -166,6 +166,8 @@ const createLeadController = async (req, res) => {
       }
     }
 
+    await require('../../helpers/actionEvents').leadCreated(savedLead).catch(err => console.error('[action lead.created]', err.message));
+
     return res.status(201).json({
       message: "Lead created successfully",
       data: savedLead,

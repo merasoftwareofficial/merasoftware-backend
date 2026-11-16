@@ -13,6 +13,7 @@ async function notifyUpload(requestId, timing) {
   await measureUpload(timing, 'admin_email_prepare', () => sendUpdateRequestNotification(record, ADMIN_EMAILS));
   await measureUpload(timing, 'client_email_prepare', () => sendUserConfirmation(record));
   await measureUpload(timing, 'in_app_notifications', () => createUpdateRequestNotification(record));
+  await require('./actionEvents').uploadCompleted(record).catch(err => console.error('[action upload.completed]', err.message));
 }
 
 // The worker has no one else to tell: without this a stuck upload waits unseen.

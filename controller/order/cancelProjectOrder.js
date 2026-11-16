@@ -286,6 +286,7 @@ const cancelProjectOrder = async (req, res) => {
           ...cancelledServices.flatMap((svc) => svc.refunds || []),
         ];
         await sendProjectCancellationEmail(customer, order, allRefunds, cancelledOrder.cancellationReason || "");
+        await require("../../helpers/actionEvents").projectCancelled(order).catch(err => console.error('[action project.cancelled]', err.message));
       } catch (emailError) {
         console.error("Cancellation email failed:", emailError);
       }

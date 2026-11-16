@@ -56,10 +56,12 @@ const BUILTIN_BY_ACTION_ID = {
   B41: { templates: ['package.purchase.admin', 'package.purchase.received', 'plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
 };
 
-function builtInFor(actionId, policyByEvent = null) {
+function builtInFor(actionId, policyByEvent = null, migratedTemplateEvents = null) {
   const entry = BUILTIN_BY_ACTION_ID[actionId];
   if (!entry) return { templates: [], reminders: [] };
-  const templates = (entry.templates || []).map(key => {
+  const templates = (entry.templates || [])
+    .filter(key => !migratedTemplateEvents || !migratedTemplateEvents.has(key))
+    .map(key => {
     const meta = EMAIL_BY_KEY.get(key);
     let mode;
     if (policyByEvent) {
@@ -83,10 +85,31 @@ function builtInFor(actionId, policyByEvent = null) {
 
 // Maps Actions-list IDs (Reminder-mapping.md §A) to backend action-rule trigger keys.
 const TRIGGER_BY_ACTION_ID = {
+  A13: 'upload.completed',
+  A26: 'upload.completed',
+  A82: 'upload.completed',
+  A15: 'plan.requested',
+  A39: 'plan.requested',
+  A44: 'project.cancelled',
+  A45: 'project.upgraded',
+  A46: 'wallet.recharged',
+  A53: 'plan.work_updated',
+  A54: 'plan.upload_updated',
+  A58: 'lead.created',
+  A62: 'client.account_created',
+  A63: 'lead.proposal',
+  A64: 'lead.proposal',
+  A68: 'lead.message',
+  A92: 'plan.payment_rejected',
+  A109: 'plan.closed',
   A29: 'plan.started',
   A51: 'plan.started',
   A105: 'plan.started',
   A104: 'invoice.created',
+  A111: 'invoice.resent',
+  A112: 'invoice.resent',
+  A113: 'invoice.manual_reminder',
+  B36: 'reservation.extended',
   B41: 'invoice.created',
   A43: 'payment.received',
   A83: 'payment.received',
@@ -117,7 +140,7 @@ const fail = (message, status = 400) => { throw Object.assign(new Error(message)
 const clean = (text, max) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 // One action as the page shows it: the catalog row, with the owner's saved changes on top.
-function merge(base, override, rules = [], policyByEvent = null) {
+function merge(base, override, rules = [], policyByEvent = null, migratedTemplateEvents = null) {
   const o = override || {};
   const text = TEXT_BY_ID[base.id] || { title: base.endpoint, what: '', when: '' };
   const triggerKey = TRIGGER_BY_ACTION_ID[base.id] || null;
@@ -138,7 +161,7 @@ function merge(base, override, rules = [], policyByEvent = null) {
     triggerKey,
     supportsScope: !!triggerMeta?.supportsScope,
     conditions: triggerMeta?.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
-    builtIn: builtInFor(base.id, policyByEvent),
+    builtIn: builtInFor(base.id, policyByEvent, migratedTemplateEvents),
     rules,
   };
 }
@@ -178,14 +201,22 @@ async function list() {
   const known = new Set(CATEGORIES.map(item => item.name));
   const extra = [...new Set(overrides.map(o => o.category).filter(name => name && !known.has(name)))];
   const categories = [...CATEGORIES, ...extra.map(name => ({ name, meaning: '' }))];
+  const migratedTemplateEvents = new Set(
+    allRules
+      .filter(r => typeof r.migratedFrom === 'string' && r.migratedFrom.startsWith('template:'))
+      .map(r => r.migratedFrom.slice('template:'.length)),
+  );
   const rulesFor = baseId => {
     const triggerKey = TRIGGER_BY_ACTION_ID[baseId] || null;
-    return allRules.filter(r => r.actionId === baseId || (triggerKey && !r.actionId && r.action === triggerKey));
+    return allRules.filter(r =>
+      r.actionId === baseId ||
+      (triggerKey && r.action === triggerKey && (!r.actionId || String(r.migratedFrom || '').startsWith('template:'))),
+    );
   };
   const packages = (Array.isArray(catalogue) ? catalogue : [])
     .filter(p => p && p.slug)
     .map(p => ({ slug: p.slug, name: p.name || p.slug }));
-  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent)), surfaces: SURFACES, categories, packages };
+  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents)), surfaces: SURFACES, categories, packages };
 }
 
 async function update(actionId, body, userId) {

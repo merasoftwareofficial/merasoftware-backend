@@ -23,6 +23,7 @@ async function prepareNodeMessage(req, order, node) {
   });
   if (!mail) return { emailStatus: 'no-recipient' };
   const result = await queueMail('sendProjectUpdateEmail', { ...mail, dedupeKey });
+  await require('./actionEvents').projectStepUpdated(order, node.nodeId).catch(err => console.error('[action project.step_updated]', err.message));
   return result.queued ? {} : { emailStatus: 'disabled-or-unavailable' };
 }
 

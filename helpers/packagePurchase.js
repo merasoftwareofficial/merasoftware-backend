@@ -241,6 +241,7 @@ async function purchasePackage({ userId, packageId, choice, quoteKey, dueNow, cr
     await after('team notice', () => require('./emailController').sendReservationMail('package.purchase.admin', { packageName: commercial.agreement.package?.name,
       price: finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending,
       upiReference: purchase.upiPending > 0 ? upiReference : '' }, fresh, `package-purchase:${order._id}`));
+    await after('action package.purchased', () => require('./actionEvents').packagePurchased(order));
   });
   return { orderId: String(order._id), invoiceId: String(invoice._id), approved: order.orderVisibility === 'approved', reused: false, promoted,
     finalPrice, dueNow: purchase.dueNow, walletPaid: purchase.walletPaid, upiPending: purchase.upiPending };

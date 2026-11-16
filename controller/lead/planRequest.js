@@ -88,6 +88,7 @@ async function notify({ lead, plan, quote, contact }) {
   const request = { lead, planName: plan.serviceName, contact, ...choiceText(plan, quote) };
   await prepareTemplatedMail("plan.request.admin", request);
   await prepareTemplatedMail("plan.request.received", request);
+  await require("../../helpers/actionEvents").planRequested(lead, plan.serviceName).catch(err => console.error('[action plan.requested]', err.message));
 }
 
 const respond = (fn) => async (req, res) => {

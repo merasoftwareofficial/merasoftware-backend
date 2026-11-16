@@ -41,8 +41,11 @@ async function deliverExtensionNotice(reservationId, version) {
     if (!row || row.extensions.length !== version) status = 'superseded';
     else if (!user || user.isGuest || user.isActive === false || user.deletedAt) status = 'paused';
     else if (notice.deadline <= now) status = 'expired';
-    else status = await require('./emailController').sendReservationMail('offer.reservation.extended', { ...row, extendedUntil: notice.deadline }, user,
-      `offer-reservation-extended:${reservationId}:${version}`);
+    else {
+      status = await require('./emailController').sendReservationMail('offer.reservation.extended', { ...row, extendedUntil: notice.deadline }, user,
+        `offer-reservation-extended:${reservationId}:${version}`);
+      await require('./actionEvents').reservationExtended(row).catch(err => console.error('[action reservation.extended]', err.message));
+    }
   } catch (error) { failure = error.message; }
   await Notice.updateOne({ _id: notice._id, lockedUntil: notice.lockedUntil }, { $set: {
     status, failure, lockedUntil: null, nextAttemptAt: new Date(Date.now() + 5 * 60000),

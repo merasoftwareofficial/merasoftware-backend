@@ -58,6 +58,7 @@ async function queueProposalWhatsApp(lead, proposal, body) {
     try { rows.push(await enqueueWhatsApp({ _id: id, to: number, text: messageText({ subject, plain }), event: EVENT, application: "portal", ...(index > 0 ? { alt: true } : {}) })); }
     catch (error) { if (error.code !== 11000) throw error; rows.push(await require('../whatsapp/src/models.js').Queue.findById(id)); }
   }
+  await require('./actionEvents').leadProposalSent(lead, version).catch(err => console.error('[action lead.proposal]', err.message));
   return rows[0];
 }
 

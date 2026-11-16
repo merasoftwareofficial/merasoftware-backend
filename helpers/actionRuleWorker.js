@@ -28,6 +28,8 @@ const NO_ORDER_ACTIONS = new Set([
   'whatsapp.ad_received', 'broadcast.sent', 'package.start_requested',
   'lead.final_message_started', 'final_message.stopped', 'start_request.closed',
   'reservation.expired', 'project.created', 'reservation.extended',
+  'lead.created', 'client.account_created', 'lead.proposal', 'lead.message', 'upload.completed',
+  'plan.requested',
 ]);
 
 async function resolveEventContext(event) {
@@ -42,7 +44,7 @@ async function resolveEventContext(event) {
   }
   let invoice = null;
   let order = null;
-  if (event.action === 'invoice.created' || event.action === 'payment.received') {
+  if (event.action === 'invoice.created' || event.action === 'payment.received' || event.action === 'invoice.resent' || event.action === 'invoice.manual_reminder') {
     invoice = await Invoice.findById(event.entityId).lean();
     order = invoice?.orderId ? await Order.findById(invoice.orderId).lean() : null;
   } else {
@@ -201,8 +203,8 @@ async function stillValid(run) {
   }
   const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid';
   let invoice = null, order = null;
-  if (run.action === 'whatsapp.ad_received' || run.action === 'broadcast.sent') {
-    // No invoice or order attached to an incoming WhatsApp message or broadcast.
+  if (NO_ORDER_ACTIONS.has(run.action)) {
+    // Lead / client / upload template actions need no invoice or order lookup.
   } else if (run.action === 'reservation.start_requested') {
     const Reservation = require('../models/offerReservationModel');
     const row = await Reservation.findById(run.entityId).select('projectId confirmedAt startRequestedAt startRequests teamRemindersPaused').lean();
@@ -229,7 +231,7 @@ async function stillValid(run) {
     if (!row || row.status !== 'waiting') {
       return { ok: false, reason: 'Final message is no longer waiting.' };
     }
-  } else if (run.action === 'invoice.created' || run.action === 'payment.received') {
+  } else if (run.action === 'invoice.created' || run.action === 'payment.received' || run.action === 'invoice.resent' || run.action === 'invoice.manual_reminder') {
     if (String(run.occurrenceKey || '').startsWith('projected:')) {
       order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber').lean();
       const { isFinalCycle } = require('./serviceBillingSchedule');
@@ -385,6 +387,7 @@ async function dispatchRun(runId, now = new Date()) {
     const phone = isAdmin ? ((contacts || []).flatMap(c => c.numbers)[0] || '') : client.phone;
     const mail = {
       reviewed: true,
+      fromActionRule: true,
       to,
       phone,
       subject: render(normalizePlaceholders(run.subject), values, {}, { plain: true }),

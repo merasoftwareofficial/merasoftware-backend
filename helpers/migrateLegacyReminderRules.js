@@ -1,7 +1,60 @@
 const LegacyRule = require('../models/communicationReminderRuleModel');
 const ActionRule = require('../models/communicationActionRuleModel');
 const Run = require('../models/communicationReminderRunModel');
+const { EmailPolicy } = require('../models/emailControlModel');
 const { createRule } = require('./actionRules');
+const { isAdminRecipientEvent, isCustomerTriggered, byKey } = require('./emailCatalog');
+const { resolveTemplate, systemTemplate } = require('./emailTemplates');
+
+const TEMPLATE_SEEDS = [
+  // Batch T1: Leads, Uploads, Orders/Invoices
+  { event: 'lead.created', action: 'lead.created', actionId: 'A58' },
+  { event: 'sendClientAccountCreatedEmail', action: 'client.account_created', actionId: 'A62' },
+  { event: 'lead.proposal', action: 'lead.proposal', actionId: 'A63' },
+  { event: 'lead.message', action: 'lead.message', actionId: 'A68' },
+  { event: 'sendUpdateRequestNotification', action: 'upload.completed', actionId: 'A13' },
+  { event: 'sendUserConfirmation', action: 'upload.completed', actionId: 'A13' },
+  { event: 'sendAdminUPIPendingNotification', action: 'order.upi_pending', actionId: 'A104' },
+  { event: 'invoice.project', action: 'invoice.resent', actionId: 'A111' },
+  { event: 'sendMonthlyInvoiceEmail', action: 'invoice.resent', actionId: 'A112' },
+  { event: 'invoice.reminder', action: 'invoice.manual_reminder', actionId: 'A113' },
+  // Batch T2: Plans & Projects
+  { event: 'plan.request.admin', action: 'plan.requested', actionId: 'A15' },
+  { event: 'plan.request.received', action: 'plan.requested', actionId: 'A15' },
+  { event: 'plan.started', action: 'plan.started', actionId: 'A29' },
+  { event: 'plan.work_update', action: 'plan.work_updated', actionId: 'A53' },
+  { event: 'plan.upload.in_progress', action: 'plan.upload_updated', actionId: 'A54' },
+  { event: 'plan.upload.completed', action: 'plan.upload_updated', actionId: 'A54' },
+  { event: 'plan.upload.rejected', action: 'plan.upload_updated', actionId: 'A54' },
+  { event: 'plan.payment.received', action: 'payment.received', actionId: 'A91' },
+  { event: 'plan.payment.rejected', action: 'plan.payment_rejected', actionId: 'A92' },
+  { event: 'plan.purchase.admin', action: 'plan.purchased', actionId: 'A105' },
+  { event: 'plan.payment.submitted', action: 'plan.purchased', actionId: 'A105' },
+  { event: 'sendProjectCreatedEmail', action: 'project.created', actionId: 'A29' },
+  { event: 'sendProjectCancellationEmail', action: 'project.cancelled', actionId: 'A44' },
+  { event: 'project.upgrade.offer', action: 'project.upgraded', actionId: 'A45' },
+  { event: 'project.upgrade.started', action: 'project.upgraded', actionId: 'A45' },
+  { event: 'project.upgrade.completed', action: 'project.upgraded', actionId: 'A45' },
+  { event: 'sendProjectUpdateEmail', action: 'project.step_updated', actionId: 'A114' },
+  // Batch T3: Offers, Reservations, Packages & §C 9 active-flow templates
+  { event: 'offer.reserved', action: 'reservation.created', actionId: 'B35' },
+  { event: 'offer.reservation.extended', action: 'reservation.extended', actionId: 'B36' },
+  { event: 'offer.start.request.admin', action: 'reservation.start_requested', actionId: 'B37' },
+  { event: 'offer.start.request.received', action: 'reservation.start_requested', actionId: 'B37' },
+  { event: 'package.start.request.admin', action: 'package.start_requested', actionId: 'B39' },
+  { event: 'package.start.request.received', action: 'package.start_requested', actionId: 'B39' },
+  { event: 'package.purchase.admin', action: 'package.purchased', actionId: 'B41' },
+  { event: 'package.purchase.received', action: 'package.purchased', actionId: 'B41' },
+  { event: 'sendPurchaseConfirmationEmail', action: 'invoice.created', actionId: 'A104' },
+  { event: 'sendAdminPurchaseConfirmationEmail', action: 'invoice.created', actionId: 'A104' },
+  { event: 'sendMonthlyLimitedPlanActivationEmail', action: 'plan.started', actionId: 'A51' },
+  { event: 'sendWalletRechargeConfirmationEmail', action: 'wallet.recharged', actionId: 'A46' },
+  { event: 'sendWalletRechargeRejectionEmail', action: 'plan.payment_rejected', actionId: 'A92' },
+  { event: 'sendPaymentRejectionEmail', action: 'plan.payment_rejected', actionId: 'A92' },
+  { event: 'sendAdminAutoRenewalNotification', action: 'plan.started', actionId: 'A51' },
+  { event: 'sendPlanClosureEmailToCustomer', action: 'plan.closed', actionId: 'A109' },
+  { event: 'sendPlanClosureEmailToAdmin', action: 'plan.closed', actionId: 'A109' },
+];
 
 function mapMonthlyStep(step) {
   const offset = Number(step.offsetDays || 0);
@@ -199,7 +252,46 @@ async function migrateLegacyReminderRules({ dryRun = false, actorId = null } = {
     }
     if (dryRun || fallbackActor) migrated++;
   }
-  return { dryRun, total: legacyRules.length + BUILTIN_REMINDER_SEEDS.length, migrated, skipped, disabledLegacy, cancelledRuns };
+  for (const tpl of TEMPLATE_SEEDS) {
+    const migratedFrom = `template:${tpl.event}`;
+    const exists = await ActionRule.exists({ migratedFrom });
+    if (exists) {
+      skipped++;
+      continue;
+    }
+    if (!dryRun && fallbackActor) {
+      const policy = await EmailPolicy.findOne({ event: tpl.event }).lean();
+      const loaded = (policy?.defaultTemplate ? await resolveTemplate(tpl.event, policy.defaultTemplate).catch(() => null) : null)
+        || await systemTemplate(tpl.event).catch(() => null);
+      const meta = byKey.get(tpl.event);
+      const subject = String(loaded?.subject || meta?.label || tpl.event).trim();
+      const text = String(loaded?.text || meta?.label || tpl.event).trim();
+      let control = 'review';
+      if (policy?.mode === 'off') control = 'off';
+      else if (isCustomerTriggered(tpl.event)) control = policy?.mode === 'auto' ? 'auto' : 'off';
+      else if (meta?.trigger === 'system') control = 'auto';
+      else if (policy?.mode) control = policy.mode;
+      const channel = ['email', 'whatsapp', 'both'].includes(policy?.channel) ? policy.channel : 'both';
+      await createRule({
+        kind: 'template',
+        action: tpl.action,
+        actionId: tpl.actionId,
+        audience: isAdminRecipientEvent(tpl.event) ? 'admin' : 'customer',
+        condition: 'anytime',
+        scope: { kind: 'all' },
+        steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel, subject: channel === 'whatsapp' ? '' : subject, text }],
+        repeat: { times: 0 },
+        stopOn: [],
+        doAlso: [],
+        control,
+        enabled: control !== 'off',
+        origin: 'migrated',
+        migratedFrom,
+      }, fallbackActor);
+    }
+    if (dryRun || fallbackActor) migrated++;
+  }
+  return { dryRun, total: legacyRules.length + BUILTIN_REMINDER_SEEDS.length + TEMPLATE_SEEDS.length, migrated, skipped, disabledLegacy, cancelledRuns };
 }
 
 const ruleFingerprint = r => JSON.stringify([

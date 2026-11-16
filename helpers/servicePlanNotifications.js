@@ -75,6 +75,7 @@ async function uploadStatus(requestId, status, note, step) {
   if (!request) return 'missing';
   const order = await orderModel.findById(request.updatePlanId).lean();
   if (!order?.isServicePlan) return 'not-a-plan';
+  await require('./actionEvents').planUploadUpdated(order, requestId, status).catch(err => console.error('[action plan.upload_updated]', err.message));
   return sendPlanMail(event, `plan-upload:${requestId}:${step}`, request, order, note);
 }
 
@@ -83,6 +84,7 @@ async function workUpdate(orderId, entryId) {
   const order = await withCustomer(orderId);
   const entry = (order?.serviceWorkUpdates || []).find((item) => String(item._id) === String(entryId));
   if (!entry) return 'missing';
+  await require('./actionEvents').planWorkUpdated(order, entryId).catch(err => console.error('[action plan.work_update]', err.message));
   return sendPlanMail('plan.work_update', `plan-work-update:${orderId}:${entryId}`, order, entry);
 }
 
@@ -102,11 +104,15 @@ async function preparePurchaseMails(orderId, payment) {
   if (!order) return;
   if (payment.upiPending > 0) await prepareInRequest('plan.payment.submitted', order, payment);
   await prepareInRequest('plan.purchase.admin', order, payment);
+  await require('./actionEvents').planPurchased(order).catch(err => console.error('[action plan.purchased]', err.message));
 }
 
 async function preparePaymentRejected(orderId, transaction, reason) {
   const order = await withCustomer(orderId);
-  if (order?.isServicePlan) await prepareInRequest('plan.payment.rejected', order, transaction, reason);
+  if (order?.isServicePlan) {
+    await prepareInRequest('plan.payment.rejected', order, transaction, reason);
+    await require('./actionEvents').planPaymentRejected(order, reason).catch(err => console.error('[action plan.payment_rejected]', err.message));
+  }
 }
 
 module.exports = {

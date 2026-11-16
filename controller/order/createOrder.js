@@ -280,6 +280,7 @@ console.log('Product category from DB:', product.category);
     } catch (emailError) {
       console.error('Error sending admin pending notification:', emailError);
     }
+    await require('../../helpers/actionEvents').orderUpiPending(populatedOrder).catch(err => console.error('[action order.upi_pending]', err.message));
 
     res.status(201).json({
       message: "Order created successfully",

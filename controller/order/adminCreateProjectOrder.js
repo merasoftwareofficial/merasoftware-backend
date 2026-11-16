@@ -258,7 +258,10 @@ const adminCreateProjectOrderController = async (req, res) => {
       sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId, startDate,
     });
     // Keep request-scoped review drafts outside the retryable financial transaction.
-    if (!reused) await sendProjectCreatedEmail(client, order, invoice);
+    if (!reused) {
+      await sendProjectCreatedEmail(client, order, invoice);
+      await require('../../helpers/actionEvents').projectCreated(order).catch(err => console.error('[action project.created]', err.message));
+    }
     if (order.offerReservationId) setImmediate(() => require('../../helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message)));
     return res.status(reused ? 200 : 201).json({
       message: "Project created successfully",

@@ -25,6 +25,25 @@ const ACTIONS = {
   'reservation.expired': { label: 'Reservation expired', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'lead.final_message_started': { label: 'Final message started', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'final_message.stopped': { label: 'Final message stopped', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'lead.created': { label: 'Lead created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'client.account_created': { label: 'Client account created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'lead.proposal': { label: 'Proposal sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'lead.message': { label: 'Message sent to lead', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'upload.completed': { label: 'Update request / upload completed', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'order.upi_pending': { label: 'Order created (UPI pending)', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'invoice.resent': { label: 'Invoice resent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'invoice.manual_reminder': { label: 'Manual payment reminder', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'plan.requested': { label: 'Plan requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'plan.work_updated': { label: 'Plan work update added', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'plan.upload_updated': { label: 'Plan upload status changed', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'plan.payment_rejected': { label: 'Plan or wallet payment rejected', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'plan.purchased': { label: 'Service plan purchased', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'project.cancelled': { label: 'Project cancelled', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'project.upgraded': { label: 'Project complimentary upgrade', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'project.step_updated': { label: 'Project step update', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'package.purchased': { label: 'Package purchased', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'wallet.recharged': { label: 'Wallet recharged', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'plan.closed': { label: 'Plan closed / renewal stopped', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 
@@ -205,6 +224,205 @@ const finalMessageStopped = row => {
   });
 };
 
+const leadCreated = lead => {
+  if (!lead?._id) return Promise.resolve(false);
+  return emitAction('lead.created', {
+    key: `lead.created:${id(lead._id)}`,
+    entityId: lead._id,
+    leadId: lead._id,
+    matchKeys: [`lead:${id(lead._id)}`],
+    occurredAt: lead.createdAt || new Date(),
+  });
+};
+
+const clientAccountCreated = user => {
+  if (!user?._id) return Promise.resolve(false);
+  return emitAction('client.account_created', {
+    key: `client.account_created:${id(user._id)}`,
+    entityId: user._id,
+    clientId: user._id,
+    matchKeys: [`client:${id(user._id)}`],
+  });
+};
+
+const leadProposalSent = (lead, version = 1) => {
+  if (!lead?._id) return Promise.resolve(false);
+  return emitAction('lead.proposal', {
+    key: `lead.proposal:${id(lead._id)}:${version}:${Date.now()}`,
+    entityId: lead._id,
+    leadId: lead._id,
+    matchKeys: [`lead:${id(lead._id)}`],
+    details: { version },
+  });
+};
+
+const leadMessageSent = lead => {
+  if (!lead?._id) return Promise.resolve(false);
+  return emitAction('lead.message', {
+    key: `lead.message:${id(lead._id)}:${Date.now()}`,
+    entityId: lead._id,
+    leadId: lead._id,
+    matchKeys: [`lead:${id(lead._id)}`],
+  });
+};
+
+const uploadCompleted = record => {
+  if (!record?._id) return Promise.resolve(false);
+  return emitAction('upload.completed', {
+    key: `upload.completed:${id(record._id)}`,
+    entityId: record._id,
+    clientId: record.userId || null,
+    matchKeys: [`upload:${id(record._id)}`],
+    details: { title: record.title || record.subject || '' },
+  });
+};
+
+const orderUpiPending = order => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('order.upi_pending', {
+    key: `order.upi_pending:${id(order._id)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const invoiceResent = invoice => {
+  if (!invoice?._id) return Promise.resolve(false);
+  return emitAction('invoice.resent', {
+    key: `invoice.resent:${id(invoice._id)}:${Date.now()}`,
+    entityId: invoice._id,
+    clientId: invoice.userId || null,
+    orderId: invoice.orderId || null,
+    matchKeys: invoiceKeys(invoice),
+  });
+};
+
+const invoiceManualReminder = invoice => {
+  if (!invoice?._id) return Promise.resolve(false);
+  return emitAction('invoice.manual_reminder', {
+    key: `invoice.manual_reminder:${id(invoice._id)}:${Date.now()}`,
+    entityId: invoice._id,
+    clientId: invoice.userId || null,
+    orderId: invoice.orderId || null,
+    matchKeys: invoiceKeys(invoice),
+  });
+};
+
+const planRequested = (lead, planName = '') => {
+  if (!lead?._id) return Promise.resolve(false);
+  return emitAction('plan.requested', {
+    key: `plan.requested:${id(lead._id)}:${Date.now()}`,
+    entityId: lead._id,
+    leadId: lead._id,
+    matchKeys: [`lead:${id(lead._id)}`],
+    details: { planName },
+  });
+};
+
+const planWorkUpdated = (order, entryId) => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('plan.work_updated', {
+    key: `plan.work_updated:${id(order._id)}:${id(entryId)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const planUploadUpdated = (order, requestId, status) => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('plan.upload_updated', {
+    key: `plan.upload_updated:${id(requestId)}:${status}:${Date.now()}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+    details: { status },
+  });
+};
+
+const planPaymentRejected = (order, reason = '') => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('plan.payment_rejected', {
+    key: `plan.payment_rejected:${id(order._id)}:${Date.now()}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+    details: { reason },
+  });
+};
+
+const planPurchased = order => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('plan.purchased', {
+    key: `plan.purchased:${id(order._id)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const projectCancelled = order => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('project.cancelled', {
+    key: `project.cancelled:${id(order._id)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const projectUpgraded = (order, stage = 'offer') => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('project.upgraded', {
+    key: `project.upgraded:${id(order._id)}:${stage}:${Date.now()}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+    details: { stage },
+  });
+};
+
+const projectStepUpdated = (order, nodeId) => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('project.step_updated', {
+    key: `project.step_updated:${id(order._id)}:${id(nodeId)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const packagePurchased = order => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('package.purchased', {
+    key: `package.purchased:${id(order._id)}`,
+    entityId: order._id,
+    clientId: order.userId?._id || order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+  });
+};
+
+const reservationExtended = row => {
+  if (!row?._id || !row?.userId) return Promise.resolve(false);
+  return emitAction('reservation.extended', {
+    key: `reservation.extended:${id(row._id)}:${(row.extensions || []).length}`,
+    entityId: row._id,
+    clientId: row.userId,
+    matchKeys: [`reservation:${id(row._id)}`],
+    details: { dueDate: row.extendedUntil || row.expiresAt },
+  });
+};
+
 module.exports = {
   ACTIONS,
   enabled,
@@ -223,4 +441,22 @@ module.exports = {
   reservationExpired,
   finalMessageStarted,
   finalMessageStopped,
+  leadCreated,
+  clientAccountCreated,
+  leadProposalSent,
+  leadMessageSent,
+  uploadCompleted,
+  orderUpiPending,
+  invoiceResent,
+  invoiceManualReminder,
+  planRequested,
+  planWorkUpdated,
+  planUploadUpdated,
+  planPaymentRejected,
+  planPurchased,
+  projectCancelled,
+  projectUpgraded,
+  projectStepUpdated,
+  packagePurchased,
+  reservationExtended,
 };

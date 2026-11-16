@@ -220,6 +220,7 @@ const resendPaymentRecordInvoice = async (req, res) => {
     const { invoice } = await resolveInvoiceForAction({ customerId, recordType, recordId });
     const invoicePdf = await generateMonthlyInvoicePdf(invoice.userId, invoice.orderId, invoice);
     const sent = await sendMonthlyInvoiceEmail(invoice.userId, invoice.orderId, invoice, invoicePdf);
+    await require("../../helpers/actionEvents").invoiceResent(invoice).catch(err => console.error('[action invoice.resent]', err.message));
 
     if (!sent) {
       throw new Error("Invoice email could not be sent");
@@ -278,9 +279,10 @@ const sendPaymentRecordReminder = async (req, res) => {
     const invoicePdf = await generateMonthlyInvoicePdf(user, order, invoice);
     // Wording: the "Payment reminder" template (helpers/emailDefinitions.js); the reminder
     // message is one of its details.
-    const { error, suppressed } = await prepareTemplatedMail("invoice.reminder", invoice, reminderMessage, invoicePdf);
+    const { error, suppressed, handledByActionRule } = await prepareTemplatedMail("invoice.reminder", invoice, reminderMessage, invoicePdf);
+    await require("../../helpers/actionEvents").invoiceManualReminder(invoice).catch(err => console.error('[action invoice.manual_reminder]', err.message));
 
-    if (suppressed) throw new Error("Email is disabled for this action");
+    if (suppressed && !handledByActionRule) throw new Error("Email is disabled for this action");
     if (error) {
       console.error("Error sending payment reminder email:", error);
       throw new Error("Payment reminder could not be sent");

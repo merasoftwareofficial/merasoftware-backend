@@ -481,16 +481,16 @@ test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and mi
   });
 
   const previewRun = await migrateLegacyReminderRules({ dryRun: true });
-  assert.equal(previewRun.migrated, 7);
+  assert.equal(previewRun.migrated, 51);
   assert.equal(previewRun.disabledLegacy, 1);
 
   const firstRun = await migrateLegacyReminderRules();
-  assert.equal(firstRun.migrated, 7);
+  assert.equal(firstRun.migrated, 51);
   assert.equal(firstRun.disabledLegacy, 1);
   assert.equal(firstRun.cancelledRuns, 1);
   const secondRun = await migrateLegacyReminderRules();
   assert.equal(secondRun.migrated, 0);
-  assert.equal(secondRun.skipped, 7);
+  assert.equal(secondRun.skipped, 51);
   assert.equal(secondRun.disabledLegacy, 0);
 
   const [disabledLegacyDoc, cancelledLegacyRun] = await Promise.all([
@@ -824,4 +824,29 @@ test('B37/B39 start request signals and built-in reminder seeds migrate cleanly 
   assert.equal(b39.builtIn.reminders.length, 0);
   assert.equal(b35.builtIn.reminders.length, 0);
   assert.ok(b39.rules.some(r => r.origin === 'migrated'));
+});
+
+test('Batch T1 templates migrate with 1 shared ActionRule across A13/A26/A82 and hide Built-in (Old) only when migrated', async () => {
+  const { migrateLegacyReminderRules } = require('../helpers/migrateLegacyReminderRules');
+  const communicationActions = require('../helpers/communicationActions');
+  await migrateLegacyReminderRules({ dryRun: false, actorId: admin._id });
+  const list = await communicationActions.list();
+  const a58 = list.actions.find(a => a.id === 'A58');
+  const a13 = list.actions.find(a => a.id === 'A13');
+  const a26 = list.actions.find(a => a.id === 'A26');
+  const a82 = list.actions.find(a => a.id === 'A82');
+  const a44 = list.actions.find(a => a.id === 'A44');
+
+  // Migrated Batch T1 templates show as ActionRules with origin=migrated and no Built-in (Old) duplicate
+  assert.equal(a58.builtIn.templates.length, 0);
+  assert.ok(a58.rules.some(r => r.migratedFrom === 'template:lead.created' && r.origin === 'migrated'));
+  assert.equal(a13.builtIn.templates.length, 0);
+  assert.equal(a26.builtIn.templates.length, 0);
+  assert.equal(a82.builtIn.templates.length, 0);
+  assert.ok(a26.rules.some(r => r.migratedFrom === 'template:sendUpdateRequestNotification'));
+  assert.ok(a82.rules.some(r => r.migratedFrom === 'template:sendUserConfirmation'));
+
+  // All active-flow templates (including A44) are now migrated to ActionRules with origin=migrated
+  assert.equal(a44.builtIn.templates.length, 0);
+  assert.ok(a44.rules.some(r => r.migratedFrom === 'template:sendProjectCancellationEmail' && r.origin === 'migrated'));
 });

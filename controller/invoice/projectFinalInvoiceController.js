@@ -24,7 +24,8 @@ const resendProjectFinalInvoice = async (req, res) => {
     const pdf = await generateInvoiceDocumentPdf({ invoice, order: invoice.orderId, customer: invoice.userId, transactions });
     // Wording: the "Project payment summary" template (helpers/emailDefinitions.js).
     const result = await prepareTemplatedMail("invoice.project", invoice, pdf);
-    if (result.suppressed) throw new Error("Email is disabled for this action");
+    await require("../../helpers/actionEvents").invoiceResent(invoice).catch(err => console.error('[action invoice.resent]', err.message));
+    if (result.suppressed && !result.handledByActionRule) throw new Error("Email is disabled for this action");
     if (result.error) throw new Error("Final invoice email could not be sent");
     return res.status(200).json({ message: "Final invoice email ready for review", success: true, error: false });
   } catch (error) {
