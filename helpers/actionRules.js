@@ -5,7 +5,7 @@ const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
 const CONDITIONS = ['anytime', 'unpaid', 'paid'];
-const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package'];
+const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'offer_payment'];
 const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
 const fail = message => { const error = new Error(message); error.status = 400; throw error; };
 const int = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
@@ -13,9 +13,13 @@ const int = (value, min, max) => Number.isInteger(value) && value >= min && valu
 function normalizeStep(step = {}, index = 0, isTemplate = false) {
   const timingRef = isTemplate ? 'after_action' : (step.timingRef || 'after_action');
   if (!TIMING_REFS.includes(timingRef)) fail(`Message ${index + 1}: invalid timing reference.`);
+  const unit = !isTemplate && step.unit === 'hours' ? 'hours' : 'days';
   const rawDays = step.days !== undefined ? step.days : step.afterDays;
-  const days = isTemplate || timingRef === 'on_due' ? 0 : rawDays;
-  if (!int(days, 0, 365)) fail(`Message ${index + 1}: days must be a whole number from 0 to 365.`);
+  const rawHours = step.hours !== undefined ? step.hours : rawDays;
+  const days = unit === 'days' && !isTemplate && timingRef !== 'on_due' ? Number(rawDays ?? 0) : 0;
+  const hours = unit === 'hours' && !isTemplate && timingRef !== 'on_due' ? Number(rawHours ?? 0) : 0;
+  if (unit === 'days' && !int(days, 0, 365)) fail(`Message ${index + 1}: days must be a whole number from 0 to 365.`);
+  if (unit === 'hours' && !int(hours, 0, 720)) fail(`Message ${index + 1}: hours must be a whole number from 0 to 720.`);
   if (!['whatsapp', 'email', 'both'].includes(step.channel)) fail(`Message ${index + 1}: choose WhatsApp, Email or both.`);
   const text = String(step.text || '').trim();
   if (!text) fail(`Message ${index + 1}: write the message.`);
@@ -23,8 +27,10 @@ function normalizeStep(step = {}, index = 0, isTemplate = false) {
   if (step.channel !== 'whatsapp' && !subject) fail(`Message ${index + 1}: an email needs a subject.`);
   return {
     timingRef,
+    unit,
     days,
-    afterDays: timingRef === 'after_action' ? days : 0,
+    hours,
+    afterDays: timingRef === 'after_action' && unit === 'days' ? days : 0,
     channel: step.channel,
     subject: step.channel === 'whatsapp' ? '' : subject,
     text,
@@ -50,7 +56,8 @@ function cleanRule(raw = {}) {
   const isTemplate = kind === 'template';
   const clean = (isTemplate ? [steps[0]] : steps).map((step, index) => normalizeStep(step, index, isTemplate));
   if (!isTemplate) {
-    const rank = st => (st.timingRef === 'after_action' ? st.days : st.timingRef === 'before_due' ? 10000 - st.days : st.timingRef === 'on_due' ? 10000 : 10000 + st.days);
+    const hoursOf = st => (st.unit === 'hours' ? (st.hours || 0) : (st.days || 0) * 24);
+    const rank = st => (st.timingRef === 'after_action' ? hoursOf(st) : st.timingRef === 'before_due' ? 100000 - hoursOf(st) : st.timingRef === 'on_due' ? 100000 : 100000 + hoursOf(st));
     clean.sort((a, b) => rank(a) - rank(b));
   }
 
@@ -101,11 +108,13 @@ function cleanRule(raw = {}) {
 
 const stepLabel = (step, kind) => {
   if (kind === 'template') return 'now';
-  const d = step.days ?? step.afterDays ?? 0;
-  if (step.timingRef === 'before_due') return `${d}d before due`;
+  const isHours = step.unit === 'hours';
+  const val = isHours ? (step.hours ?? 0) : (step.days ?? step.afterDays ?? 0);
+  const unitShort = isHours ? 'h' : 'd';
+  if (step.timingRef === 'before_due') return `${val}${unitShort} before due`;
   if (step.timingRef === 'on_due') return 'on due date';
-  if (step.timingRef === 'after_due') return `${d}d after due`;
-  return d ? `after ${d} days` : 'now';
+  if (step.timingRef === 'after_due') return `${val}${unitShort} after due`;
+  return val ? `after ${val} ${isHours ? 'hours' : 'days'}` : 'now';
 };
 
 const autoName = rule => {
@@ -115,7 +124,8 @@ const autoName = rule => {
   const cond = rule.condition === 'unpaid' ? ' · if unpaid' : rule.condition === 'paid' ? ' · if paid' : '';
   const scope = rule.scope?.kind === 'package' ? ` · ${rule.scope.packageSlug}`
     : rule.scope?.kind === 'monthly' ? ' · monthly'
-      : rule.scope?.kind === 'one_time' ? ' · one-time' : '';
+      : rule.scope?.kind === 'one_time' ? ' · one-time'
+        : rule.scope?.kind === 'offer_payment' ? ' · offer payment' : '';
   const more = rule.kind === 'reminder' ? rule.steps.length + (rule.repeat?.times || 0) * (rule.repeat?.perDay || 1) - 1 : 0;
   const stop = rule.stopOn?.length ? ` · stop when ${rule.stopOn.map(key => ACTIONS[key].label).join(', ')}` : '';
   return `${ACTIONS[rule.action].label} · ${who} · ${when}${cond}${scope}${more > 0 ? ` +${more} more` : ''}${stop}`.slice(0, 200);

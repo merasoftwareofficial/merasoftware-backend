@@ -5,6 +5,7 @@ const User = require('../models/userModel');
 const { DAY } = require('../helpers/offerPaymentPolicy');
 const { sendScheduledOfferReminder } = require('../helpers/emailController');
 async function processOfferPaymentReminders(now = new Date()) {
+  if (await require('../helpers/actionRuleWorker').hasActiveActionRule('invoice.created', 'offer_payment')) return;
   await require('../helpers/offerProjectInvoices').ensureOfferProjectInvoices();
   const invoices = await Invoice.find({ invoiceType: { $in: ['project', 'plan_renewal'] }, status: { $in: ['unpaid', 'partially_paid', 'overdue'] }, offerRemindersPaused: { $ne: true } });
   for (const invoice of invoices) {

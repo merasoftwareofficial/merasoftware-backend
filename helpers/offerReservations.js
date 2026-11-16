@@ -137,6 +137,7 @@ async function reserveOffer({ userId, offerSlug, quoteKey, countryCode, phone })
       expiresAt: new Date(now.getTime() + holdHours(offer) * HOUR), origin: 'customer', leadId: lead?._id, closureStatus: 'pending', remindersEnabled: true }], { session });
     // A lead goes to the Reservation stage and the offer's stage too; a client keeps its behaviour (owner, 8 Nov 2026).
     stagedLeadId = await require('./reservationStage').onReserved(row, { session });
+    await require('./actionEvents').reservationCreated(row, session);
     return { reservation: reservationView(row), reused: false, serverNow: now };
   });
   for (const leadId of new Set([relinkedLeadId, stagedLeadId].filter(Boolean).map(String))) {
@@ -165,6 +166,7 @@ async function attachProjectReservation({ order, offer, reservationId = null, se
       row.extendedUntil = resumed;
       endStartRequest(row, 'project', now);
       await require('./reservationStart').noteLead(row, `Project created on the start request for ${row.offerSnapshot.title}. First payment due by ${indiaTime(resumed)} to keep the reserved price.`, session);
+      await require('./actionEvents').projectCreated(order, { reservationId: row._id, session });
     }
   } else {
     if (offer.status !== 'published' || Date.parse(offer.endsAt) <= now.getTime()) fail('Offer expired before the project was saved', 409);

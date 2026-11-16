@@ -481,16 +481,16 @@ test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and mi
   });
 
   const previewRun = await migrateLegacyReminderRules({ dryRun: true });
-  assert.equal(previewRun.migrated, 2);
+  assert.equal(previewRun.migrated, 7);
   assert.equal(previewRun.disabledLegacy, 1);
 
   const firstRun = await migrateLegacyReminderRules();
-  assert.equal(firstRun.migrated, 2);
+  assert.equal(firstRun.migrated, 7);
   assert.equal(firstRun.disabledLegacy, 1);
   assert.equal(firstRun.cancelledRuns, 1);
   const secondRun = await migrateLegacyReminderRules();
   assert.equal(secondRun.migrated, 0);
-  assert.equal(secondRun.skipped, 2);
+  assert.equal(secondRun.skipped, 7);
   assert.equal(secondRun.disabledLegacy, 0);
 
   const [disabledLegacyDoc, cancelledLegacyRun] = await Promise.all([
@@ -743,4 +743,85 @@ test('communicationActions.list() loads EmailPolicy modes without error and mark
   assert.equal(paymentSubmittedAfter.active, true);
 
   await EmailPolicy.deleteMany({ event: { $in: ['plan.started', 'plan.payment.submitted'] } });
+});
+
+test('hours timing unit works for after_action and before_due (B35 reservation countdown)', () => {
+  const { cleanRule } = require('../helpers/actionRules');
+  const { planRuns } = require('../helpers/actionRuleWorker');
+
+  const cleaned = cleanRule({
+    kind: 'reminder',
+    action: 'reservation.created',
+    audience: 'customer',
+    steps: [
+      { timingRef: 'after_action', unit: 'hours', hours: 24, channel: 'whatsapp', text: '24h passed' },
+      { timingRef: 'before_due', unit: 'hours', hours: 6, channel: 'whatsapp', text: '6h left' },
+      { timingRef: 'before_due', unit: 'hours', hours: 1, channel: 'whatsapp', text: '1h left' },
+    ],
+    repeat: { times: 0 },
+    stopOn: ['project.created', 'reservation.expired'],
+  });
+  assert.equal(cleaned.steps[0].unit, 'hours');
+  assert.equal(cleaned.steps[0].hours, 24);
+
+  const reservedAt = new Date('2026-12-01T10:00:00.000Z');
+  const deadline = new Date('2026-12-04T10:00:00.000Z');
+  const runs = planRuns({ _id: 'r_hours', revision: 1, ...cleaned }, { action: 'reservation.created', key: 'k_res', entityId: 'res1', occurredAt: reservedAt, matchKeys: [] }, deadline);
+  assert.equal(runs.length, 3);
+  assert.equal(runs[0].dueAt.toISOString(), '2026-12-02T10:00:00.000Z');
+  assert.equal(runs[1].dueAt.toISOString(), '2026-12-04T04:00:00.000Z');
+  assert.equal(runs[2].dueAt.toISOString(), '2026-12-04T09:00:00.000Z');
+});
+
+test('offer_payment scope matches offer orders and plans runs from saved paymentPolicy.reminderOffsets', () => {
+  const { cleanRule } = require('../helpers/actionRules');
+  const { planRuns, ruleMatchesContext } = require('../helpers/actionRuleWorker');
+
+  const cleaned = cleanRule({
+    kind: 'reminder',
+    action: 'invoice.created',
+    audience: 'customer',
+    condition: 'unpaid',
+    scope: { kind: 'offer_payment' },
+    steps: [{ timingRef: 'before_due', unit: 'days', days: 1, channel: 'email', subject: 'Offer due', text: 'Pay {{amount}}' }],
+    repeat: { times: 0 },
+    stopOn: ['payment.received'],
+  });
+  assert.equal(cleaned.scope.kind, 'offer_payment');
+  assert.equal(ruleMatchesContext(cleaned, { isPaid: false, isOfferPayment: false }), false);
+  assert.equal(ruleMatchesContext(cleaned, { isPaid: false, isOfferPayment: true }), true);
+
+  const due = new Date('2026-12-10T00:00:00.000Z');
+  const runs = planRuns(
+    { _id: 'r_offer', revision: 1, ...cleaned },
+    { action: 'invoice.created', key: 'k_inv', entityId: 'inv1', occurredAt: new Date('2026-12-01T00:00:00.000Z'), matchKeys: [] },
+    due,
+    { isOfferPayment: true, offerOffsets: [-3, 0, 2] },
+  );
+  assert.equal(runs.length, 3);
+  assert.equal(runs[0].dueAt.toISOString(), '2026-12-07T00:00:00.000Z');
+  assert.equal(runs[1].dueAt.toISOString(), '2026-12-10T00:00:00.000Z');
+  assert.equal(runs[2].dueAt.toISOString(), '2026-12-12T00:00:00.000Z');
+});
+
+test('B37/B39 start request signals and built-in reminder seeds migrate cleanly without Built-in (Old) reminders', async () => {
+  const { migrateLegacyReminderRules } = require('../helpers/migrateLegacyReminderRules');
+  const communicationActions = require('../helpers/communicationActions');
+
+  const res = await migrateLegacyReminderRules({ dryRun: false, actorId: admin._id });
+  assert.ok(res.migrated >= 5);
+
+  const migratedB37 = await Rule.findOne({ migratedFrom: 'builtin:B37' }).lean();
+  const migratedB39 = await Rule.findOne({ migratedFrom: 'builtin:B39' }).lean();
+  assert.equal(migratedB37.origin, 'migrated');
+  assert.equal(migratedB37.audience, 'admin');
+  assert.equal(migratedB39.origin, 'migrated');
+  assert.equal(migratedB39.actionId, 'B39');
+
+  const list = await communicationActions.list();
+  const b39 = list.actions.find(a => a.id === 'B39');
+  const b35 = list.actions.find(a => a.id === 'B35');
+  assert.equal(b39.builtIn.reminders.length, 0);
+  assert.equal(b35.builtIn.reminders.length, 0);
+  assert.ok(b39.rules.some(r => r.origin === 'migrated'));
 });

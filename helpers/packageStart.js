@@ -136,6 +136,7 @@ async function requestPackageStart(input, retry = true) {
       if (!created.leadId) await StartRequest.updateOne({ _id: created._id }, { $set: { leadId: lead._id } });
     }
   } catch (error) { console.error('[package start] lead follow-up:', error.message); }
+  await require('./actionEvents').packageStartRequested(created.toObject()).catch(err => console.error('[action package.start_requested]', err.message));
   return { request: requestView(created.toObject()), requested: true };
 }
 
@@ -176,6 +177,7 @@ async function deliverPackageStartNotices({ requestId = null, now = new Date(), 
 // A request nobody acted on: the team is told again after each full day, at most 3 times.
 async function alertPendingPackageStarts({ now = new Date(), limit = 20 } = {}) {
   if (!enabled()) return [];
+  if (await require('./actionRuleWorker').hasActiveActionRule('package.start_requested')) return [];
   const rows = await StartRequest.find({ closedAt: null, remindersPaused: { $ne: true }, alerts: { $lt: MAX_ALERTS }, requestedAt: { $lte: new Date(now.getTime() - DAY) } })
     .sort({ requestedAt: 1 }).limit(limit).lean();
   const results = [];
@@ -204,8 +206,15 @@ async function closeOnProject({ order, session }) {
   // A one-time package project, or a monthly package sold as a plan (packagePlanOrder.js).
   const packageId = require('./packagePlanOrder').packageIdOf(order);
   if (!packageId || !order.userId) return null;
-  return StartRequest.updateOne({ userId: order.userId, packageId, closedAt: null },
-    { $set: { closedAt: new Date(), closedReason: 'project_created', projectId: order._id } }, { session });
+  const closed = await StartRequest.findOneAndUpdate(
+    { userId: order.userId, packageId, closedAt: null },
+    { $set: { closedAt: new Date(), closedReason: 'project_created', projectId: order._id } },
+    { session, new: true },
+  ).lean();
+  if (closed) {
+    await require('./actionEvents').projectCreated(order, { packageStartId: closed._id, session });
+  }
+  return closed;
 }
 
 // The team closes a request by hand (the person no longer wants it, or it was handled another way).
@@ -214,6 +223,7 @@ async function closeByTeam({ requestId, actorId }) {
   const row = await StartRequest.findOneAndUpdate({ _id: requestId, closedAt: null },
     { $set: { closedAt: new Date(), closedReason: 'closed_by_team', closedBy: actorId } }, { new: true }).lean();
   if (!row) fail('This request is already closed or does not exist.', 409);
+  await require('./actionEvents').startRequestClosed({ packageStartId: row._id, clientId: row.userId }).catch(err => console.error('[action start_request.closed]', err.message));
   return { request: requestView(row) };
 }
 

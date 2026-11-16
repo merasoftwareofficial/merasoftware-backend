@@ -58,6 +58,7 @@ async function closeDueReservations({ now = new Date(), limit = 20 } = {}) {
     if (!['used', 'failed'].includes(outcome.status)) {
       try { outcome.stage = await require('./reservationStage').onExpired(row, { now }); }
       catch (error) { console.error('[reservation closure] stage after expiry:', error.message); }
+      await require('./actionEvents').reservationExpired(row, now).catch(err => console.error('[action reservation.expired]', err.message));
     }
     results.push({ id: String(row._id), ...outcome });
   }

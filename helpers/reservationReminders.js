@@ -61,6 +61,7 @@ function upcomingStage(row, now = new Date()) {
 
 async function sendDueReminders({ now = new Date(), limit = 50 } = {}) {
   if (!enabled()) return [];
+  if (await require('./actionRuleWorker').hasActiveActionRule('reservation.created')) return [];
   const { deadlineOf } = require('./offerReservations');
   const open = { remindersEnabled: true, remindersPaused: { $ne: true }, projectId: null, confirmedAt: null, startRequestedAt: null };
   const soon = new Date(now.getTime() + STAGES[STAGES.length - 1].before);

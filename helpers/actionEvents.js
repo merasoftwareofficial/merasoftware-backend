@@ -16,6 +16,15 @@ const ACTIONS = {
   'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
   'whatsapp.ad_received': { label: 'WhatsApp ad message received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'broadcast.sent': { label: 'Broadcast sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'reservation.start_requested': { label: 'Reservation start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'package.start_requested': { label: 'Package start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'project.created': { label: 'Project created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'start_request.closed': { label: 'Start request closed', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'reservation.created': { label: 'Offer reserved', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'reservation.extended': { label: 'Reservation extended', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'reservation.expired': { label: 'Reservation expired', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'lead.final_message_started': { label: 'Final message started', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'final_message.stopped': { label: 'Final message stopped', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 
@@ -91,4 +100,127 @@ const broadcastSent = (broadcastId, leadId, { anchorAt = new Date() } = {}) => {
   });
 };
 
-module.exports = { ACTIONS, enabled, emitAction, invoiceCreated, paymentReceived, projectCompleted, planStarted, whatsappAdReceived, broadcastSent };
+const reservationStartRequested = (row, requestIndex = 0) => {
+  if (!row?._id || !row?.userId) return Promise.resolve(false);
+  const reqAt = row.startRequests?.[requestIndex]?.at || row.startRequestedAt || new Date();
+  return emitAction('reservation.start_requested', {
+    key: `reservation.start_requested:${id(row._id)}:${requestIndex}`,
+    entityId: row._id,
+    clientId: row.userId,
+    leadId: row.leadId || null,
+    matchKeys: [`reservation:${id(row._id)}`],
+    occurredAt: reqAt,
+    details: { requestIndex },
+  });
+};
+
+const packageStartRequested = row => {
+  if (!row?._id || !row?.userId) return Promise.resolve(false);
+  return emitAction('package.start_requested', {
+    key: `package.start_requested:${id(row._id)}`,
+    entityId: row._id,
+    clientId: row.userId,
+    leadId: row.leadId || null,
+    matchKeys: [`package_start:${id(row._id)}`],
+    occurredAt: row.requestedAt || new Date(),
+  });
+};
+
+const projectCreated = (order, { reservationId = null, packageStartId = null, session = null } = {}) => {
+  if (!order?._id) return Promise.resolve(false);
+  const matchKeys = [
+    `order:${id(order._id)}`,
+    ...(reservationId ? [`reservation:${id(reservationId)}`] : []),
+    ...(packageStartId ? [`package_start:${id(packageStartId)}`] : []),
+  ];
+  return emitAction('project.created', {
+    key: `project.created:${id(order._id)}`,
+    entityId: order._id,
+    clientId: order.userId || null,
+    orderId: order._id,
+    matchKeys,
+    occurredAt: order.createdAt || new Date(),
+  }, { session });
+};
+
+const startRequestClosed = ({ reservationId = null, packageStartId = null, clientId = null } = {}) => {
+  if (!reservationId && !packageStartId) return Promise.resolve(false);
+  const matchKeys = [
+    ...(reservationId ? [`reservation:${id(reservationId)}`] : []),
+    ...(packageStartId ? [`package_start:${id(packageStartId)}`] : []),
+  ];
+  const targetId = reservationId || packageStartId;
+  return emitAction('start_request.closed', {
+    key: `start_request.closed:${id(targetId)}:${Date.now()}`,
+    entityId: targetId,
+    clientId,
+    matchKeys,
+  });
+};
+
+const reservationCreated = (row, session = null) => {
+  if (!row?._id || !row?.userId) return Promise.resolve(false);
+  const deadline = row.extendedUntil || row.expiresAt;
+  return emitAction('reservation.created', {
+    key: `reservation.created:${id(row._id)}`,
+    entityId: row._id,
+    clientId: row.userId,
+    leadId: row.leadId || null,
+    matchKeys: [`reservation:${id(row._id)}`],
+    occurredAt: row.reservedAt || new Date(),
+    details: { dueDate: deadline },
+  }, { session });
+};
+
+const reservationExpired = (row, now = new Date()) => {
+  if (!row?._id) return Promise.resolve(false);
+  return emitAction('reservation.expired', {
+    key: `reservation.expired:${id(row._id)}`,
+    entityId: row._id,
+    clientId: row.userId || null,
+    matchKeys: [`reservation:${id(row._id)}`],
+    occurredAt: now,
+  });
+};
+
+const finalMessageStarted = (row, { leadId = null, clientId = null } = {}) => {
+  if (!row?._id || (!leadId && !clientId)) return Promise.resolve(false);
+  return emitAction('lead.final_message_started', {
+    key: `lead.final_message_started:${id(row._id)}`,
+    entityId: row._id,
+    leadId,
+    clientId,
+    matchKeys: [`final_message:${id(row._id)}`, ...(leadId ? [`lead:${id(leadId)}`] : [])],
+    occurredAt: row.sentAt || new Date(),
+  });
+};
+
+const finalMessageStopped = row => {
+  if (!row?._id) return Promise.resolve(false);
+  return emitAction('final_message.stopped', {
+    key: `final_message.stopped:${id(row._id)}`,
+    entityId: row._id,
+    leadId: row.leadId || null,
+    matchKeys: [`final_message:${id(row._id)}`],
+  });
+};
+
+module.exports = {
+  ACTIONS,
+  enabled,
+  emitAction,
+  invoiceCreated,
+  paymentReceived,
+  projectCompleted,
+  planStarted,
+  whatsappAdReceived,
+  broadcastSent,
+  reservationStartRequested,
+  packageStartRequested,
+  projectCreated,
+  startRequestClosed,
+  reservationCreated,
+  reservationExpired,
+  finalMessageStarted,
+  finalMessageStopped,
+};

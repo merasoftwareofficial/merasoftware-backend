@@ -20,7 +20,7 @@ router.put('/:id', handle(req => updateRule(req.params.id, req.body || {})));
 router.post('/:id/enabled', handle(req => setRuleEnabled(req.params.id, !!req.body?.enabled)));
 router.post('/:id/delete', handle(req => deleteRule(req.params.id)));
 router.post('/cleanup', handle(req => cleanupActionRules({ dryRun: req.body?.dryRun !== false })));
-router.post('/migrate', handle(req => migrateLegacyReminderRules({ dryRun: req.body?.dryRun !== false })));
+router.post('/migrate', handle(req => migrateLegacyReminderRules({ dryRun: req.body?.dryRun !== false, actorId: req.userId })));
 
 router.get('/runs', handle(async () => {
   const runs = await Run.find({ source: 'action', status: 'scheduled' }).sort({ dueAt: 1 }).limit(200).lean();

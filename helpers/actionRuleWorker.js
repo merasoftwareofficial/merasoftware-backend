@@ -14,6 +14,7 @@ const { teamContacts, teamRecipients } = require('./teamContacts');
 // 1. each new action event stops matching scheduled runs, then plans runs for its enabled rules;
 // 2. due runs are checked again (is the reason still true?) and sent.
 const DAY = 86400000;
+const HOUR = 3600000;
 const LOCK_MS = 120000;
 const OPEN = ['unpaid', 'partially_paid', 'overdue'];
 const BILLED = ['project', 'plan_renewal'];
@@ -23,9 +24,21 @@ async function orderFullyPaid(orderId) {
   return !await Invoice.exists({ orderId, invoiceType: { $in: BILLED }, status: { $in: OPEN } });
 }
 
+const NO_ORDER_ACTIONS = new Set([
+  'whatsapp.ad_received', 'broadcast.sent', 'package.start_requested',
+  'lead.final_message_started', 'final_message.stopped', 'start_request.closed',
+  'reservation.expired', 'project.created', 'reservation.extended',
+]);
+
 async function resolveEventContext(event) {
-  if (event.action === 'whatsapp.ad_received' || event.action === 'broadcast.sent') {
-    return { invoice: null, order: null, isPaid: false, isMonthly: false, packageSlug: '', dueDate: null };
+  if (NO_ORDER_ACTIONS.has(event.action)) {
+    return { invoice: null, order: null, isPaid: false, isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '', dueDate: event.details?.dueDate || null };
+  }
+  if (event.action === 'reservation.created' || event.action === 'reservation.start_requested') {
+    const Reservation = require('../models/offerReservationModel');
+    const row = await Reservation.findById(event.entityId).select('expiresAt extendedUntil').lean();
+    const dueDate = row ? (row.extendedUntil || row.expiresAt) : (event.details?.dueDate || null);
+    return { invoice: null, order: null, isPaid: false, isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '', dueDate };
   }
   let invoice = null;
   let order = null;
@@ -41,18 +54,21 @@ async function resolveEventContext(event) {
   }
   const isPaid = invoice ? !OPEN.includes(invoice.status) : await orderFullyPaid(order?._id);
   const isMonthly = invoice?.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
+  const isOfferPayment = !!order?.paymentPolicy;
+  const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
   const packageSlug = String(
     order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
     order?.servicePlanSnapshot?.packageSlug || '',
   ).trim();
   const dueDate = invoice?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
-  return { invoice, order, isPaid, isMonthly, packageSlug, dueDate };
+  return { invoice, order, isPaid, isMonthly, isOfferPayment, offerOffsets, packageSlug, dueDate };
 }
 
 function ruleMatchesContext(rule, ctx) {
   if (rule.condition === 'unpaid' && ctx.isPaid) return false;
   if (rule.condition === 'paid' && !ctx.isPaid) return false;
   const scopeKind = rule.scope?.kind || 'all';
+  if (scopeKind === 'offer_payment' && !ctx.isOfferPayment) return false;
   if (scopeKind === 'monthly' && !ctx.isMonthly) return false;
   if (scopeKind === 'one_time' && ctx.isMonthly) return false;
   if (scopeKind === 'package' && (!rule.scope?.packageSlug || ctx.packageSlug !== rule.scope.packageSlug)) return false;
@@ -60,23 +76,34 @@ function ruleMatchesContext(rule, ctx) {
 }
 
 function stepDueAt(step, occurredAt, dueDate) {
-  const days = step.days !== undefined ? step.days : (step.afterDays || 0);
+  const offsetMs = step.unit === 'hours'
+    ? (step.hours ?? 0) * HOUR
+    : (step.days !== undefined ? step.days : (step.afterDays || 0)) * DAY;
   const ref = step.timingRef || 'after_action';
-  if (ref === 'after_action') return new Date(+new Date(occurredAt) + days * DAY);
+  if (ref === 'after_action') return new Date(+new Date(occurredAt) + offsetMs);
   if (!dueDate) return null;
   const base = +new Date(dueDate);
-  if (ref === 'before_due') return new Date(base - days * DAY);
+  if (ref === 'before_due') return new Date(base - offsetMs);
   if (ref === 'on_due') return new Date(base);
-  if (ref === 'after_due') return new Date(base + days * DAY);
+  if (ref === 'after_due') return new Date(base + offsetMs);
   return null;
 }
 
 // Steps first, then repeats after the last step.
-function planRuns(rule, event, dueDate = event.details?.dueDate || null) {
+function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = null) {
   const sends = [];
-  for (const step of rule.steps) {
-    const dueAt = stepDueAt(step, event.occurredAt, dueDate);
-    if (dueAt) sends.push({ ...step, dueAt });
+  if (rule.scope?.kind === 'offer_payment' && ctx?.offerOffsets?.length && dueDate && rule.steps?.length) {
+    const baseStep = rule.steps[0];
+    const baseMs = +new Date(dueDate);
+    const sortedOffsets = [...ctx.offerOffsets].map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    for (const offsetDays of sortedOffsets) {
+      sends.push({ ...baseStep, dueAt: new Date(baseMs + offsetDays * DAY) });
+    }
+  } else {
+    for (const step of rule.steps) {
+      const dueAt = stepDueAt(step, event.occurredAt, dueDate);
+      if (dueAt) sends.push({ ...step, dueAt });
+    }
   }
   if (!sends.length) return [];
   const last = sends[sends.length - 1];
@@ -123,7 +150,7 @@ async function handleEvent(event) {
   const ctx = await resolveEventContext(event);
   for (const rule of rules) {
     if (!ruleMatchesContext(rule, ctx)) continue;
-    for (const run of planRuns(rule, event, ctx.dueDate)) {
+    for (const run of planRuns(rule, event, ctx.dueDate, ctx)) {
       const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
       await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
     }
@@ -151,7 +178,7 @@ async function processEvents(limit = 200) {
 // The check right before sending: the reason for the message must still be true, even if the
 // stop action came through a path that records no event.
 async function stillValid(run) {
-  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition control').lean();
+  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition control scope').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -176,6 +203,32 @@ async function stillValid(run) {
   let invoice = null, order = null;
   if (run.action === 'whatsapp.ad_received' || run.action === 'broadcast.sent') {
     // No invoice or order attached to an incoming WhatsApp message or broadcast.
+  } else if (run.action === 'reservation.start_requested') {
+    const Reservation = require('../models/offerReservationModel');
+    const row = await Reservation.findById(run.entityId).select('projectId confirmedAt startRequestedAt startRequests teamRemindersPaused').lean();
+    const lastReq = row?.startRequests?.at(-1);
+    if (!row || row.projectId || row.confirmedAt || !row.startRequestedAt || row.teamRemindersPaused || lastReq?.ended) {
+      return { ok: false, reason: 'Reservation start request is closed or paused.' };
+    }
+  } else if (run.action === 'package.start_requested') {
+    const StartRequest = require('../models/packageStartRequestModel');
+    const row = await StartRequest.findById(run.entityId).select('closedAt remindersPaused').lean();
+    if (!row || row.closedAt || row.remindersPaused) {
+      return { ok: false, reason: 'Package start request is closed or paused.' };
+    }
+  } else if (run.action === 'reservation.created') {
+    const Reservation = require('../models/offerReservationModel');
+    const row = await Reservation.findById(run.entityId).select('projectId confirmedAt startRequestedAt remindersPaused expiresAt extendedUntil').lean();
+    const deadline = row ? new Date(row.extendedUntil || row.expiresAt) : null;
+    if (!row || row.projectId || row.confirmedAt || row.startRequestedAt || row.remindersPaused || !deadline || deadline <= new Date()) {
+      return { ok: false, reason: 'Reservation countdown is no longer active.' };
+    }
+  } else if (run.action === 'lead.final_message_started') {
+    const { FinalMessage } = require('../whatsapp/src/models.js');
+    const row = await FinalMessage.findById(run.entityId).select('status').lean();
+    if (!row || row.status !== 'waiting') {
+      return { ok: false, reason: 'Final message is no longer waiting.' };
+    }
   } else if (run.action === 'invoice.created' || run.action === 'payment.received') {
     if (String(run.occurrenceKey || '').startsWith('projected:')) {
       order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber').lean();
@@ -188,6 +241,7 @@ async function stillValid(run) {
     } else {
       invoice = await Invoice.findById(run.entityId).lean();
       if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
+      if (rule.scope?.kind === 'offer_payment' && invoice.offerRemindersPaused) return { ok: false, reason: 'Offer reminders are paused for this invoice.' };
       if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
       order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot salesPackage orderVisibility serviceNextBillingDate serviceBillingCycleMonths').lean() : null;
     }
@@ -440,4 +494,11 @@ async function processActionRules(now = new Date()) {
   return { enabled: true, events, projected, dispatched };
 }
 
-module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders };
+async function hasActiveActionRule(action, scopeKind = null) {
+  if (!enabled()) return false;
+  const filter = { action, enabled: true, control: { $in: ['auto', 'review'] } };
+  if (scopeKind) filter['scope.kind'] = scopeKind;
+  return !!(await Rule.exists(filter));
+}
+
+module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders, hasActiveActionRule };

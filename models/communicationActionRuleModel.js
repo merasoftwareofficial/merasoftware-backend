@@ -3,7 +3,9 @@ const { Schema } = mongoose;
 
 const step = new Schema({
   timingRef: { type: String, enum: ['after_action', 'before_due', 'on_due', 'after_due'], default: 'after_action' },
+  unit: { type: String, enum: ['days', 'hours'], default: 'days' },
   days: { type: Number, min: 0, max: 365, default: 0 },
+  hours: { type: Number, min: 0, max: 720, default: 0 },
   afterDays: { type: Number, min: 0, max: 365, default: 0 },
   channel: { type: String, enum: ['whatsapp', 'email', 'both'], required: true },
   subject: { type: String, default: '' },
@@ -26,7 +28,7 @@ const rule = new Schema({
   audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
   condition: { type: String, enum: ['anytime', 'unpaid', 'paid'], default: 'anytime' },
   scope: {
-    kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package'], default: 'all' },
+    kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package', 'offer_payment'], default: 'all' },
     packageSlug: { type: String, default: '' },
   },
   steps: { type: [step], default: [] },

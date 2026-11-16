@@ -66,6 +66,7 @@ async function requestProjectStart({ reservationId, userId }) {
     await noteLead(updated, `Wants to start the project on ${updated.offerSnapshot.title} (reserved ₹${Number(updated.reservedPrice).toLocaleString('en-IN')}). `
       + `Requested from the offer page; reservation paused with ${timeLeftWords(remainingMs)} left (deadline was ${indiaTime(deadlineOf(updated))}).`);
   } catch (error) { console.error('[reservation start] lead follow-up:', error.message); }
+  await require('./actionEvents').reservationStartRequested(updated, updated.startRequests.length - 1).catch(err => console.error('[action reservation.start_requested]', err.message));
   return { reservation: reservationView(updated), requested: true };
 }
 
@@ -120,6 +121,7 @@ async function deliverStartNotices({ reservationId = null, now = new Date(), lim
 // A request nobody acted on: the team is told again after each full day, at most 3 times.
 async function alertPendingStarts({ now = new Date(), limit = 20 } = {}) {
   if (!enabled()) return [];
+  if (await require('./actionRuleWorker').hasActiveActionRule('reservation.start_requested')) return [];
   const rows = await Reservation.find({ startRequestedAt: { $lte: new Date(now.getTime() - DAY) }, teamRemindersPaused: { $ne: true }, projectId: null, confirmedAt: null })
     .sort({ startRequestedAt: 1 }).limit(limit).lean();
   const results = [];

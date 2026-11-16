@@ -20,17 +20,133 @@ function mapBroadcastStep(step) {
   };
 }
 
+const BUILTIN_REMINDER_SEEDS = [
+  {
+    migratedFrom: 'builtin:B37',
+    kind: 'reminder',
+    action: 'reservation.start_requested',
+    actionId: 'B37',
+    audience: 'admin',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [{
+      timingRef: 'after_action',
+      unit: 'days',
+      days: 1,
+      channel: 'both',
+      subject: 'Pending reservation start request',
+      text: 'Reminder: {{name}} requested to start their reserved offer project. Please review and create the project.',
+    }],
+    repeat: { everyDays: 1, times: 2, perDay: 1 },
+    stopOn: ['project.created', 'start_request.closed'],
+    doAlso: [],
+    control: 'auto',
+    enabled: true,
+  },
+  {
+    migratedFrom: 'builtin:B39',
+    kind: 'reminder',
+    action: 'package.start_requested',
+    actionId: 'B39',
+    audience: 'admin',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [{
+      timingRef: 'after_action',
+      unit: 'days',
+      days: 1,
+      channel: 'both',
+      subject: 'Pending package start request',
+      text: 'Reminder: {{name}} requested to start a package project. Please review and follow up.',
+    }],
+    repeat: { everyDays: 1, times: 2, perDay: 1 },
+    stopOn: ['project.created', 'start_request.closed'],
+    doAlso: [],
+    control: 'auto',
+    enabled: true,
+  },
+  {
+    migratedFrom: 'builtin:B35',
+    kind: 'reminder',
+    action: 'reservation.created',
+    actionId: 'B35',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [
+      { timingRef: 'after_action', unit: 'hours', hours: 24, channel: 'both', subject: '24 hours passed on your offer reservation', text: 'Hi {{name}}, 24 hours have passed since you reserved your offer. Complete your project start before the deadline.' },
+      { timingRef: 'before_due', unit: 'hours', hours: 24, channel: 'both', subject: '24 hours left on your offer reservation', text: 'Hi {{name}}, only 24 hours are left on your reserved offer.' },
+      { timingRef: 'before_due', unit: 'hours', hours: 6, channel: 'both', subject: '6 hours left on your offer reservation', text: 'Hi {{name}}, only 6 hours are left on your reserved offer.' },
+      { timingRef: 'before_due', unit: 'hours', hours: 1, channel: 'both', subject: '1 hour left on your offer reservation', text: 'Hi {{name}}, final 1 hour left on your reserved offer.' },
+    ],
+    repeat: { times: 0 },
+    stopOn: ['project.created', 'reservation.expired', 'reservation.start_requested'],
+    doAlso: [],
+    control: 'auto',
+    enabled: true,
+  },
+  {
+    migratedFrom: 'builtin:A66',
+    kind: 'reminder',
+    action: 'lead.final_message_started',
+    actionId: 'A66',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [{
+      timingRef: 'after_action',
+      unit: 'hours',
+      hours: 24,
+      channel: 'whatsapp',
+      subject: '',
+      text: 'Hi {{name}}, checking in on our last message. Let us know if you would like to continue.',
+    }],
+    repeat: { times: 0 },
+    stopOn: ['whatsapp.ad_received', 'final_message.stopped'],
+    doAlso: [],
+    control: 'auto',
+    enabled: true,
+  },
+  {
+    migratedFrom: 'builtin:offer_payment',
+    kind: 'reminder',
+    action: 'invoice.created',
+    actionId: 'A104',
+    audience: 'customer',
+    condition: 'unpaid',
+    scope: { kind: 'offer_payment' },
+    steps: [{
+      timingRef: 'before_due',
+      unit: 'days',
+      days: 1,
+      channel: 'email',
+      subject: 'Offer payment reminder',
+      text: 'Hi {{name}}, your offer payment of ₹{{amount}} is due on {{dueDate}}. Pay here: {{invoiceLink}}',
+    }],
+    repeat: { times: 0 },
+    stopOn: ['payment.received'],
+    doAlso: [],
+    control: 'auto',
+    enabled: true,
+  },
+];
+
 /**
  * Idempotently migrates legacy `monthly_package` and `broadcast` reminder rules into `ActionRule`
- * with `origin: 'migrated'` and `migratedFrom` set to the legacy rule ID.
+ * with `origin: 'migrated'` and `migratedFrom` set to the legacy rule ID, plus built-in reminder workflows.
  * Also disables active legacy rules and cancels their pending legacy runs so both engines never double-send.
  */
-async function migrateLegacyReminderRules({ dryRun = false } = {}) {
+async function migrateLegacyReminderRules({ dryRun = false, actorId = null } = {}) {
   const legacyRules = await LegacyRule.find({ source: { $in: ['monthly_package', 'broadcast'] } }).sort({ createdAt: 1 }).lean();
   let migrated = 0;
   let skipped = 0;
   let disabledLegacy = 0;
   let cancelledRuns = 0;
+  let fallbackActor = actorId || legacyRules[0]?.createdBy || null;
+  if (!fallbackActor) {
+    const existingRule = await ActionRule.findOne().select('createdBy').lean();
+    fallbackActor = existingRule?.createdBy || null;
+  }
   for (const old of legacyRules) {
     const legacyId = String(old._id);
     const alreadyMigrated = await ActionRule.exists({ migratedFrom: legacyId });
@@ -72,7 +188,18 @@ async function migrateLegacyReminderRules({ dryRun = false } = {}) {
       }
     }
   }
-  return { dryRun, total: legacyRules.length, migrated, skipped, disabledLegacy, cancelledRuns };
+  for (const seed of BUILTIN_REMINDER_SEEDS) {
+    const exists = await ActionRule.exists({ migratedFrom: seed.migratedFrom });
+    if (exists) {
+      skipped++;
+      continue;
+    }
+    if (!dryRun && fallbackActor) {
+      await createRule({ ...seed, origin: 'migrated' }, fallbackActor);
+    }
+    if (dryRun || fallbackActor) migrated++;
+  }
+  return { dryRun, total: legacyRules.length + BUILTIN_REMINDER_SEEDS.length, migrated, skipped, disabledLegacy, cancelledRuns };
 }
 
 const ruleFingerprint = r => JSON.stringify([
