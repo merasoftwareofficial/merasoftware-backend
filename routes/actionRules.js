@@ -5,6 +5,7 @@ const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
 const { ACTIONS } = require('../helpers/actionEvents');
 const { createRule, updateRule, setRuleEnabled, deleteRule } = require('../helpers/actionRules');
+const { enrollPendingInvoices } = require('../helpers/actionRuleWorker');
 const { migrateLegacyReminderRules, cleanupActionRules } = require('../helpers/migrateLegacyReminderRules');
 
 // Mounted under /api/auto-reply/action-rules (admin only, via routes/autoReply.js).
@@ -19,6 +20,7 @@ router.post('/', handle(req => createRule(req.body || {}, req.userId)));
 router.put('/:id', handle(req => updateRule(req.params.id, req.body || {})));
 router.post('/:id/enabled', handle(req => setRuleEnabled(req.params.id, !!req.body?.enabled)));
 router.post('/:id/delete', handle(req => deleteRule(req.params.id)));
+router.post('/:id/enroll-pending', handle(req => enrollPendingInvoices(req.params.id, { dryRun: req.body?.dryRun !== false })));
 router.post('/cleanup', handle(req => cleanupActionRules({ dryRun: req.body?.dryRun !== false })));
 router.post('/migrate', handle(req => migrateLegacyReminderRules({ dryRun: req.body?.dryRun !== false, actorId: req.userId })));
 

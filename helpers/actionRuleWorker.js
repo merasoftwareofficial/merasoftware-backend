@@ -504,4 +504,73 @@ async function hasActiveActionRule(action, scopeKind = null) {
   return !!(await Rule.exists(filter));
 }
 
-module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders, hasActiveActionRule };
+/**
+ * Safely enrolls currently open unpaid invoices into an active `invoice.created` reminder rule.
+ * Idempotent via `occurrenceKey: invoice.created:<invoiceId>` and never bursts missed steps (dispatchDue sends only latest).
+ */
+async function enrollPendingInvoices(ruleId, { dryRun = true } = {}) {
+  const rule = await Rule.findById(ruleId).lean();
+  if (!rule) throw Object.assign(new Error('Rule not found.'), { status: 404 });
+  if (!rule.enabled || !['auto', 'review'].includes(rule.control) || rule.kind !== 'reminder' || rule.action !== 'invoice.created') {
+    throw Object.assign(new Error('Only active invoice reminder rules can enroll pending invoices.'), { status: 400 });
+  }
+  const invoices = await Invoice.find({
+    invoiceType: { $in: BILLED },
+    status: { $in: OPEN },
+    amount: { $gt: 0 },
+  }).sort({ dueDate: 1 }).lean();
+
+  let count = 0;
+  let enrolled = 0;
+  const samples = [];
+  for (const invoice of invoices) {
+    const order = invoice.orderId ? await Order.findById(invoice.orderId).lean() : null;
+    if (order && (order.orderVisibility === 'cancelled' || order.status === 'cancelled')) continue;
+    const isMonthly = invoice.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
+    const isOfferPayment = !!order?.paymentPolicy;
+    const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
+    const packageSlug = String(
+      order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
+      order?.servicePlanSnapshot?.packageSlug || '',
+    ).trim();
+    const dueDate = invoice.dueDate || order?.serviceNextBillingDate || null;
+    const ctx = { invoice, order, isPaid: false, isMonthly, isOfferPayment, offerOffsets, packageSlug, dueDate };
+    if (!ruleMatchesContext(rule, ctx)) continue;
+
+    const occurrenceKey = `invoice.created:${String(invoice._id)}`;
+    if (await Run.exists({ ruleId: rule._id, occurrenceKey })) continue;
+
+    const fakeEvent = {
+      action: 'invoice.created',
+      key: occurrenceKey,
+      entityId: invoice._id,
+      clientId: invoice.userId || order?.userId || null,
+      leadId: null,
+      occurredAt: invoice.createdAt || new Date(),
+      matchKeys: [`invoice:${String(invoice._id)}`, ...(invoice.orderId ? [`order:${String(invoice.orderId)}`] : [])],
+      details: { dueDate },
+    };
+    const runs = planRuns(rule, fakeEvent, dueDate, ctx);
+    if (!runs.length) continue;
+
+    count++;
+    if (samples.length < 5) {
+      const user = invoice.userId ? await User.findById(invoice.userId).select('name email').lean() : null;
+      samples.push({
+        customer: user?.name || user?.email || 'Customer',
+        amount: Number(invoice.amount - (invoice.amountPaid || 0)),
+        dueDate,
+      });
+    }
+    if (!dryRun) {
+      for (const run of runs) {
+        const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
+        await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
+      }
+      enrolled++;
+    }
+  }
+  return { dryRun, count, enrolled, samples };
+}
+
+module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders, hasActiveActionRule, enrollPendingInvoices };

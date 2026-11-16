@@ -850,3 +850,52 @@ test('Batch T1 templates migrate with 1 shared ActionRule across A13/A26/A82 and
   assert.equal(a44.builtIn.templates.length, 0);
   assert.ok(a44.rules.some(r => r.migratedFrom === 'template:sendProjectCancellationEmail' && r.origin === 'migrated'));
 });
+
+test('enrollPendingInvoices previews and idempotently enrolls open unpaid invoices without bursting', async () => {
+  const { createRule } = require('../helpers/actionRules');
+  const { enrollPendingInvoices } = require('../helpers/actionRuleWorker');
+
+  const oldDue = new Date(Date.now() - 5 * 86400000);
+  const inv = await Invoice.create({
+    userId: customer._id,
+    orderId: new mongoose.Types.ObjectId(),
+    invoiceNumber: 'INV-OLD-PENDING-1',
+    invoiceType: 'project',
+    amount: 4999,
+    amountPaid: 0,
+    dueDate: oldDue,
+    status: 'unpaid',
+    createdAt: oldDue,
+  });
+
+  const rule = await createRule({
+    kind: 'reminder',
+    action: 'invoice.created',
+    actionId: 'A104',
+    audience: 'customer',
+    condition: 'unpaid',
+    scope: { kind: 'all' },
+    steps: [
+      { timingRef: 'before_due', unit: 'days', days: 3, channel: 'whatsapp', text: '3d before' },
+      { timingRef: 'on_due', unit: 'days', days: 0, channel: 'whatsapp', text: 'Due today' },
+    ],
+    repeat: { times: 0 },
+    stopOn: ['payment.received'],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  const preview = await enrollPendingInvoices(rule._id, { dryRun: true });
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.count, 1);
+  assert.equal(preview.enrolled, 0);
+  assert.equal(preview.samples[0].amount, 4999);
+
+  const applied = await enrollPendingInvoices(rule._id, { dryRun: false });
+  assert.equal(applied.dryRun, false);
+  assert.equal(applied.enrolled, 1);
+  assert.equal(await Run.countDocuments({ ruleId: rule._id, occurrenceKey: `invoice.created:${inv._id}` }), 2);
+
+  const second = await enrollPendingInvoices(rule._id, { dryRun: true });
+  assert.equal(second.count, 0);
+});
