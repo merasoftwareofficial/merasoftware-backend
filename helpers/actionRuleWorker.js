@@ -195,6 +195,7 @@ async function stillValid(run) {
     order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
     if (waitsForPayment && await orderFullyPaid(order._id)) return { ok: false, reason: 'Payment is complete.' };
+    invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
   }
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
@@ -235,8 +236,8 @@ const portalLink = path => safeUrl(process.env.FORNTEND_URL, path);
 const websiteLink = path => safeUrl(process.env.PORTFOLIO_WEBSITE_URL, path);
 
 const KNOWN_PLACEHOLDERS = new Set([
-  'name', 'amount', 'dueDate', 'invoiceLink', 'projectLink', 'packageLink', 'portalLink',
-  'project', 'planName', 'duration', 'email', 'phone',
+  'name', 'amount', 'dueDate', 'invoiceLink', 'projectLink', 'packageLink', 'planLink', 'portalLink',
+  'project', 'planName', 'package', 'duration', 'email', 'phone',
 ]);
 function normalizePlaceholders(text) {
   return String(text || '').replace(/(?<!\{)\{(\w+)\}(?!\})/g, (m, key) => (KNOWN_PLACEHOLDERS.has(key) ? `{{${key}}}` : m));
@@ -298,20 +299,28 @@ async function dispatchRun(runId, now = new Date()) {
     if (!check.ok) { await finish('cancelled', { reason: check.reason }); return 'cancelled'; }
     const { client, invoice, order, contacts } = check;
     const planName = order?.salesPackage?.packageName || order?.salesPackage?.name || order?.servicePlanSnapshot?.serviceName || order?.orderItems?.[0]?.name || '';
-    const packageSlug = order?.salesPackage?.slug || '';
+    const packageSlug = String(
+      order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
+      order?.servicePlanSnapshot?.packageSlug || '',
+    ).trim();
     const months = order?.salesPackage?.months || order?.serviceBillingCycleMonths || order?.servicePlanSnapshot?.selectedBillingCycleMonths;
     const duration = months ? `${months} month${months > 1 ? 's' : ''}` : '';
+    const invoiceAmount = invoice
+      ? (run.action === 'payment.received' ? Number(invoice.amount || 0) : Number(invoice.amount - (invoice.amountPaid || 0)))
+      : 0;
     const values = {
       name: client.name || 'Customer',
       email: client.email || '',
       phone: client.phone || '',
       project: order?.orderItems?.[0]?.name || planName,
       planName,
+      package: planName || 'Package',
       duration,
-      amount: invoice ? `₹${Number(invoice.amount - (invoice.amountPaid || 0)).toLocaleString('en-IN')}` : '',
+      amount: invoice ? `₹${invoiceAmount.toLocaleString('en-IN')}` : '',
       dueDate: day(invoice?.dueDate || order?.serviceNextBillingDate),
       invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : '',
       projectLink: order?._id ? portalLink(`/project-details/${order._id}`) : '',
+      planLink: order?._id ? portalLink(`/plan-details/${order._id}`) : '',
       packageLink: packageSlug ? websiteLink(`/package/${encodeURIComponent(packageSlug)}`) : '',
       portalLink: portalLink('/'),
     };

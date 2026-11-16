@@ -23,40 +23,56 @@ function mapBroadcastStep(step) {
 /**
  * Idempotently migrates legacy `monthly_package` and `broadcast` reminder rules into `ActionRule`
  * with `origin: 'migrated'` and `migratedFrom` set to the legacy rule ID.
+ * Also disables active legacy rules and cancels their pending legacy runs so both engines never double-send.
  */
 async function migrateLegacyReminderRules({ dryRun = false } = {}) {
   const legacyRules = await LegacyRule.find({ source: { $in: ['monthly_package', 'broadcast'] } }).sort({ createdAt: 1 }).lean();
   let migrated = 0;
   let skipped = 0;
+  let disabledLegacy = 0;
+  let cancelledRuns = 0;
   for (const old of legacyRules) {
     const legacyId = String(old._id);
-    if (await ActionRule.exists({ migratedFrom: legacyId })) {
+    const alreadyMigrated = await ActionRule.exists({ migratedFrom: legacyId });
+    if (alreadyMigrated) {
       skipped++;
-      continue;
+    } else {
+      const isMonthly = old.source === 'monthly_package';
+      const payload = {
+        kind: 'reminder',
+        action: isMonthly ? 'invoice.created' : 'broadcast.sent',
+        actionId: isMonthly ? 'A104' : 'B05',
+        audience: 'customer',
+        condition: isMonthly ? 'unpaid' : 'anytime',
+        scope: isMonthly ? { kind: 'monthly' } : { kind: 'all' },
+        steps: (old.steps || []).map(isMonthly ? mapMonthlyStep : mapBroadcastStep),
+        repeat: { times: 0 },
+        stopOn: isMonthly ? ['payment.received'] : ['whatsapp.ad_received'],
+        doAlso: [],
+        control: old.enabled ? 'auto' : 'off',
+        enabled: !!old.enabled,
+        origin: 'migrated',
+        migratedFrom: legacyId,
+      };
+      if (!dryRun) {
+        await createRule(payload, old.createdBy);
+      }
+      migrated++;
     }
-    const isMonthly = old.source === 'monthly_package';
-    const payload = {
-      kind: 'reminder',
-      action: isMonthly ? 'invoice.created' : 'broadcast.sent',
-      actionId: isMonthly ? 'A104' : 'B05',
-      audience: 'customer',
-      condition: isMonthly ? 'unpaid' : 'anytime',
-      scope: isMonthly ? { kind: 'monthly' } : { kind: 'all' },
-      steps: (old.steps || []).map(isMonthly ? mapMonthlyStep : mapBroadcastStep),
-      repeat: { times: 0 },
-      stopOn: isMonthly ? ['payment.received'] : ['whatsapp.ad_received'],
-      doAlso: [],
-      control: old.enabled ? 'auto' : 'off',
-      enabled: !!old.enabled,
-      origin: 'migrated',
-      migratedFrom: legacyId,
-    };
-    if (!dryRun) {
-      await createRule(payload, old.createdBy);
+
+    if (old.enabled) {
+      disabledLegacy++;
+      if (!dryRun) {
+        await LegacyRule.updateOne({ _id: old._id }, { $set: { enabled: false }, $inc: { revision: 1 } });
+        const cancelled = await Run.updateMany(
+          { ruleId: old._id, source: { $in: ['monthly_package', 'broadcast'] }, status: 'scheduled' },
+          { $set: { status: 'cancelled', reason: 'Migrated to Action rules.' } },
+        );
+        cancelledRuns += Number(cancelled.modifiedCount || 0);
+      }
     }
-    migrated++;
   }
-  return { total: legacyRules.length, migrated, skipped };
+  return { dryRun, total: legacyRules.length, migrated, skipped, disabledLegacy, cancelledRuns };
 }
 
 const ruleFingerprint = r => JSON.stringify([

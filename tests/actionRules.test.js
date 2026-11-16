@@ -466,11 +466,39 @@ test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and mi
     steps: [{ offsetDays: 2, channel: 'whatsapp', subject: 'Follow up', text: 'Hi {{name}}' }],
   });
 
+  const pendingLegacyRun = await Run.create({
+    ruleId: legacyBroadcast._id,
+    ruleRevision: 1,
+    source: 'broadcast',
+    occurrenceKey: `legacy:${legacyBroadcast._id}`,
+    step: 0,
+    entityId: new mongoose.Types.ObjectId(),
+    dueAt: new Date(Date.now() + 3600000),
+    subject: 'Follow up',
+    text: 'Hi',
+    channel: 'whatsapp',
+    status: 'scheduled',
+  });
+
+  const previewRun = await migrateLegacyReminderRules({ dryRun: true });
+  assert.equal(previewRun.migrated, 2);
+  assert.equal(previewRun.disabledLegacy, 1);
+
   const firstRun = await migrateLegacyReminderRules();
   assert.equal(firstRun.migrated, 2);
+  assert.equal(firstRun.disabledLegacy, 1);
+  assert.equal(firstRun.cancelledRuns, 1);
   const secondRun = await migrateLegacyReminderRules();
   assert.equal(secondRun.migrated, 0);
   assert.equal(secondRun.skipped, 2);
+  assert.equal(secondRun.disabledLegacy, 0);
+
+  const [disabledLegacyDoc, cancelledLegacyRun] = await Promise.all([
+    LegacyRule.findById(legacyBroadcast._id).lean(),
+    Run.findById(pendingLegacyRun._id).lean(),
+  ]);
+  assert.equal(disabledLegacyDoc.enabled, false);
+  assert.equal(cancelledLegacyRun.status, 'cancelled');
 
   const migratedBroadcast = await Rule.findOne({ migratedFrom: String(legacyBroadcast._id) }).lean();
   assert.equal(migratedBroadcast.action, 'broadcast.sent');
@@ -562,4 +590,79 @@ test('repeat supports perDay (1-4x/day) and up to 60 total sends', () => {
     repeat: { times: 20, everyDays: 1, perDay: 4 },
     stopOn: ['payment.received'],
   }), /At most 60 messages/);
+});
+
+test('dispatchRun populates legacy {{package}}, {{planLink}}, and paid {{amount}} for payment.received', async () => {
+  const Order = require('../models/orderProductModel');
+  const prevFrontend = process.env.FORNTEND_URL;
+  const prevWebsite = process.env.PORTFOLIO_WEBSITE_URL;
+  process.env.FORNTEND_URL = 'https://portal.example.com';
+  process.env.PORTFOLIO_WEBSITE_URL = 'https://example.com';
+  const originalSendSystemMail = emailController.sendSystemMail;
+  const captured = [];
+  emailController.sendSystemMail = async (_type, mail) => {
+    captured.push(mail);
+    return 'sent';
+  };
+  try {
+    const order = await Order.create({
+      userId: customer._id,
+      price: 1999,
+      totalAmount: 1999,
+      isServicePlan: true,
+      salesPackage: { packageName: 'Growth Pack', packageSlug: 'growth-pack' },
+      orderItems: [{ name: 'Growth Pack', price: 1999, quantity: 1 }],
+    });
+    const invoice = await Invoice.create({
+      userId: customer._id,
+      orderId: order._id,
+      invoiceNumber: 'INV-TEST-1999',
+      invoiceType: 'plan_renewal',
+      amount: 1999,
+      amountPaid: 1999,
+      status: 'paid',
+      dueDate: new Date('2026-12-01T00:00:00.000Z'),
+    });
+    const rule = await Rule.create({
+      name: 'Paid ack',
+      kind: 'template',
+      action: 'payment.received',
+      audience: 'customer',
+      condition: 'anytime',
+      scope: { kind: 'all', packageSlug: '' },
+      steps: [{ timingRef: 'after_action', days: 0, afterDays: 0, channel: 'whatsapp', subject: '', text: 'Paid {{amount}} for {{package}} {{planLink}} {{packageLink}}' }],
+      repeat: { times: 0, perDay: 1 },
+      stopOn: [],
+      control: 'auto',
+      enabled: true,
+      createdBy: admin._id,
+    });
+    const run = await Run.create({
+      ruleId: rule._id,
+      ruleRevision: 1,
+      source: 'action',
+      action: 'payment.received',
+      audience: 'customer',
+      occurrenceKey: `test-paid:${invoice._id}`,
+      step: 0,
+      entityId: invoice._id,
+      clientId: customer._id,
+      dueAt: new Date(Date.now() - 1000),
+      subject: 'Paid',
+      text: 'Paid {{amount}} for {{package}} {{planLink}} {{packageLink}}',
+      channel: 'whatsapp',
+      status: 'scheduled',
+    });
+    const res = await worker.dispatchRun(run._id);
+    assert.equal(res, 'sent');
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].values.amount, '₹1,999');
+    assert.equal(captured[0].values.package, 'Growth Pack');
+    assert.ok(captured[0].values.planLink.includes(`/plan-details/${order._id}`));
+    assert.ok(captured[0].values.packageLink.includes('/package/growth-pack'));
+  } finally {
+    emailController.sendSystemMail = originalSendSystemMail;
+    process.env.FORNTEND_URL = prevFrontend;
+    process.env.PORTFOLIO_WEBSITE_URL = prevWebsite;
+  }
 });
