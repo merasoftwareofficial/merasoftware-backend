@@ -713,3 +713,34 @@ test('dispatchRun normalizes single-brace {name} inside doAlso add_lead_note', a
     emailController.sendSystemMail = originalSendSystemMail;
   }
 });
+
+test('communicationActions.list() loads EmailPolicy modes without error and marks off/customer-triggered templates accurately', async () => {
+  const { EmailPolicy } = require('../models/emailControlModel');
+  const communicationActions = require('../helpers/communicationActions');
+
+  // By default: plan.started (system) is auto/active; plan.payment.submitted (customer-triggered) is off/inactive until turned on.
+  const initial = await communicationActions.list();
+  const a105Before = initial.actions.find(a => a.id === 'A105');
+  assert.ok(a105Before);
+  const planStartedBefore = a105Before.builtIn.templates.find(t => t.event === 'plan.started');
+  const paymentSubmittedBefore = a105Before.builtIn.templates.find(t => t.event === 'plan.payment.submitted');
+  assert.equal(planStartedBefore.mode, 'auto');
+  assert.equal(planStartedBefore.active, true);
+  assert.equal(paymentSubmittedBefore.mode, 'off');
+  assert.equal(paymentSubmittedBefore.active, false);
+
+  // Turn plan.started off and plan.payment.submitted auto in EmailPolicy
+  await EmailPolicy.findOneAndUpdate({ event: 'plan.started' }, { $set: { mode: 'off' } }, { upsert: true });
+  await EmailPolicy.findOneAndUpdate({ event: 'plan.payment.submitted' }, { $set: { mode: 'auto' } }, { upsert: true });
+
+  const after = await communicationActions.list();
+  const a105After = after.actions.find(a => a.id === 'A105');
+  const planStartedAfter = a105After.builtIn.templates.find(t => t.event === 'plan.started');
+  const paymentSubmittedAfter = a105After.builtIn.templates.find(t => t.event === 'plan.payment.submitted');
+  assert.equal(planStartedAfter.mode, 'off');
+  assert.equal(planStartedAfter.active, false);
+  assert.equal(paymentSubmittedAfter.mode, 'auto');
+  assert.equal(paymentSubmittedAfter.active, true);
+
+  await EmailPolicy.deleteMany({ event: { $in: ['plan.started', 'plan.payment.submitted'] } });
+});

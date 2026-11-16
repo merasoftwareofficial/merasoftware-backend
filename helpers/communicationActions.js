@@ -1,11 +1,11 @@
 const Override = require('../models/communicationActionOverrideModel');
 const ActionRule = require('../models/communicationActionRuleModel');
-const { EmailControl } = require('../models/emailControlModel');
+const { EmailPolicy } = require('../models/emailControlModel');
 const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCatalog');
 const { ACTIONS: TRIGGER_ACTIONS } = require('./actionEvents');
 const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
-const { byKey: EMAIL_BY_KEY } = require('./emailCatalog');
+const { byKey: EMAIL_BY_KEY, isCustomerTriggered } = require('./emailCatalog');
 const { readPackages } = require('./salesPackages');
 
 // Maps Actions-list IDs (Reminder-mapping.md §A) to built-in templates and legacy reminders/automations.
@@ -61,14 +61,21 @@ function builtInFor(actionId, policyByEvent = null) {
   if (!entry) return { templates: [], reminders: [] };
   const templates = (entry.templates || []).map(key => {
     const meta = EMAIL_BY_KEY.get(key);
-    const mode = policyByEvent?.get(key);
+    let mode;
+    if (policyByEvent) {
+      const saved = policyByEvent.get(key);
+      if (saved === 'off') mode = 'off';
+      else if (isCustomerTriggered(key)) mode = saved === 'auto' ? 'auto' : 'off';
+      else if (meta?.trigger === 'system') mode = 'auto';
+      else mode = saved || 'review';
+    }
     return {
       event: key,
       label: meta?.label || key,
       app: meta?.application || 'portal',
       panel: key === 'broadcast.manual' ? 'broadcast' : 'email-templates',
       ...(mode ? { mode } : {}),
-      active: mode !== 'off',
+      active: mode ? mode !== 'off' : true,
     };
   });
   return { templates, reminders: entry.reminders || [] };
@@ -157,7 +164,7 @@ async function list() {
     Override.find().lean(),
     ActionRule.find().sort({ createdAt: 1 }).lean(),
     readPackages().catch(() => []),
-    EmailControl.find().select('event mode').lean().catch(() => []),
+    EmailPolicy.find().select('event mode').lean().catch(() => []),
   ]);
   const policyByEvent = new Map(policies.map(p => [p.event, p.mode]));
   const byId = new Map(overrides.map(item => [item.actionId, item]));
