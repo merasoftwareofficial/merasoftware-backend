@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const mongoose = require('mongoose');
 const Template = require('../models/messageTemplateModel');
 const { Broadcast, BroadcastRecipient } = require('../models/broadcastModel');
-const { audience, groupQuery } = require('./broadcastAudience');
+const { audience, normalizeAudience } = require('./broadcastAudience');
 const { content, encode, title, fail, composition, readComposition, compositionUsesName, compositionTitle } = require('./broadcastContent');
 const deterministicId = text => new mongoose.Types.ObjectId(crypto.createHash('sha256').update(text).digest('hex').slice(0, 24));
 const objectId = value => { if (!mongoose.isValidObjectId(value)) fail('Invalid record.'); return value; };
@@ -41,7 +41,7 @@ async function submit(input, userId) {
   return input.media ? require('./broadcastMedia').withMediaLock(input.media.id, accept) : accept();
 }
 async function acceptBroadcast(input, userId, session) {
-  groupQuery(input.audience);
+  const selectedAudience = normalizeAudience(input.audience);
   if (typeof input.requestKey !== 'string' || !/^[a-zA-Z0-9-]{16,100}$/.test(input.requestKey)) fail('A valid send request key is required.');
   if (!['new', 'template'].includes(input.origin)) fail('Choose a new or saved message.');
   const channel = input.channel || 'whatsapp';
@@ -49,19 +49,19 @@ async function acceptBroadcast(input, userId, session) {
   const message = input.version === 2 ? JSON.stringify(composition(input)) : encode(input.doc);
   if (channel !== 'whatsapp' && !readComposition(message).subject) fail('Write an email subject.');
   const templateId = input.origin === 'template' ? objectId(input.templateId) : undefined;
-  const fingerprint = crypto.createHash('sha256').update(JSON.stringify([input.audience, message, input.origin, templateId, channel])).digest('hex');
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify([selectedAudience, message, input.origin, templateId, channel])).digest('hex');
   const id = deterministicId(`${userId}:${input.requestKey}`);
   let row = await Broadcast.findById(id).session(session || null);
   if (!row) {
     if (templateId && !await Template.exists({ _id: templateId, purpose: 'broadcast' }).session(session || null)) fail('Saved message no longer exists.');
     const requireName = compositionUsesName(readComposition(message));
-    if (!(await audience(input.audience, { requireName, channel })).count) fail(requireName ? 'No one in this group has both a usable number and a name. Remove the name from the message, or choose another group.' : 'This group has no eligible phone numbers.');
+    if (!(await audience(selectedAudience, { requireName, channel })).count) fail(requireName ? 'No one in the selected group(s) has both a usable number and a name. Remove the name from the message, or choose another group.' : 'The selected group(s) have no eligible phone numbers.');
     try {
-      const data = { _id: id, createdBy: userId, requestKey: input.requestKey, fingerprint, audience: input.audience, message, channel, templateId, origin: input.origin };
+      const data = { _id: id, createdBy: userId, requestKey: input.requestKey, fingerprint, audience: selectedAudience, message, channel, templateId, origin: input.origin };
       row = session ? (await Broadcast.create([data], { session }))[0] : await Broadcast.create(data);
     } catch (error) { if (session || error.code !== 11000) throw error; row = await Broadcast.findById(id); }
   }
-  const legacyFingerprint = crypto.createHash('sha256').update(JSON.stringify([input.audience, message, input.origin, templateId])).digest('hex');
+  const legacyFingerprint = crypto.createHash('sha256').update(JSON.stringify([selectedAudience, message, input.origin, templateId])).digest('hex');
   if (row.fingerprint !== fingerprint && !(!row.channel && row.fingerprint === legacyFingerprint)) throw Object.assign(new Error('This send request was already used for a different message.'), { status: 409 });
   await completeAcceptance(row, session);
   return { id: row._id, state: row.state, accepted: true };

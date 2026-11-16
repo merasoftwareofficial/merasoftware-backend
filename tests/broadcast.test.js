@@ -501,3 +501,24 @@ test('concurrent media sends on different assets share channel preference withou
   assert.equal(await Template.countDocuments(), 2);
   assert.equal(await require('../models/emailControlModel').EmailPolicy.countDocuments({ event: 'broadcast.manual' }), 1);
 });
+
+test('multi-group audience combines groups, deduplicates overlapping contacts, and validates eligibility', async () => {
+  const [l1, l2, l3] = await Lead.create([
+    { name: 'Inquiry Lead', phone: '9876543210', status: 'Inquiry' },
+    { name: 'Contacted Lead', phone: '9876543211', status: 'Contacted' },
+    { name: 'Overlap Lead', phone: '9876543210', status: 'Positive' },
+  ]);
+  const combined = await audience('leads:Inquiry,leads:Contacted,leads:Positive');
+  assert.equal(combined.total, 3);
+  assert.equal(combined.count, 2);
+  assert.equal(combined.excluded.duplicatePhone, 1);
+  const { eligible } = require('../helpers/broadcastAudience');
+  assert.ok(await eligible('leads:Inquiry,leads:Contacted', { leadId: l2._id, phone: '919876543211', channel: 'whatsapp' }));
+  assert.equal(await eligible('leads:Inquiry,leads:Contacted', { leadId: l3._id, phone: '919876543210', channel: 'whatsapp' }), null);
+  const res = await send(composed({ audience: ['leads:Inquiry', 'leads:Contacted'], requestKey: 'multi-group-send-0001' }));
+  assert.equal(res.accepted, true);
+  const stored = await Broadcast.findById(res.id).lean();
+  assert.equal(stored.audience, 'leads:Inquiry,leads:Contacted');
+  await Lead.updateOne({ _id: l1._id }, { $set: { status: 'Dead' } });
+  assert.equal(await eligible(stored.audience, { leadId: l1._id, phone: '919876543210', channel: 'whatsapp' }), null);
+});

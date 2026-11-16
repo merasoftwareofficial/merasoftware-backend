@@ -34,11 +34,17 @@ router.get('/audiences', handle(async req => {
   const channel = req.query.channel || 'whatsapp';
   require('../helpers/reviewDelivery').channelsFor(channel);
   const blocks = await require('../helpers/leadContactBlock').contactBlocks();
-  return { channel, groups: await Promise.all(CATALOG.map(async group => {
-  const counts = await audience(group.id, { channel, blocks });
-  return { ...group, count: counts.count, total: counts.total, excluded: counts.excluded,
-    whatsappCount: counts.recipients.filter(row => row.channel !== 'email').length, emailCount: counts.recipients.filter(row => row.channel === 'email').length };
-})), defaultChannel: await require('../helpers/reviewDelivery').actionChannel('broadcast.manual'), fields: FIELDS,
+  const summarize = counts => ({
+    count: counts.count, total: counts.total, excluded: counts.excluded,
+    whatsappCount: counts.recipients.filter(row => row.channel !== 'email').length,
+    emailCount: counts.recipients.filter(row => row.channel === 'email').length,
+  });
+  const selected = typeof req.query.selected === 'string' && req.query.selected.trim()
+    ? summarize(await audience(req.query.selected, { channel, blocks }))
+    : null;
+  return { channel, selected, groups: await Promise.all(CATALOG.map(async group => ({
+    ...group, ...summarize(await audience(group.id, { channel, blocks })),
+  }))), defaultChannel: await require('../helpers/reviewDelivery').actionChannel('broadcast.manual'), fields: FIELDS,
   jobsEnabled: process.env.BROADCAST_JOBS_ENABLED === 'true', stopped: stoppedReason(await State.findById(STATE_ID).lean()) }; }));
 router.get('/templates', handle(() => service.listTemplates()));
 router.post('/templates', handle(req => service.saveTemplate(req.body, req.userId)));

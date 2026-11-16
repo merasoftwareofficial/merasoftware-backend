@@ -8,7 +8,16 @@ const { altSendingEnabled, usableAlt } = require('./contactNumbers');
 // Legacy audience IDs remain readable for accepted runs and older clients. New UI uses CATALOG.
 const GROUPS = [...LEAD_CATEGORIES.filter(value => !NO_MARKETING_STATUSES.includes(value)), WON, PROPOSAL_SENT].map(id => ({ id, label: leadStatusLabel(id) }));
 const CATALOG = [...LEAD_CATEGORIES.map(value => ({ id: `leads:${value}`, label: leadStatusLabel(value), kind: 'leads', blocked: NO_MARKETING_STATUSES.includes(value) })), { id: `leads:${PROPOSAL_SENT}`, label: PROPOSAL_SENT, kind: 'leads', blocked: false }, ...CLIENT_BEHAVIOURS.map(value => ({ id: `clients:${value}`, label: leadStatusLabel(value), kind: 'clients', blocked: !MARKETABLE_CLIENT_BEHAVIOURS.includes(value) }))];
-function groupQuery(group) {
+function parseGroups(input) {
+  const raw = Array.isArray(input) ? input : typeof input === 'string' ? input.split(',') : [];
+  const groups = [...new Set(raw.map(item => String(item || '').trim()).filter(Boolean))];
+  if (!groups.length) fail('Choose a lead group.');
+  return groups;
+}
+function normalizeAudience(input) {
+  return parseGroups(input).join(',');
+}
+function singleGroupQuery(group) {
   if (typeof group === 'string' && group.includes(':')) {
     const descriptor = CATALOG.find(row => row.id === group);
     if (!descriptor) fail('Choose a valid audience.');
@@ -22,16 +31,26 @@ function groupQuery(group) {
     : group === WON ? { status: WON, clientBehaviour: { $in: MARKETABLE_CLIENT_BEHAVIOURS } }
     : { status: group }) };
 }
+function groupQuery(input) {
+  const groups = parseGroups(input);
+  return groups.length === 1 ? singleGroupQuery(groups[0]) : { $or: groups.map(singleGroupQuery) };
+}
 // requireName: the message greets by name, so a lead with none is left out rather than sent "Hi , thanks".
 // `noName` always counts them, so the admin sees how many such a message would skip.
-async function audience(group, { requireName = false, channel = 'whatsapp', blocks: knownBlocks } = {}) {
-  const [leads, blocks] = await Promise.all([Lead.find(groupQuery(group)).select('_id name nameFromWhatsapp phone altPhone email status proposalSentAt convertedToUserId clientBehaviour').sort({ _id: 1 }).lean(), knownBlocks ? Promise.resolve(knownBlocks) : contactBlocks()]);
+async function audience(groupInput, { requireName = false, channel = 'whatsapp', blocks: knownBlocks } = {}) {
+  const groups = parseGroups(groupInput);
+  const descriptors = groups.map(g => CATALOG.find(row => row.id === g)).filter(Boolean);
+  const activeGroups = groups.length > 1 ? groups.filter(g => !CATALOG.find(row => row.id === g)?.blocked) : groups;
+  const query = activeGroups.length ? groupQuery(activeGroups) : groupQuery(groups);
+  const [leads, blocks] = await Promise.all([Lead.find(query).select('_id name nameFromWhatsapp phone altPhone email status proposalSentAt convertedToUserId clientBehaviour').sort({ _id: 1 }).lean(), knownBlocks ? Promise.resolve(knownBlocks) : contactBlocks()]);
   const phones = new Set(), emails = new Set(), recipients = [];
-  const descriptor = CATALOG.find(row => row.id === group);
-  const clientIds = descriptor?.kind === 'clients' ? new Set((await require('../models/userModel').find({ _id: { $in: leads.map(row => row.convertedToUserId) }, roles: 'customer', deletedAt: null, isActive: { $ne: false }, isGuest: { $ne: true } }).select('_id').lean()).map(row => String(row._id))) : null;
+  const allBlocked = descriptors.length === groups.length && descriptors.every(d => d.blocked);
+  const hasClients = descriptors.some(d => d.kind === 'clients');
+  const clientIds = hasClients ? new Set((await require('../models/userModel').find({ _id: { $in: leads.map(row => row.convertedToUserId).filter(Boolean) }, roles: 'customer', deletedAt: null, isActive: { $ne: false }, isGuest: { $ne: true } }).select('_id').lean()).map(row => String(row._id))) : null;
   const excluded = { invalidPhone: 0, duplicatePhone: 0, noName: 0, doNotDisturb: 0, ...(channel !== 'whatsapp' ? { invalidEmail: 0, duplicateEmail: 0 } : {}) };
   for (const lead of leads) {
-    if (descriptor?.blocked || (clientIds && !clientIds.has(String(lead.convertedToUserId)))) { excluded.doNotDisturb++; continue; }
+    const isClientLead = Boolean(lead.convertedToUserId);
+    if (allBlocked || (isClientLead && clientIds && !clientIds.has(String(lead.convertedToUserId)))) { excluded.doNotDisturb++; continue; }
     const numberKeys = [normalizePhone(lead.phone), usableAlt(lead.altPhone, lead.phone)].filter(Boolean);
     if (numberKeys.some(number => blocks.has(number))) { excluded.doNotDisturb++; continue; }
     let countedName = false;
@@ -64,11 +83,12 @@ async function audience(group, { requireName = false, channel = 'whatsapp', bloc
 }
 // `blocks`: an already-read contactBlocks() map, for a caller that checks many recipients in one pass (the
 // follow-up planner). Without it every check reads the current blocks, as a send does.
-async function eligible(group, recipient, { requireName = false, blocks: knownBlocks } = {}) {
-  if (CATALOG.find(row => row.id === group)?.blocked) return null;
-  const lead = await Lead.findOne({ ...groupQuery(group), _id: recipient.leadId }).select('name nameFromWhatsapp phone altPhone email convertedToUserId').lean();
+async function eligible(groupInput, recipient, { requireName = false, blocks: knownBlocks } = {}) {
+  const groups = parseGroups(groupInput).filter(g => !CATALOG.find(row => row.id === g)?.blocked);
+  if (!groups.length) return null;
+  const lead = await Lead.findOne({ ...groupQuery(groups), _id: recipient.leadId }).select('name nameFromWhatsapp phone altPhone email convertedToUserId').lean();
   if (!lead || (requireName && !hasConfirmedName(lead))) return null;
-  if (group.startsWith('clients:') && !await require('../models/userModel').exists({ _id: lead.convertedToUserId, roles: 'customer', deletedAt: null, isActive: { $ne: false }, isGuest: { $ne: true } })) return null;
+  if (lead.convertedToUserId && groups.some(g => g.startsWith('clients:')) && !await require('../models/userModel').exists({ _id: lead.convertedToUserId, roles: 'customer', deletedAt: null, isActive: { $ne: false }, isGuest: { $ne: true } })) return null;
   if (recipient.channel === 'email') {
     if (String(lead.email || '').trim().toLowerCase() !== recipient.email) return null;
     const blocks = knownBlocks || await contactBlocks();
@@ -79,4 +99,4 @@ async function eligible(group, recipient, { requireName = false, blocks: knownBl
   if (recipient.phone !== main && !(altSendingEnabled() && main && usableAlt(lead.altPhone, lead.phone) === recipient.phone)) return null;
   return (knownBlocks || await contactBlocks()).has(recipient.phone) ? null : lead;
 }
-module.exports = { GROUPS, CATALOG, groupQuery, audience, eligible };
+module.exports = { GROUPS, CATALOG, parseGroups, normalizeAudience, groupQuery, audience, eligible };
