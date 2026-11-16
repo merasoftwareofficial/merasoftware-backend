@@ -666,3 +666,50 @@ test('dispatchRun populates legacy {{package}}, {{planLink}}, and paid {{amount}
     process.env.PORTFOLIO_WEBSITE_URL = prevWebsite;
   }
 });
+
+test('dispatchRun normalizes single-brace {name} inside doAlso add_lead_note', async () => {
+  const Lead = require('../models/leadModel');
+  const lead = await Lead.create({ phone: '+919811199900', status: 'Inquiry', source: 'WhatsApp ad', name: 'Meera' });
+  const rule = await Rule.create({
+    name: 'Ad note test',
+    kind: 'template',
+    action: 'whatsapp.ad_received',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all', packageSlug: '' },
+    steps: [{ timingRef: 'after_action', days: 0, afterDays: 0, channel: 'whatsapp', subject: '', text: 'Hi {name}' }],
+    repeat: { times: 0, perDay: 1 },
+    stopOn: [],
+    doAlso: [{ type: 'add_lead_note', note: 'Auto-replied to {name}' }],
+    control: 'auto',
+    enabled: true,
+    createdBy: admin._id,
+  });
+  const run = await Run.create({
+    ruleId: rule._id,
+    ruleRevision: 1,
+    source: 'action',
+    action: 'whatsapp.ad_received',
+    audience: 'customer',
+    occurrenceKey: `test-note:${lead._id}`,
+    step: 0,
+    entityId: new mongoose.Types.ObjectId(),
+    leadId: lead._id,
+    dueAt: new Date(Date.now() - 1000),
+    subject: 'Hi',
+    text: 'Hi {name}',
+    channel: 'whatsapp',
+    doAlso: [{ type: 'add_lead_note', note: 'Auto-replied to {name}' }],
+    status: 'scheduled',
+  });
+  const originalSendSystemMail = emailController.sendSystemMail;
+  emailController.sendSystemMail = async () => 'sent';
+  try {
+    const res = await worker.dispatchRun(run._id);
+    assert.equal(res, 'sent');
+    const updatedLead = await Lead.findById(lead._id).lean();
+    assert.equal(updatedLead.followUps.at(-1).note, 'Auto-replied to Meera');
+  } finally {
+    emailController.sendSystemMail = originalSendSystemMail;
+  }
+});

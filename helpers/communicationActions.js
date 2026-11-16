@@ -1,5 +1,6 @@
 const Override = require('../models/communicationActionOverrideModel');
 const ActionRule = require('../models/communicationActionRuleModel');
+const { EmailControl } = require('../models/emailControlModel');
 const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCatalog');
 const { ACTIONS: TRIGGER_ACTIONS } = require('./actionEvents');
 const { TEXT_BY_ID } = require('./communicationActionText');
@@ -55,16 +56,19 @@ const BUILTIN_BY_ACTION_ID = {
   B41: { templates: ['package.purchase.admin', 'package.purchase.received', 'plan.started', 'plan.purchase.admin', 'plan.payment.submitted'] },
 };
 
-function builtInFor(actionId) {
+function builtInFor(actionId, policyByEvent = null) {
   const entry = BUILTIN_BY_ACTION_ID[actionId];
   if (!entry) return { templates: [], reminders: [] };
   const templates = (entry.templates || []).map(key => {
     const meta = EMAIL_BY_KEY.get(key);
+    const mode = policyByEvent?.get(key);
     return {
       event: key,
       label: meta?.label || key,
       app: meta?.application || 'portal',
       panel: key === 'broadcast.manual' ? 'broadcast' : 'email-templates',
+      ...(mode ? { mode } : {}),
+      active: mode !== 'off',
     };
   });
   return { templates, reminders: entry.reminders || [] };
@@ -99,7 +103,7 @@ const fail = (message, status = 400) => { throw Object.assign(new Error(message)
 const clean = (text, max) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 // One action as the page shows it: the catalog row, with the owner's saved changes on top.
-function merge(base, override, rules = []) {
+function merge(base, override, rules = [], policyByEvent = null) {
   const o = override || {};
   const text = TEXT_BY_ID[base.id] || { title: base.endpoint, what: '', when: '' };
   const triggerKey = TRIGGER_BY_ACTION_ID[base.id] || null;
@@ -120,7 +124,7 @@ function merge(base, override, rules = []) {
     triggerKey,
     supportsScope: !!triggerMeta?.supportsScope,
     conditions: triggerMeta?.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
-    builtIn: builtInFor(base.id),
+    builtIn: builtInFor(base.id, policyByEvent),
     rules,
   };
 }
@@ -149,11 +153,13 @@ function validatePatch(body = {}) {
 }
 
 async function list() {
-  const [overrides, allRules, catalogue] = await Promise.all([
+  const [overrides, allRules, catalogue, policies] = await Promise.all([
     Override.find().lean(),
     ActionRule.find().sort({ createdAt: 1 }).lean(),
     readPackages().catch(() => []),
+    EmailControl.find().select('event mode').lean().catch(() => []),
   ]);
+  const policyByEvent = new Map(policies.map(p => [p.event, p.mode]));
   const byId = new Map(overrides.map(item => [item.actionId, item]));
   const known = new Set(CATEGORIES.map(item => item.name));
   const extra = [...new Set(overrides.map(o => o.category).filter(name => name && !known.has(name)))];
@@ -165,7 +171,7 @@ async function list() {
   const packages = (Array.isArray(catalogue) ? catalogue : [])
     .filter(p => p && p.slug)
     .map(p => ({ slug: p.slug, name: p.name || p.slug }));
-  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id))), surfaces: SURFACES, categories, packages };
+  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent)), surfaces: SURFACES, categories, packages };
 }
 
 async function update(actionId, body, userId) {

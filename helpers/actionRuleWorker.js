@@ -349,7 +349,7 @@ async function dispatchRun(runId, now = new Date()) {
       return 'queued';
     }
     if (result === 'sent') {
-      await executeDoAlso(run, check, values, render);
+      await executeDoAlso(run, check, values, (tmpl, vals, blks, opts) => render(normalizePlaceholders(tmpl), vals, blks, opts));
       const { EmailDraft } = require('../models/emailControlModel');
       const draft = await EmailDraft.findOne({ dedupeKey: key }).select('_id delivery sentAt').lean();
       const queued = draft?.delivery?.whatsappStatus === 'queued';
