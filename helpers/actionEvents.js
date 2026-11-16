@@ -43,6 +43,7 @@ const ACTIONS = {
   'project.step_updated': { label: 'Project step update', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
   'package.purchased': { label: 'Package purchased', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
   'wallet.recharged': { label: 'Wallet recharged', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'subscription.updated': { label: 'Website subscription confirmation or management', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'plan.closed': { label: 'Plan closed / renewal stopped', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';

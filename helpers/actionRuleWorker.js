@@ -139,6 +139,12 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
   }));
 }
 
+const DIRECT_TEMPLATE_MIGRATED = new Set([
+  'template:lead.finalMessage',
+  'template:website.subscription.confirm',
+  'template:website.subscription.manage',
+]);
+
 async function handleEvent(event) {
   let keys = event.matchKeys || [];
   if (event.action === 'payment.received' && await orderFullyPaid(event.orderId)) keys = [...keys, `order:${event.orderId}`];
@@ -151,6 +157,7 @@ async function handleEvent(event) {
   if (!rules.length) return;
   const ctx = await resolveEventContext(event);
   for (const rule of rules) {
+    if (DIRECT_TEMPLATE_MIGRATED.has(rule.migratedFrom)) continue;
     if (!ruleMatchesContext(rule, ctx)) continue;
     for (const run of planRuns(rule, event, ctx.dueDate, ctx)) {
       const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };

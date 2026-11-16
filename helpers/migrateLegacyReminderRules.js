@@ -54,6 +54,9 @@ const TEMPLATE_SEEDS = [
   { event: 'sendAdminAutoRenewalNotification', action: 'plan.started', actionId: 'A51' },
   { event: 'sendPlanClosureEmailToCustomer', action: 'plan.closed', actionId: 'A109' },
   { event: 'sendPlanClosureEmailToAdmin', action: 'plan.closed', actionId: 'A109' },
+  { event: 'lead.finalMessage', action: 'lead.final_message_started', actionId: 'B21' },
+  { event: 'website.subscription.confirm', action: 'subscription.updated', actionId: 'B07' },
+  { event: 'website.subscription.manage', action: 'subscription.updated', actionId: 'B07' },
 ];
 
 function mapMonthlyStep(step) {
@@ -271,7 +274,9 @@ async function migrateLegacyReminderRules({ dryRun = false, actorId = null } = {
       else if (isCustomerTriggered(tpl.event)) control = policy?.mode === 'auto' ? 'auto' : 'off';
       else if (meta?.trigger === 'system') control = 'auto';
       else if (policy?.mode) control = policy.mode;
-      const channel = ['email', 'whatsapp', 'both'].includes(policy?.channel) ? policy.channel : 'both';
+      const channel = tpl.event.startsWith('website.subscription.')
+        ? 'email'
+        : (['email', 'whatsapp', 'both'].includes(policy?.channel) ? policy.channel : 'both');
       await createRule({
         kind: 'template',
         action: tpl.action,

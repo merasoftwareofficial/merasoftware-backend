@@ -481,16 +481,16 @@ test('broadcast.sent plans lead-only run, blocks converted/blocked leads, and mi
   });
 
   const previewRun = await migrateLegacyReminderRules({ dryRun: true });
-  assert.equal(previewRun.migrated, 51);
+  assert.equal(previewRun.migrated, 54);
   assert.equal(previewRun.disabledLegacy, 1);
 
   const firstRun = await migrateLegacyReminderRules();
-  assert.equal(firstRun.migrated, 51);
+  assert.equal(firstRun.migrated, 54);
   assert.equal(firstRun.disabledLegacy, 1);
   assert.equal(firstRun.cancelledRuns, 1);
   const secondRun = await migrateLegacyReminderRules();
   assert.equal(secondRun.migrated, 0);
-  assert.equal(secondRun.skipped, 51);
+  assert.equal(secondRun.skipped, 54);
   assert.equal(secondRun.disabledLegacy, 0);
 
   const [disabledLegacyDoc, cancelledLegacyRun] = await Promise.all([

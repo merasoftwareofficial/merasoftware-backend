@@ -50,8 +50,36 @@ async function recordHistory(draft, decidedBy, required = false) {
     if (required) throw error;
   }
 }
+const DIRECT_MIGRATED_OVERRIDE_EVENTS = new Set([
+  'lead.finalMessage',
+  'website.subscription.confirm',
+  'website.subscription.manage',
+]);
+
+async function migratedRuleFor(event) {
+  if (process.env.ACTION_RULES_ENABLED !== 'true' || !event || event === 'reminder.automated') return null;
+  const ActionRule = require('../models/communicationActionRuleModel');
+  return ActionRule.findOne({ migratedFrom: `template:${event}` }).lean();
+}
+
 // The action's default template, or its built-in system template, filled with the action's values.
 async function applyDefault(event, mail, values = {}) {
+  const migratedRule = DIRECT_MIGRATED_OVERRIDE_EVENTS.has(event) ? await migratedRuleFor(event) : null;
+  if (migratedRule) {
+    if (!migratedRule.enabled || migratedRule.control === 'off') return null;
+    if (isCustomerTriggered(event) && migratedRule.control !== 'auto') return null;
+    if (mail.reviewed) {
+      const text = render(mail.text, values, mail.blocks);
+      const final = compose(text, mail.blocks);
+      return { ...mail, text, plain: final.text, html: final.html };
+    }
+    const step = migratedRule.steps?.[0];
+    if (step?.text) {
+      const base = await systemTemplate(event).catch(() => null);
+      const template = { ...(base || {}), subject: step.subject || base?.subject || event, text: step.text };
+      return { ...mail, ...composeTemplate(template, values, mail.blocks, mail.requiredLinks) };
+    }
+  }
   const policy = await EmailPolicy.findOne({ event }).lean();
   // Customer-started mail exists only while its action is On; it is Off until an admin turns it on.
   if (policy?.mode === 'off' || (isCustomerTriggered(event) && policy?.mode !== 'auto')) return null;
@@ -82,6 +110,7 @@ function validateContent(subject, text) {
 }
 async function isTemplateMigratedAndActive(event) {
   if (process.env.ACTION_RULES_ENABLED !== 'true' || !event || event === 'reminder.automated') return false;
+  if (DIRECT_MIGRATED_OVERRIDE_EVENTS.has(event)) return false;
   const ActionRule = require('../models/communicationActionRuleModel');
   return !!(await ActionRule.exists({ migratedFrom: `template:${event}`, enabled: true, control: { $in: ['auto', 'review'] } }));
 }

@@ -82,7 +82,7 @@ test('builtIn: every mapped action has valid emailCatalog keys and routes websit
   assert.equal(byId.A58.builtIn.templates[0].event, 'lead.created');
   assert.equal(byId.A58.builtIn.templates[0].app, 'portal');
   assert.equal(byId.B07.builtIn.templates[0].app, 'website');
-  assert.equal(byId.B05.builtIn.templates[0].panel, 'broadcast');
+  assert.deepEqual(byId.B05.builtIn.templates, []);
   assert.deepEqual(byId.B35.builtIn.reminders, []);
   assert.equal(byId.B35.triggerKey, 'reservation.created');
   assert.equal(byId.B39.triggerKey, 'package.start_requested');

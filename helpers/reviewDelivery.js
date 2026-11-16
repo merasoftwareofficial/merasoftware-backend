@@ -47,6 +47,11 @@ async function choicesFor(draft, { email, whatsapp: reachable, recipients: all }
 }
 // The action's "Send via" (emailCatalog.js channelFor): every send without an explicit choice uses it.
 async function actionChannel(event) {
+  if (process.env.ACTION_RULES_ENABLED === 'true' && event) {
+    const ActionRule = require('../models/communicationActionRuleModel');
+    const rule = await ActionRule.findOne({ migratedFrom: `template:${event}` }).select('steps.channel').lean();
+    if (rule?.steps?.[0]?.channel) return channelFor(event, { channel: rule.steps[0].channel });
+  }
   return channelFor(event, await EmailPolicy.findOne({ event }).select('channel').lean());
 }
 function channelsFor(selection) {
@@ -56,8 +61,15 @@ function channelsFor(selection) {
 const selectionFor = channels => channels.length === 2 ? 'both' : channels[0];
 
 async function deliver({ draft, actor, decision, sendEmail, recordHistory, reviewedMail, validateContent }) {
-  const policy = await EmailPolicy.findOne({ event: draft.event }).lean();
-  if (policy?.mode === 'off') fail('Messages for this action are Off.');
+  const migratedRule = process.env.ACTION_RULES_ENABLED === 'true' && draft.event
+    ? await require('../models/communicationActionRuleModel').findOne({ migratedFrom: `template:${draft.event}` }).select('enabled control').lean()
+    : null;
+  if (migratedRule) {
+    if (!migratedRule.enabled || migratedRule.control === 'off') fail('Messages for this action are Off.');
+  } else {
+    const policy = await EmailPolicy.findOne({ event: draft.event }).lean();
+    if (policy?.mode === 'off') fail('Messages for this action are Off.');
+  }
   if (draft.status === 'staged' || draft.status === 'skipped') fail('Draft is unavailable.');
   if (draft.event.startsWith('website.subscription.') && decision.channels !== 'email') fail('Subscription confirmation requires email.');
   const owner = randomUUID(), now = new Date();

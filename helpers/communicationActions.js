@@ -45,8 +45,6 @@ const BUILTIN_BY_ACTION_ID = {
   A118: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
   A119: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
   A120: { templates: ['sendProjectUpdateEmail', 'plan.started'] },
-  B05: { templates: ['broadcast.manual'] },
-  B06: { templates: ['broadcast.manual'] },
   B07: { templates: ['website.subscription.confirm', 'website.subscription.manage'] },
   B21: { templates: ['lead.finalMessage'] },
   B35: { templates: ['offer.reserved'] },
