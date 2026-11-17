@@ -899,3 +899,74 @@ test('enrollPendingInvoices previews and idempotently enrolls open unpaid invoic
   const second = await enrollPendingInvoices(rule._id, { dryRun: true });
   assert.equal(second.count, 0);
 });
+
+test('planProjectedMonthlyRuns plans due reminders for scope "all" and backdated packages started after activation', async () => {
+  const Order = require('../models/orderProductModel');
+  const rule = await createRule({
+    kind: 'reminder',
+    action: 'plan.started',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [
+      { timingRef: 'before_due', unit: 'days', days: 3, channel: 'whatsapp', text: '3d before due' },
+      { timingRef: 'on_due', unit: 'days', days: 0, channel: 'whatsapp', text: 'Due today' },
+    ],
+    repeat: { times: 0 },
+    stopOn: ['payment.received'],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  // Backdated package started just now (after rule.activatedAt), whose next due date is in 2 days
+  // (so 3d before_due falls 1 day before activatedAt, yet should still be planned).
+  const nextDue = new Date(Date.now() + 2 * DAY);
+  const backdatedOrder = await Order.create({
+    userId: customer._id,
+    totalAmount: 1999,
+    price: 1999,
+    isServicePlan: true,
+    servicePlanStatus: 'active',
+    serviceCyclePrice: 1999,
+    serviceBillingCycleMonths: 1,
+    serviceBillingTenureMonths: 3,
+    serviceTotalCycles: 3,
+    serviceCurrentCycleNumber: 1,
+    serviceNextBillingDate: nextDue,
+    serviceStartNotifiedAt: new Date(Date.now() + 1000),
+    salesPackage: { package: { id: 'growth-pack', name: 'Growth Pack' }, packageSlug: 'growth-pack' },
+    orderItems: [{ name: 'Growth Pack', quantity: 1, originalPrice: 1999, finalPrice: 1999 }],
+    createdAt: new Date(Date.now() - 28 * DAY),
+  });
+
+  const planned = await worker.planProjectedMonthlyRuns();
+  assert.ok(planned >= 2);
+  const runs = await Run.find({ ruleId: rule._id, entityId: backdatedOrder._id }).sort({ step: 1 }).lean();
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0].occurrenceKey, `projected:${backdatedOrder._id}:2`);
+});
+
+test('communicationActions.list() returns kaam-based triggers with origins and shared rules', async () => {
+  const communicationActions = require('../helpers/communicationActions');
+  await createRule({
+    kind: 'template',
+    action: 'plan.started',
+    actionId: '',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel: 'whatsapp', text: 'Welcome!' }],
+    repeat: { times: 0 },
+    stopOn: [],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  const result = await communicationActions.list();
+  assert.ok(Array.isArray(result.triggers) && result.triggers.length > 0);
+  const planStartedTrigger = result.triggers.find(t => t.triggerKey === 'plan.started');
+  assert.ok(planStartedTrigger);
+  assert.ok(planStartedTrigger.origins.some(o => o.id === 'A29' && o.surface === 'Admin'));
+  assert.ok(planStartedTrigger.origins.some(o => o.id === 'A105' && o.surface === 'Client'));
+  assert.equal(planStartedTrigger.rules.length, 1);
+});

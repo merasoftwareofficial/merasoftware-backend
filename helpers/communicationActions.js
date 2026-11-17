@@ -212,9 +212,54 @@ async function list() {
     );
   };
   const packages = (Array.isArray(catalogue) ? catalogue : [])
-    .filter(p => p && p.slug)
-    .map(p => ({ slug: p.slug, name: p.name || p.slug }));
-  return { actions: ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents)), surfaces: SURFACES, categories, packages };
+    .filter(p => p && (p.slug || p.id))
+    .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
+  const actions = ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents));
+  const triggers = buildTriggers(actions, allRules);
+  return { actions, triggers, surfaces: SURFACES, categories, packages };
+}
+
+// Groups actions by backend business trigger ("kaam") so the UI can manage one rule per outcome
+// while showing every origin (Admin, Client, Website, System) that fires it.
+function buildTriggers(actions, allRules) {
+  const byTrigger = new Map();
+  for (const actionRow of actions) {
+    if (!actionRow.triggerKey || actionRow.deleted) continue;
+    const list = byTrigger.get(actionRow.triggerKey) || [];
+    list.push(actionRow);
+    byTrigger.set(actionRow.triggerKey, list);
+  }
+  const triggers = [];
+  for (const [triggerKey, meta] of Object.entries(TRIGGER_ACTIONS)) {
+    if (!meta?.trigger) continue;
+    const rows = byTrigger.get(triggerKey) || [];
+    const origins = rows.map(row => ({
+      id: row.id,
+      title: row.title,
+      surface: row.surface,
+      method: row.method,
+      endpoint: row.endpoint,
+    }));
+    const seenTpl = new Set();
+    const templates = [];
+    for (const row of rows) {
+      for (const tpl of row.builtIn?.templates || []) {
+        if (seenTpl.has(tpl.event)) continue;
+        seenTpl.add(tpl.event);
+        templates.push(tpl);
+      }
+    }
+    triggers.push({
+      triggerKey,
+      label: meta.label,
+      supportsScope: !!meta.supportsScope,
+      conditions: meta.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
+      origins,
+      rules: allRules.filter(r => r.action === triggerKey),
+      builtIn: { templates, reminders: [] },
+    });
+  }
+  return triggers;
 }
 
 async function update(actionId, body, userId) {

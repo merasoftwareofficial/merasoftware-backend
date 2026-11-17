@@ -451,7 +451,7 @@ async function planProjectedMonthlyRuns() {
     kind: 'reminder',
     enabled: true,
     control: { $in: ['auto', 'review'] },
-    'scope.kind': { $in: ['monthly', 'package'] },
+    'scope.kind': { $in: ['all', 'monthly', 'package'] },
     'steps.timingRef': { $in: ['before_due', 'on_due', 'after_due'] },
   }).lean();
   if (!rules.length) return 0;
@@ -471,7 +471,10 @@ async function planProjectedMonthlyRuns() {
     const packageSlug = String(order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId || '').trim();
     const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, dueDate: candidate.due };
     for (const rule of rules) {
-      if (!rule.activatedAt || candidate.due <= new Date(rule.activatedAt)) continue;
+      if (!rule.activatedAt) continue;
+      const activatedAt = new Date(rule.activatedAt);
+      const startedAfterActivation = order.serviceStartNotifiedAt && new Date(order.serviceStartNotifiedAt) >= activatedAt;
+      if (!startedAfterActivation && candidate.due <= activatedAt) continue;
       if (!ruleMatchesContext(rule, ctx)) continue;
       const dueSteps = (rule.steps || []).filter(st => ['before_due', 'on_due', 'after_due'].includes(st.timingRef));
       if (!dueSteps.length) continue;
@@ -481,12 +484,12 @@ async function planProjectedMonthlyRuns() {
         entityId: order._id,
         clientId: order.userId,
         leadId: null,
-        occurredAt: new Date(rule.activatedAt),
+        occurredAt: activatedAt,
         matchKeys: [`order:${order._id}`],
         details: { dueDate: candidate.due },
       };
       for (const run of planRuns({ ...rule, steps: dueSteps }, fakeEvent, candidate.due)) {
-        if (run.dueAt < new Date(rule.activatedAt)) continue;
+        if (!startedAfterActivation && run.dueAt < activatedAt) continue;
         const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
         await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
         planned++;
