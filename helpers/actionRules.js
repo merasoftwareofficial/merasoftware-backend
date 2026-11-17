@@ -4,7 +4,8 @@ const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 
 const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
-const CONDITIONS = ['anytime', 'unpaid', 'paid'];
+const CONDITIONS = ['anytime', 'unpaid', 'paid', 'upload_pending'];
+const ORIGIN_SURFACES = ['Admin', 'Client', 'Website', 'System'];
 const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'offer_payment'];
 const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
 const fail = message => { const error = new Error(message); error.status = 400; throw error; };
@@ -90,11 +91,15 @@ function cleanRule(raw = {}) {
     return { type: 'stop_reminders', stage: '', note: '' };
   });
 
+  const purpose = String(raw.purpose || '').trim().slice(0, 120);
+  const originFilter = [...new Set((Array.isArray(raw.originFilter) ? raw.originFilter : []).filter(s => ORIGIN_SURFACES.includes(s)))];
   const control = ['auto', 'review'].includes(raw.control) ? raw.control : 'off';
   return {
+    purpose,
     kind,
     action: raw.action,
     actionId: String(raw.actionId || '').trim(),
+    originFilter,
     audience,
     condition,
     scope: { kind: scopeKind, packageSlug },
@@ -121,14 +126,17 @@ const autoName = rule => {
   const first = rule.steps[0];
   const who = rule.audience === 'admin' ? 'Admin' : 'Customer';
   const when = stepLabel(first, rule.kind);
-  const cond = rule.condition === 'unpaid' ? ' · if unpaid' : rule.condition === 'paid' ? ' · if paid' : '';
+  const cond = rule.condition === 'unpaid' ? ' · if unpaid'
+    : rule.condition === 'paid' ? ' · if paid'
+      : rule.condition === 'upload_pending' ? ' · if upload pending' : '';
   const scope = rule.scope?.kind === 'package' ? ` · ${rule.scope.packageSlug}`
     : rule.scope?.kind === 'monthly' ? ' · monthly'
       : rule.scope?.kind === 'one_time' ? ' · one-time'
         : rule.scope?.kind === 'offer_payment' ? ' · offer payment' : '';
   const more = rule.kind === 'reminder' ? rule.steps.length + (rule.repeat?.times || 0) * (rule.repeat?.perDay || 1) - 1 : 0;
   const stop = rule.stopOn?.length ? ` · stop when ${rule.stopOn.map(key => ACTIONS[key].label).join(', ')}` : '';
-  return `${ACTIONS[rule.action].label} · ${who} · ${when}${cond}${scope}${more > 0 ? ` +${more} more` : ''}${stop}`.slice(0, 200);
+  const title = rule.purpose || ACTIONS[rule.action].label;
+  return `${title} · ${who} · ${when}${cond}${scope}${more > 0 ? ` +${more} more` : ''}${stop}`.slice(0, 200);
 };
 
 async function createRule(raw, actorId) {

@@ -24,6 +24,26 @@ async function orderFullyPaid(orderId) {
   return !await Invoice.exists({ orderId, invoiceType: { $in: BILLED }, status: { $in: OPEN } });
 }
 
+function packageSlugOf(order) {
+  return String(
+    order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
+    order?.salesPackage?.package?.id || order?.projectSnapshot?.salesAgreement?.package?.id ||
+    order?.servicePlanSnapshot?.packageSlug || '',
+  ).trim();
+}
+
+async function orderHasUpload(order) {
+  if (!order?._id) return false;
+  const UpdateRequest = require('../models/updateRequestModel');
+  const cycleStart = order.serviceCurrentCycleStartDate || order.createdAt || new Date(0);
+  return !!(await UpdateRequest.exists({
+    $or: [
+      { updatePlanId: order._id, ...(order.isServicePlan ? { createdAt: { $gte: cycleStart } } : {}) },
+      ...(order.userId ? [{ userId: order.userId, createdAt: { $gte: cycleStart } }] : []),
+    ],
+  }));
+}
+
 const NO_ORDER_ACTIONS = new Set([
   'whatsapp.ad_received', 'broadcast.sent', 'package.start_requested',
   'lead.final_message_started', 'final_message.stopped', 'start_request.closed',
@@ -58,17 +78,18 @@ async function resolveEventContext(event) {
   const isMonthly = invoice?.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
   const isOfferPayment = !!order?.paymentPolicy;
   const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
-  const packageSlug = String(
-    order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
-    order?.servicePlanSnapshot?.packageSlug || '',
-  ).trim();
+  const packageSlug = packageSlugOf(order);
+  const hasUploaded = order ? await orderHasUpload(order) : false;
+  const originSurface = String(event.details?.originSurface || '').trim();
   const dueDate = invoice?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
-  return { invoice, order, isPaid, isMonthly, isOfferPayment, offerOffsets, packageSlug, dueDate };
+  return { invoice, order, isPaid, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate };
 }
 
 function ruleMatchesContext(rule, ctx) {
+  if (Array.isArray(rule.originFilter) && rule.originFilter.length && ctx.originSurface && !rule.originFilter.includes(ctx.originSurface)) return false;
   if (rule.condition === 'unpaid' && ctx.isPaid) return false;
   if (rule.condition === 'paid' && !ctx.isPaid) return false;
+  if (rule.condition === 'upload_pending' && ctx.hasUploaded) return false;
   const scopeKind = rule.scope?.kind || 'all';
   if (scopeKind === 'offer_payment' && !ctx.isOfferPayment) return false;
   if (scopeKind === 'monthly' && !ctx.isMonthly) return false;
@@ -252,13 +273,16 @@ async function stillValid(run) {
       if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
       if (rule.scope?.kind === 'offer_payment' && invoice.offerRemindersPaused) return { ok: false, reason: 'Offer reminders are paused for this invoice.' };
       if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
-      order = invoice.orderId ? await Order.findById(invoice.orderId).select('orderItems servicePlanSnapshot salesPackage orderVisibility serviceNextBillingDate serviceBillingCycleMonths').lean() : null;
+      order = invoice.orderId ? await Order.findById(invoice.orderId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt').lean() : null;
     }
   } else {
-    order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths').lean();
+    order = await Order.findById(run.entityId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
     if (waitsForPayment && await orderFullyPaid(order._id)) return { ok: false, reason: 'Payment is complete.' };
     invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
+  }
+  if (rule.condition === 'upload_pending' && order && await orderHasUpload(order)) {
+    return { ok: false, reason: 'Customer already uploaded data.' };
   }
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
@@ -468,8 +492,9 @@ async function planProjectedMonthlyRuns() {
   for (const order of orders) {
     const candidate = packageReminderCandidate(order, null);
     if (!candidate) continue;
-    const packageSlug = String(order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId || '').trim();
-    const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, dueDate: candidate.due };
+    const packageSlug = packageSlugOf(order);
+    const hasUploaded = await orderHasUpload(order);
+    const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, hasUploaded, originSurface: '', dueDate: candidate.due };
     for (const rule of rules) {
       if (!rule.activatedAt) continue;
       const activatedAt = new Date(rule.activatedAt);
@@ -539,12 +564,10 @@ async function enrollPendingInvoices(ruleId, { dryRun = true } = {}) {
     const isMonthly = invoice.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
     const isOfferPayment = !!order?.paymentPolicy;
     const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
-    const packageSlug = String(
-      order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
-      order?.servicePlanSnapshot?.packageSlug || '',
-    ).trim();
+    const packageSlug = packageSlugOf(order);
+    const hasUploaded = order ? await orderHasUpload(order) : false;
     const dueDate = invoice.dueDate || order?.serviceNextBillingDate || null;
-    const ctx = { invoice, order, isPaid: false, isMonthly, isOfferPayment, offerOffsets, packageSlug, dueDate };
+    const ctx = { invoice, order, isPaid: false, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface: '', dueDate };
     if (!ruleMatchesContext(rule, ctx)) continue;
 
     const occurrenceKey = `invoice.created:${String(invoice._id)}`;

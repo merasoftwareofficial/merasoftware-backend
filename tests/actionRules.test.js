@@ -970,3 +970,45 @@ test('communicationActions.list() returns kaam-based triggers with origins and s
   assert.ok(planStartedTrigger.origins.some(o => o.id === 'A105' && o.surface === 'Client'));
   assert.equal(planStartedTrigger.rules.length, 1);
 });
+
+test('purpose, originFilter, specific package.id matching, and upload_pending + upload.completed stop', async () => {
+  const Order = require('../models/orderProductModel');
+  const UpdateRequest = require('../models/updateRequestModel');
+  const { packagePurchased, uploadCompleted } = require('../helpers/actionEvents');
+
+  const rule = await createRule({
+    purpose: 'One-time Data Upload Pending',
+    kind: 'reminder',
+    action: 'package.purchased',
+    originFilter: ['Client'],
+    audience: 'customer',
+    condition: 'upload_pending',
+    scope: { kind: 'package', packageSlug: 'starter-pack' },
+    steps: [{ timingRef: 'after_action', unit: 'days', days: 1, channel: 'whatsapp', text: 'Please upload your data for {{package}}' }],
+    repeat: { times: 2, everyDays: 2, perDay: 1 },
+    stopOn: ['upload.completed'],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  assert.ok(rule.name.startsWith('One-time Data Upload Pending'));
+
+  // Order with nested salesPackage.package.id (as saved by packagePurchase)
+  const order = await Order.create({
+    userId: customer._id,
+    totalAmount: 999,
+    price: 999,
+    salesPackage: { package: { id: 'starter-pack', name: 'Starter Pack' } },
+    orderItems: [{ name: 'Starter Pack', quantity: 1, originalPrice: 999, finalPrice: 999 }],
+  });
+
+  await packagePurchased(order);
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: rule._id, entityId: order._id, status: 'scheduled' }), 3);
+
+  // Client uploads data -> upload.completed cancels scheduled runs
+  const upload = await UpdateRequest.create({ userId: customer._id, updatePlanId: order._id, title: 'My files' });
+  await uploadCompleted(upload);
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: rule._id, entityId: order._id, status: 'cancelled' }), 3);
+});

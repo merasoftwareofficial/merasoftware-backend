@@ -5,20 +5,24 @@ const PAYMENT_CONDITIONS = [
   { key: 'unpaid', label: 'Only if payment is pending (unpaid)' },
   { key: 'paid', label: 'Only if already paid' },
 ];
+const PACKAGE_CONDITIONS = [
+  ...PAYMENT_CONDITIONS,
+  { key: 'upload_pending', label: 'Only if data upload is pending' },
+];
 const ALWAYS_ONLY = [{ key: 'anytime', label: 'Anytime (always)' }];
 
 // Business actions that action rules can start from or stop on (Reminder.md §4, phase 1-2).
 // Each trigger declares its own allowed conditions and whether package/plan scope applies.
 const ACTIONS = {
-  'invoice.created': { label: 'Invoice created', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
+  'invoice.created': { label: 'Invoice created', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
   'payment.received': { label: 'Payment received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'project.completed': { label: 'Project completed', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
-  'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
+  'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
   'whatsapp.ad_received': { label: 'WhatsApp ad message received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'broadcast.sent': { label: 'Broadcast sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'reservation.start_requested': { label: 'Reservation start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'package.start_requested': { label: 'Package start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'project.created': { label: 'Project created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
+  'project.created': { label: 'Project created', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
   'start_request.closed': { label: 'Start request closed', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'reservation.created': { label: 'Offer reserved', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'reservation.extended': { label: 'Reservation extended', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
@@ -41,7 +45,7 @@ const ACTIONS = {
   'project.cancelled': { label: 'Project cancelled', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
   'project.upgraded': { label: 'Project complimentary upgrade', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
   'project.step_updated': { label: 'Project step update', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'package.purchased': { label: 'Package purchased', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  'package.purchased': { label: 'Package purchased', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
   'wallet.recharged': { label: 'Wallet recharged', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'subscription.updated': { label: 'Website subscription confirmation or management', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
   'plan.closed': { label: 'Plan closed / renewal stopped', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
@@ -72,7 +76,13 @@ const invoiceKeys = invoice => [`invoice:${id(invoice._id)}`, ...(invoice.orderI
 const invoiceCreated = (invoice, session) => emitAction('invoice.created', {
   key: `invoice.created:${id(invoice._id)}`, entityId: invoice._id, clientId: invoice.userId, orderId: invoice.orderId,
   matchKeys: invoiceKeys(invoice), occurredAt: invoice.createdAt || new Date(),
-  details: { invoiceType: invoice.invoiceType, amount: invoice.amount, dueDate: invoice.dueDate, invoiceNumber: invoice.invoiceNumber },
+  details: {
+    invoiceType: invoice.invoiceType,
+    amount: invoice.amount,
+    dueDate: invoice.dueDate,
+    invoiceNumber: invoice.invoiceNumber,
+    ...(invoice.invoiceType === 'plan_renewal' ? { originSurface: 'System' } : {}),
+  },
 }, { session });
 
 // Only a fully paid invoice counts. The order key is added later by the worker, once it knows
@@ -269,11 +279,19 @@ const leadMessageSent = lead => {
 
 const uploadCompleted = record => {
   if (!record?._id) return Promise.resolve(false);
+  const clientId = record.userId?._id || record.userId || null;
+  const orderId = record.updatePlanId?._id || record.updatePlanId || null;
+  const matchKeys = [
+    `upload:${id(record._id)}`,
+    ...(orderId ? [`order:${id(orderId)}`] : []),
+    ...(clientId ? [`client:${id(clientId)}`] : []),
+  ];
   return emitAction('upload.completed', {
     key: `upload.completed:${id(record._id)}`,
     entityId: record._id,
-    clientId: record.userId || null,
-    matchKeys: [`upload:${id(record._id)}`],
+    clientId,
+    orderId,
+    matchKeys,
     details: { title: record.title || record.subject || '' },
   });
 };

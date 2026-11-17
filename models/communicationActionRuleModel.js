@@ -22,11 +22,13 @@ const doAlsoStep = new Schema({
 // Saving a change raises `revision`; runs already scheduled keep the text they were planned with.
 const rule = new Schema({
   name: { type: String, required: true, maxlength: 200 },
+  purpose: { type: String, default: '', maxlength: 120 },
   kind: { type: String, enum: ['template', 'reminder'], default: 'reminder' },
   action: { type: String, required: true },
   actionId: { type: String, default: '' },
+  originFilter: { type: [String], default: [] },
   audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
-  condition: { type: String, enum: ['anytime', 'unpaid', 'paid'], default: 'anytime' },
+  condition: { type: String, enum: ['anytime', 'unpaid', 'paid', 'upload_pending'], default: 'anytime' },
   scope: {
     kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package', 'offer_payment'], default: 'all' },
     packageSlug: { type: String, default: '' },

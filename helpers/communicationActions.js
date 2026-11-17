@@ -219,6 +219,36 @@ async function list() {
   return { actions, triggers, surfaces: SURFACES, categories, packages };
 }
 
+// Cross-flow & system origins that fire a trigger alongside its primary catalog mapping (SSOT).
+const EXTRA_ORIGINS_BY_TRIGGER = {
+  'invoice.created': [
+    { id: 'A29', title: 'Admin creates unpaid project/package ("Customer will pay")', surface: 'Admin', method: 'POST', endpoint: '/api/admin/clients/:customerId/create-project' },
+    { id: 'CRON-RENEW', title: 'Monthly plan renewal invoice generated', surface: 'System', method: 'CRON', endpoint: 'servicePlanRenewalCron' },
+  ],
+  'project.created': [
+    { id: 'A29', title: 'Admin creates a project', surface: 'Admin', method: 'POST', endpoint: '/api/admin/clients/:customerId/create-project' },
+    { id: 'B41', title: 'Customer buys a one-time package', surface: 'Client', method: 'POST', endpoint: '/api/package-starts/purchase' },
+  ],
+  'package.purchased': [
+    { id: 'B41', title: 'Customer buys a package', surface: 'Client', method: 'POST', endpoint: '/api/package-starts/purchase' },
+  ],
+  'plan.purchased': [
+    { id: 'A105', title: 'Customer buys a service plan', surface: 'Client', method: 'POST', endpoint: '/api/customer/service-plan-order' },
+  ],
+  'order.upi_pending': [
+    { id: 'A104', title: 'Customer creates UPI pending order', surface: 'Client', method: 'POST', endpoint: '/api/create-order' },
+  ],
+  'reservation.expired': [
+    { id: 'CRON-RES', title: 'Offer reservation expired automatically', surface: 'System', method: 'CRON', endpoint: 'reservationClosure' },
+  ],
+  'project.step_updated': [
+    { id: 'ADMIN-STEP', title: 'Admin updates a project step/node', surface: 'Admin', method: 'PATCH', endpoint: '/api/admin/project-nodes' },
+  ],
+  'subscription.updated': [
+    { id: 'B07', title: 'Website newsletter/subscription form', surface: 'Website', method: 'POST', endpoint: '/api/newsletter/subscribe' },
+  ],
+};
+
 // Groups actions by backend business trigger ("kaam") so the UI can manage one rule per outcome
 // while showing every origin (Admin, Client, Website, System) that fires it.
 function buildTriggers(actions, allRules) {
@@ -233,13 +263,20 @@ function buildTriggers(actions, allRules) {
   for (const [triggerKey, meta] of Object.entries(TRIGGER_ACTIONS)) {
     if (!meta?.trigger) continue;
     const rows = byTrigger.get(triggerKey) || [];
-    const origins = rows.map(row => ({
-      id: row.id,
-      title: row.title,
-      surface: row.surface,
-      method: row.method,
-      endpoint: row.endpoint,
-    }));
+    const seenOrigins = new Set();
+    const origins = [];
+    const pushOrigin = o => {
+      const key = `${o.surface}:${o.id}:${o.title}`;
+      if (seenOrigins.has(key)) return;
+      seenOrigins.add(key);
+      origins.push(o);
+    };
+    for (const row of rows) {
+      pushOrigin({ id: row.id, title: row.title, surface: row.surface, method: row.method, endpoint: row.endpoint });
+    }
+    for (const extra of EXTRA_ORIGINS_BY_TRIGGER[triggerKey] || []) {
+      pushOrigin(extra);
+    }
     const seenTpl = new Set();
     const templates = [];
     for (const row of rows) {
