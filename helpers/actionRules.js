@@ -4,7 +4,7 @@ const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 
 const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
-const CONDITIONS = ['anytime', 'unpaid', 'paid', 'upload_pending'];
+const CONDITIONS = ['anytime', 'unpaid', 'paid', 'installment_due', 'upload_pending'];
 const ORIGIN_SURFACES = ['Admin', 'Client', 'Website', 'System'];
 const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'offer_payment'];
 const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
@@ -47,6 +47,14 @@ function cleanRule(raw = {}) {
   const allowedConditions = (actionMeta.conditions || [{ key: 'anytime' }]).map(c => c.key);
   const condition = raw.condition || 'anytime';
   if (!CONDITIONS.includes(condition) || !allowedConditions.includes(condition)) fail('Choose a valid condition for this action.');
+  const minProgress = raw.minProgress !== undefined && raw.minProgress !== null && raw.minProgress !== ''
+    ? Number(raw.minProgress)
+    : 0;
+  if (!int(minProgress, 0, 100)) fail('Minimum progress must be a whole number from 0 to 100%.');
+  const maxRemainingLimit = raw.maxRemainingLimit !== undefined && raw.maxRemainingLimit !== null && raw.maxRemainingLimit !== ''
+    ? Number(raw.maxRemainingLimit)
+    : null;
+  if (maxRemainingLimit !== null && !int(maxRemainingLimit, 0, 1000)) fail('Remaining limit threshold must be a whole number from 0 to 1000.');
   const scopeKind = SCOPE_KINDS.includes(raw.scope?.kind) ? raw.scope.kind : 'all';
   if (scopeKind !== 'all' && !actionMeta.supportsScope) fail('Package/plan scope is not available for this action.');
   const packageSlug = scopeKind === 'package' ? String(raw.scope?.packageSlug || '').trim() : '';
@@ -102,6 +110,8 @@ function cleanRule(raw = {}) {
     originFilter,
     audience,
     condition,
+    minProgress,
+    maxRemainingLimit,
     scope: { kind: scopeKind, packageSlug },
     steps: clean,
     repeat: times ? { everyDays: raw.repeat.everyDays, times, perDay } : { times: 0, perDay: 1 },

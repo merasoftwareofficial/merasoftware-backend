@@ -64,7 +64,7 @@ async function migratedRuleFor(event) {
 
 // The action's default template, or its built-in system template, filled with the action's values.
 async function applyDefault(event, mail, values = {}) {
-  const migratedRule = DIRECT_MIGRATED_OVERRIDE_EVENTS.has(event) ? await migratedRuleFor(event) : null;
+  const migratedRule = await migratedRuleFor(event);
   if (migratedRule) {
     if (!migratedRule.enabled || migratedRule.control === 'off') return null;
     if (isCustomerTriggered(event) && migratedRule.control !== 'auto') return null;
@@ -111,8 +111,16 @@ function validateContent(subject, text) {
 async function isTemplateMigratedAndActive(event) {
   if (process.env.ACTION_RULES_ENABLED !== 'true' || !event || event === 'reminder.automated') return false;
   if (DIRECT_MIGRATED_OVERRIDE_EVENTS.has(event)) return false;
-  const ActionRule = require('../models/communicationActionRuleModel');
-  return !!(await ActionRule.exists({ migratedFrom: `template:${event}`, enabled: true, control: { $in: ['auto', 'review'] } }));
+  const rule = await migratedRuleFor(event);
+  if (!rule) return false;
+  if (!rule.enabled || rule.control === 'off') return true;
+  const scope = requestScope.getStore();
+  // Admin actions in Review mode stage synchronously via prepareMail so the instant Send / Don't send / Edit popup opens.
+  if (scope && !scope.system && !isCustomerTriggered(event) && rule.control === 'review') {
+    scope.syncReviewedTemplates = [...new Set([...(scope.syncReviewedTemplates || []), `template:${event}`])];
+    return false;
+  }
+  return ['auto', 'review'].includes(rule.control);
 }
 
 async function prepareMail(event, mail, extraValues) {
@@ -194,12 +202,48 @@ function withEvent(event, builder) {
     ? eventScope.run(event, () => builder(...args)) : Promise.resolve(false);
 }
 function requestMiddleware(req, res, next) {
-  const scope = { req, ids: [], closed: false };
+  const scope = { req, ids: [], closed: false, emittedActions: [], emittedEventKeys: [], syncReviewedTemplates: [] };
   const json = res.json.bind(res);
   res.json = function(body) {
     scope.closed = true;
     const success = res.statusCode < 400 && body?.success === true;
     const finish = async () => {
+      if (success && process.env.ACTION_RULES_ENABLED === 'true') {
+        try {
+          const { matchCatalogAction } = require('./communicationActions');
+          const { emitAction } = require('./actionEvents');
+          const Event = require('../models/communicationActionEventModel');
+          if (scope.syncReviewedTemplates?.length && scope.emittedEventKeys?.length) {
+            await Event.updateMany(
+              { key: { $in: scope.emittedEventKeys } },
+              { $set: { 'details.syncReviewedTemplates': scope.syncReviewedTemplates } },
+            );
+          }
+          const matched = matchCatalogAction(req.method, req.originalUrl);
+          if (matched?.triggerKey && !scope.emittedActions.includes(matched.triggerKey)) {
+            const mongoose = require('mongoose');
+            const rawId = req.params?.customerId || req.params?.orderId || req.params?.projectId || req.params?.leadId || req.params?.id || req.userId;
+            const entityId = rawId && mongoose.Types.ObjectId.isValid(String(rawId)) ? new mongoose.Types.ObjectId(String(rawId)) : new mongoose.Types.ObjectId();
+            const clientId = (req.params?.customerId && mongoose.Types.ObjectId.isValid(String(req.params.customerId)))
+              ? req.params.customerId
+              : (req.userId && mongoose.Types.ObjectId.isValid(String(req.userId)) ? req.userId : null);
+            const leadId = (req.params?.leadId && mongoose.Types.ObjectId.isValid(String(req.params.leadId))) ? req.params.leadId : null;
+            await emitAction(matched.triggerKey, {
+              key: `${matched.triggerKey}:${matched.id}:${String(entityId)}:${Date.now()}`,
+              entityId,
+              clientId,
+              leadId,
+              details: {
+                originSurface: matched.surface,
+                actionId: matched.id,
+                ...(scope.syncReviewedTemplates?.length ? { syncReviewedTemplates: scope.syncReviewedTemplates } : {}),
+              },
+            });
+          }
+        } catch (err) {
+          console.error('[action auto-signal]', err.message);
+        }
+      }
       if (!scope.ids.length) return json(req.emailPreparationFailed ? { ...body, emailStatus: 'unavailable' } : body);
       if (!success) {
         await EmailDraft.deleteMany({ _id: { $in: scope.ids }, status: 'staged' });
@@ -462,4 +506,5 @@ async function sendSystemMail(event, mail, dedupeKey, source, options = {}) {
   return DELIVERED.includes(decision.status) ? 'sent' : decision.notSent ? 'not-sent' : 'paused';
 }
 const hasActiveRequestScope = () => { const scope = requestScope.getStore(); return !!scope && !scope.closed && !scope.system && !!scope.req.userId; };
-module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail, hasActiveRequestScope };
+const getActiveRequestScope = () => requestScope.getStore() || null;
+module.exports = { recordHistory, registerReviewDraft, unregisterReviewDraft, queueMail, reviewTransport, withEvent, requestMiddleware, decide, applyDefault, reviewedMail, plainText, validateContent, applicationQuery, draftAccess, sendScheduledOfferReminder, sendReservationConfirmation, sendReservationMail, sendSystemMail, hasActiveRequestScope, getActiveRequestScope };

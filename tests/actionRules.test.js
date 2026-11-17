@@ -1012,3 +1012,174 @@ test('purpose, originFilter, specific package.id matching, and upload_pending + 
   await worker.processEvents();
   assert.equal(await Run.countDocuments({ ruleId: rule._id, entityId: order._id, status: 'cancelled' }), 3);
 });
+
+test('100% catalog mapping (179 actions in 7 folders) + dynamic installment_due, minProgress & maxRemainingLimit', async () => {
+  const communicationActions = require('../helpers/communicationActions');
+  const Order = require('../models/orderProductModel');
+  const { projectStepUpdated, planStarted } = require('../helpers/actionEvents');
+
+  const result = await communicationActions.list();
+  assert.equal(result.folders.length, 7);
+  assert.ok(Array.isArray(result.stopChoices) && result.stopChoices.length >= 10);
+  // Every single catalog action (179/179) is mapped to a Work Group
+  const unmapped = result.actions.filter(a => !a.triggerKey);
+  assert.equal(unmapped.length, 0);
+
+  // 1. Dynamic installment_due + minProgress: 30%
+  const instRule = await createRule({
+    purpose: 'Installment Milestone Alert',
+    kind: 'reminder',
+    action: 'project.step_updated',
+    audience: 'customer',
+    condition: 'installment_due',
+    minProgress: 30,
+    scope: { kind: 'all' },
+    steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel: 'whatsapp', text: 'Progress {{progress}} reached, pay {{amount}}' }],
+    repeat: { times: 0 },
+    stopOn: ['payment.received'],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  const partialOrder = await Order.create({
+    userId: customer._id,
+    totalAmount: 10000,
+    price: 10000,
+    isWebsiteProject: true,
+    isPartialPayment: true,
+    currentInstallment: 2,
+    projectProgress: 20,
+    installments: [
+      { installmentNumber: 1, percentage: 30, amount: 3000, paid: true, progressThreshold: 0 },
+      { installmentNumber: 2, percentage: 30, amount: 3000, paid: false, progressThreshold: 30 },
+      { installmentNumber: 3, percentage: 40, amount: 4000, paid: false, progressThreshold: 60 },
+    ],
+    orderItems: [{ name: 'Custom Site', quantity: 1, originalPrice: 10000, finalPrice: 10000 }],
+  });
+
+  // At 20% progress, installment #2 (threshold 30%) is not due yet
+  await projectStepUpdated(partialOrder, 'node-20');
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: instRule._id, entityId: partialOrder._id }), 0);
+
+  // At 30% progress, installment #2 becomes due -> plans run
+  partialOrder.projectProgress = 30;
+  await partialOrder.save();
+  await projectStepUpdated(partialOrder, 'node-30');
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: instRule._id, entityId: partialOrder._id, status: 'scheduled' }), 1);
+
+  // 2. Dynamic maxRemainingLimit <= 2
+  const limitRule = await createRule({
+    purpose: 'Low Upload Limit Alert',
+    kind: 'template',
+    action: 'plan.started',
+    audience: 'customer',
+    condition: 'anytime',
+    maxRemainingLimit: 2,
+    scope: { kind: 'all' },
+    steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel: 'whatsapp', text: 'Only {{remainingLimit}} uploads left' }],
+    repeat: { times: 0 },
+    stopOn: [],
+    control: 'auto',
+    enabled: true,
+  }, admin._id);
+
+  const highLimitOrder = await Order.create({
+    userId: customer._id,
+    totalAmount: 4999,
+    price: 4999,
+    isServicePlan: true,
+    currentMonthUpdatesLimit: 10,
+    currentMonthUpdatesRemaining: 5,
+    orderItems: [{ name: 'Monthly Plan', quantity: 1, originalPrice: 4999, finalPrice: 4999 }],
+  });
+  await planStarted(highLimitOrder);
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: limitRule._id, entityId: highLimitOrder._id }), 0);
+
+  const lowLimitOrder = await Order.create({
+    userId: customer._id,
+    totalAmount: 4999,
+    price: 4999,
+    isServicePlan: true,
+    currentMonthUpdatesLimit: 10,
+    currentMonthUpdatesRemaining: 2,
+    orderItems: [{ name: 'Monthly Plan', quantity: 1, originalPrice: 4999, finalPrice: 4999 }],
+  });
+  await planStarted(lowLimitOrder);
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: limitRule._id, entityId: lowLimitOrder._id, status: 'scheduled' }), 1);
+});
+
+test('Admin Review mode migrated template stages synchronous EmailDraft for instant popup and avoids worker duplicate', async () => {
+  const { requestMiddleware, queueMail } = require('../helpers/emailController');
+  const { projectCancelled } = require('../helpers/actionEvents');
+  const Order = require('../models/orderProductModel');
+
+  const reviewRule = await Rule.create({
+    name: 'Project cancelled — review popup',
+    kind: 'template',
+    action: 'project.cancelled',
+    audience: 'customer',
+    condition: 'anytime',
+    scope: { kind: 'all' },
+    steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel: 'both', subject: 'Custom Cancel Subject {{name}}', text: 'Custom cancel body for {{name}}' }],
+    repeat: { times: 0 },
+    stopOn: [],
+    control: 'review',
+    enabled: true,
+    activatedAt: new Date(Date.now() - 5000),
+    origin: 'migrated',
+    migratedFrom: 'template:sendProjectCancellationEmail',
+    createdBy: admin._id,
+  });
+
+  const cancelledOrder = await Order.create({
+    userId: customer._id,
+    totalAmount: 2500,
+    price: 2500,
+    orderItems: [{ name: 'Test Project', quantity: 1, originalPrice: 2500, finalPrice: 2500 }],
+  });
+
+  let responsePayload = null;
+  await new Promise(resolve => {
+    const req = {
+      method: 'POST',
+      originalUrl: `/api/admin/projects/${cancelledOrder._id}/cancel`,
+      userId: admin._id,
+      params: { orderId: String(cancelledOrder._id) },
+      body: {},
+    };
+    const res = {
+      statusCode: 200,
+      headersSent: false,
+      on() {},
+      once() {},
+      json(payload) {
+        responsePayload = payload;
+        resolve();
+        return this;
+      },
+    };
+    requestMiddleware(req, res, async () => {
+      await queueMail('sendProjectCancellationEmail', {
+        to: [customer.email],
+        phone: customer.phone,
+        subject: 'Old Subject',
+        text: 'Old Text',
+        values: { name: customer.name },
+      });
+      await projectCancelled(cancelledOrder);
+      res.json({ success: true });
+    });
+  });
+
+  // 1. Response includes emailDraftIds + awaiting-review so the Admin Popup opens immediately!
+  assert.equal(responsePayload.emailStatus, 'awaiting-review');
+  assert.equal(responsePayload.emailDraftIds.length, 1);
+
+  // 2. Worker processes the event and skips creating a duplicate background run for the already-staged review template
+  await worker.processEvents();
+  assert.equal(await Run.countDocuments({ ruleId: reviewRule._id, entityId: cancelledOrder._id }), 0);
+});

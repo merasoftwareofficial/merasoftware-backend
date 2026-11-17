@@ -44,27 +44,42 @@ async function orderHasUpload(order) {
   }));
 }
 
-const NO_ORDER_ACTIONS = new Set([
-  'whatsapp.ad_received', 'broadcast.sent', 'package.start_requested',
-  'lead.final_message_started', 'final_message.stopped', 'start_request.closed',
-  'reservation.expired', 'project.created', 'reservation.extended',
-  'lead.created', 'client.account_created', 'lead.proposal', 'lead.message', 'upload.completed',
-  'plan.requested',
-]);
+function orderRemainingLimit(order) {
+  if (!order) return null;
+  if (typeof order.currentMonthUpdatesRemaining === 'number' && Number.isFinite(order.currentMonthUpdatesRemaining)) {
+    return order.currentMonthUpdatesRemaining;
+  }
+  if (order.demoMode?.active && typeof order.demoMode.uploadsRemaining === 'number') {
+    return order.demoMode.uploadsRemaining;
+  }
+  return null;
+}
 
 async function resolveEventContext(event) {
-  if (NO_ORDER_ACTIONS.has(event.action)) {
-    return { invoice: null, order: null, isPaid: false, isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '', dueDate: event.details?.dueDate || null };
+  const entityType = ACTIONS[event.action]?.entityType || 'none';
+  const originSurface = String(event.details?.originSurface || '').trim();
+  if (entityType === 'none' || entityType === 'package_start' || entityType === 'final_message' || event.action === 'project.created') {
+    return {
+      invoice: null, order: null, isPaid: false, isInstallmentDue: false,
+      progress: Number(event.details?.progress || 0), remainingLimit: null,
+      isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '',
+      originSurface, dueDate: event.details?.dueDate || null,
+    };
   }
-  if (event.action === 'reservation.created' || event.action === 'reservation.start_requested') {
+  if (entityType === 'reservation') {
     const Reservation = require('../models/offerReservationModel');
     const row = await Reservation.findById(event.entityId).select('expiresAt extendedUntil').lean();
     const dueDate = row ? (row.extendedUntil || row.expiresAt) : (event.details?.dueDate || null);
-    return { invoice: null, order: null, isPaid: false, isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '', dueDate };
+    return {
+      invoice: null, order: null, isPaid: false, isInstallmentDue: false,
+      progress: 0, remainingLimit: null,
+      isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '',
+      originSurface, dueDate,
+    };
   }
   let invoice = null;
   let order = null;
-  if (event.action === 'invoice.created' || event.action === 'payment.received' || event.action === 'invoice.resent' || event.action === 'invoice.manual_reminder') {
+  if (entityType === 'invoice') {
     invoice = await Invoice.findById(event.entityId).lean();
     order = invoice?.orderId ? await Order.findById(invoice.orderId).lean() : null;
   } else {
@@ -75,21 +90,29 @@ async function resolveEventContext(event) {
     }
   }
   const isPaid = invoice ? !OPEN.includes(invoice.status) : await orderFullyPaid(order?._id);
+  const dueInst = order ? require('./projectDuePayment').dueInstallment(order) : null;
+  const isInstallmentDue = !!dueInst || !!(invoice?.installmentNumber && OPEN.includes(invoice.status));
+  const progress = Number(order?.projectProgress ?? event.details?.progress ?? 0);
+  const remainingLimit = orderRemainingLimit(order);
   const isMonthly = invoice?.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
   const isOfferPayment = !!order?.paymentPolicy;
   const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
   const packageSlug = packageSlugOf(order);
   const hasUploaded = order ? await orderHasUpload(order) : false;
-  const originSurface = String(event.details?.originSurface || '').trim();
-  const dueDate = invoice?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
-  return { invoice, order, isPaid, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate };
+  const dueDate = invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
+  return { invoice, order, isPaid, isInstallmentDue, progress, remainingLimit, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate };
 }
 
 function ruleMatchesContext(rule, ctx) {
   if (Array.isArray(rule.originFilter) && rule.originFilter.length && ctx.originSurface && !rule.originFilter.includes(ctx.originSurface)) return false;
   if (rule.condition === 'unpaid' && ctx.isPaid) return false;
   if (rule.condition === 'paid' && !ctx.isPaid) return false;
+  if (rule.condition === 'installment_due' && !ctx.isInstallmentDue) return false;
   if (rule.condition === 'upload_pending' && ctx.hasUploaded) return false;
+  if (Number(rule.minProgress || 0) > 0 && Number(ctx.progress || 0) < Number(rule.minProgress)) return false;
+  if (rule.maxRemainingLimit !== null && rule.maxRemainingLimit !== undefined) {
+    if (ctx.remainingLimit === null || ctx.remainingLimit === undefined || ctx.remainingLimit > Number(rule.maxRemainingLimit)) return false;
+  }
   const scopeKind = rule.scope?.kind || 'all';
   if (scopeKind === 'offer_payment' && !ctx.isOfferPayment) return false;
   if (scopeKind === 'monthly' && !ctx.isMonthly) return false;
@@ -173,12 +196,14 @@ async function handleEvent(event) {
     await Run.updateMany({ source: 'action', status: 'scheduled', stopOn: event.action, matchKeys: { $in: keys } },
       { $set: { status: 'cancelled', reason: `Stopped: ${ACTIONS[event.action].label}.` } });
   }
-  if (!event.clientId && !event.leadId) return;
   const rules = await Rule.find({ action: event.action, enabled: true, control: { $in: ['auto', 'review'] }, activatedAt: { $lte: event.occurredAt } }).lean();
   if (!rules.length) return;
   const ctx = await resolveEventContext(event);
+  const syncReviewed = Array.isArray(event.details?.syncReviewedTemplates) ? event.details.syncReviewedTemplates : [];
   for (const rule of rules) {
     if (DIRECT_TEMPLATE_MIGRATED.has(rule.migratedFrom)) continue;
+    if (rule.migratedFrom && syncReviewed.includes(rule.migratedFrom)) continue;
+    if (!event.clientId && !event.leadId && rule.audience !== 'admin') continue;
     if (!ruleMatchesContext(rule, ctx)) continue;
     for (const run of planRuns(rule, event, ctx.dueDate, ctx)) {
       const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
@@ -208,7 +233,7 @@ async function processEvents(limit = 200) {
 // The check right before sending: the reason for the message must still be true, even if the
 // stop action came through a path that records no event.
 async function stillValid(run) {
-  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition control scope').lean();
+  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition minProgress maxRemainingLimit control scope').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -226,13 +251,16 @@ async function stillValid(run) {
       }
     }
     client = { name: lead.name || 'Customer', email: lead.email || '', phone: lead.phone || '' };
+  } else if (run.audience === 'admin') {
+    client = { name: 'System / Admin', email: '', phone: '' };
   } else {
     return { ok: false, reason: 'Customer or lead is unavailable.' };
   }
-  const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid';
+  const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid' || rule.condition === 'installment_due';
+  const entityType = ACTIONS[run.action]?.entityType || 'none';
   let invoice = null, order = null;
-  if (NO_ORDER_ACTIONS.has(run.action)) {
-    // Lead / client / upload template actions need no invoice or order lookup.
+  if (entityType === 'none' || run.action === 'project.created') {
+    // Non-order / non-invoice actions need no invoice or order lookup.
   } else if (run.action === 'reservation.start_requested') {
     const Reservation = require('../models/offerReservationModel');
     const row = await Reservation.findById(run.entityId).select('projectId confirmedAt startRequestedAt startRequests teamRemindersPaused').lean();
@@ -240,28 +268,28 @@ async function stillValid(run) {
     if (!row || row.projectId || row.confirmedAt || !row.startRequestedAt || row.teamRemindersPaused || lastReq?.ended) {
       return { ok: false, reason: 'Reservation start request is closed or paused.' };
     }
-  } else if (run.action === 'package.start_requested') {
+  } else if (entityType === 'package_start') {
     const StartRequest = require('../models/packageStartRequestModel');
     const row = await StartRequest.findById(run.entityId).select('closedAt remindersPaused').lean();
     if (!row || row.closedAt || row.remindersPaused) {
       return { ok: false, reason: 'Package start request is closed or paused.' };
     }
-  } else if (run.action === 'reservation.created') {
+  } else if (entityType === 'reservation') {
     const Reservation = require('../models/offerReservationModel');
     const row = await Reservation.findById(run.entityId).select('projectId confirmedAt startRequestedAt remindersPaused expiresAt extendedUntil').lean();
     const deadline = row ? new Date(row.extendedUntil || row.expiresAt) : null;
     if (!row || row.projectId || row.confirmedAt || row.startRequestedAt || row.remindersPaused || !deadline || deadline <= new Date()) {
       return { ok: false, reason: 'Reservation countdown is no longer active.' };
     }
-  } else if (run.action === 'lead.final_message_started') {
+  } else if (entityType === 'final_message') {
     const { FinalMessage } = require('../whatsapp/src/models.js');
     const row = await FinalMessage.findById(run.entityId).select('status').lean();
     if (!row || row.status !== 'waiting') {
       return { ok: false, reason: 'Final message is no longer waiting.' };
     }
-  } else if (run.action === 'invoice.created' || run.action === 'payment.received' || run.action === 'invoice.resent' || run.action === 'invoice.manual_reminder') {
+  } else if (entityType === 'invoice') {
     if (String(run.occurrenceKey || '').startsWith('projected:')) {
-      order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber').lean();
+      order = await Order.findById(run.entityId).select('orderItems servicePlanSnapshot salesPackage orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments').lean();
       const { isFinalCycle } = require('./serviceBillingSchedule');
       if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled' || order.servicePlanStatus !== 'active' || order.serviceAutoRenewalStoppedAt || isFinalCycle(order, order.serviceCurrentCycleNumber)) {
         return { ok: false, reason: 'Renewal is stopped or paused.' };
@@ -273,16 +301,30 @@ async function stillValid(run) {
       if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
       if (rule.scope?.kind === 'offer_payment' && invoice.offerRemindersPaused) return { ok: false, reason: 'Offer reminders are paused for this invoice.' };
       if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
-      order = invoice.orderId ? await Order.findById(invoice.orderId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt').lean() : null;
+      order = invoice.orderId ? await Order.findById(invoice.orderId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments').lean() : null;
     }
   } else {
-    order = await Order.findById(run.entityId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt').lean();
+    order = await Order.findById(run.entityId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
-    if (waitsForPayment && await orderFullyPaid(order._id)) return { ok: false, reason: 'Payment is complete.' };
+    if (rule.condition === 'installment_due') {
+      const dueInst = require('./projectDuePayment').dueInstallment(order);
+      if (!dueInst) return { ok: false, reason: 'Installment is already paid or not due.' };
+    } else if (waitsForPayment && await orderFullyPaid(order._id)) {
+      return { ok: false, reason: 'Payment is complete.' };
+    }
     invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
   }
   if (rule.condition === 'upload_pending' && order && await orderHasUpload(order)) {
     return { ok: false, reason: 'Customer already uploaded data.' };
+  }
+  if (Number(rule.minProgress || 0) > 0 && order && Number(order.projectProgress || 0) < Number(rule.minProgress)) {
+    return { ok: false, reason: 'Project progress is below rule threshold.' };
+  }
+  if (rule.maxRemainingLimit !== null && rule.maxRemainingLimit !== undefined && order) {
+    const rem = orderRemainingLimit(order);
+    if (rem === null || rem > Number(rule.maxRemainingLimit)) {
+      return { ok: false, reason: 'Remaining upload limit is above rule threshold.' };
+    }
   }
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
@@ -324,7 +366,7 @@ const websiteLink = path => safeUrl(process.env.PORTFOLIO_WEBSITE_URL, path);
 
 const KNOWN_PLACEHOLDERS = new Set([
   'name', 'amount', 'dueDate', 'invoiceLink', 'projectLink', 'packageLink', 'planLink', 'portalLink',
-  'project', 'planName', 'package', 'duration', 'email', 'phone',
+  'project', 'planName', 'package', 'duration', 'email', 'phone', 'progress', 'remainingLimit',
 ]);
 function normalizePlaceholders(text) {
   return String(text || '').replace(/(?<!\{)\{(\w+)\}(?!\})/g, (m, key) => (KNOWN_PLACEHOLDERS.has(key) ? `{{${key}}}` : m));
@@ -392,9 +434,11 @@ async function dispatchRun(runId, now = new Date()) {
     ).trim();
     const months = order?.salesPackage?.months || order?.serviceBillingCycleMonths || order?.servicePlanSnapshot?.selectedBillingCycleMonths;
     const duration = months ? `${months} month${months > 1 ? 's' : ''}` : '';
+    const dueInst = order ? require('./projectDuePayment').dueInstallment(order) : null;
     const invoiceAmount = invoice
       ? (run.action === 'payment.received' ? Number(invoice.amount || 0) : Number(invoice.amount - (invoice.amountPaid || 0)))
-      : 0;
+      : (dueInst ? Number(dueInst.amount || 0) : 0);
+    const remLimit = orderRemainingLimit(order);
     const values = {
       name: client.name || 'Customer',
       email: client.email || '',
@@ -403,9 +447,11 @@ async function dispatchRun(runId, now = new Date()) {
       planName,
       package: planName || 'Package',
       duration,
-      amount: invoice ? `₹${invoiceAmount.toLocaleString('en-IN')}` : '',
-      dueDate: day(invoice?.dueDate || order?.serviceNextBillingDate),
-      invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : '',
+      progress: order ? `${Number(order.projectProgress || 0)}%` : '',
+      remainingLimit: remLimit !== null ? String(remLimit) : '',
+      amount: (invoice || dueInst) ? `₹${invoiceAmount.toLocaleString('en-IN')}` : '',
+      dueDate: day(invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate),
+      invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : (order?._id ? portalLink(`/project-details/${order._id}`) : ''),
       projectLink: order?._id ? portalLink(`/project-details/${order._id}`) : '',
       planLink: order?._id ? portalLink(`/plan-details/${order._id}`) : '',
       packageLink: packageSlug ? websiteLink(`/package/${encodeURIComponent(packageSlug)}`) : '',

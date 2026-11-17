@@ -4,6 +4,7 @@ const PAYMENT_CONDITIONS = [
   { key: 'anytime', label: 'Anytime (always)' },
   { key: 'unpaid', label: 'Only if payment is pending (unpaid)' },
   { key: 'paid', label: 'Only if already paid' },
+  { key: 'installment_due', label: 'Only if current installment is due (unpaid)' },
 ];
 const PACKAGE_CONDITIONS = [
   ...PAYMENT_CONDITIONS,
@@ -11,44 +12,490 @@ const PACKAGE_CONDITIONS = [
 ];
 const ALWAYS_ONLY = [{ key: 'anytime', label: 'Anytime (always)' }];
 
-// Business actions that action rules can start from or stop on (Reminder.md §4, phase 1-2).
-// Each trigger declares its own allowed conditions and whether package/plan scope applies.
+const FOLDERS = [
+  'Payments & Invoices',
+  'Projects & Previews',
+  'Plans & Packages',
+  'Data Uploads & Documents',
+  'Leads, Offers & Reservations',
+  'Login, Profile, Accounts & Support',
+  'Website Content, Products, Broadcast & Settings',
+];
+
+// Master SSOT Work Registry (Reminder.md §2-3).
+// Every business work ("kaam") declares its folder, plain-English meaning (`when`), entity context (`entityType`),
+// allowed dynamic conditions, whether it can stop a reminder (`canStop`), and its natural stop group (`defaultStopOn`).
 const ACTIONS = {
-  'invoice.created': { label: 'Invoice created', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
-  'payment.received': { label: 'Payment received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'project.completed': { label: 'Project completed', trigger: true, supportsScope: true, conditions: PAYMENT_CONDITIONS },
-  'plan.started': { label: 'Plan started', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
-  'whatsapp.ad_received': { label: 'WhatsApp ad message received', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'broadcast.sent': { label: 'Broadcast sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'reservation.start_requested': { label: 'Reservation start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'package.start_requested': { label: 'Package start requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'project.created': { label: 'Project created', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
-  'start_request.closed': { label: 'Start request closed', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'reservation.created': { label: 'Offer reserved', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'reservation.extended': { label: 'Reservation extended', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'reservation.expired': { label: 'Reservation expired', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'lead.final_message_started': { label: 'Final message started', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'final_message.stopped': { label: 'Final message stopped', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'lead.created': { label: 'Lead created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'client.account_created': { label: 'Client account created', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'lead.proposal': { label: 'Proposal sent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'lead.message': { label: 'Message sent to lead', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'upload.completed': { label: 'Update request / upload completed', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'order.upi_pending': { label: 'Order created (UPI pending)', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'invoice.resent': { label: 'Invoice resent', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'invoice.manual_reminder': { label: 'Manual payment reminder', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'plan.requested': { label: 'Plan requested', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'plan.work_updated': { label: 'Plan work update added', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'plan.upload_updated': { label: 'Plan upload status changed', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'plan.payment_rejected': { label: 'Plan or wallet payment rejected', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'plan.purchased': { label: 'Service plan purchased', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'project.cancelled': { label: 'Project cancelled', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'project.upgraded': { label: 'Project complimentary upgrade', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'project.step_updated': { label: 'Project step update', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
-  'package.purchased': { label: 'Package purchased', trigger: true, supportsScope: true, conditions: PACKAGE_CONDITIONS },
-  'wallet.recharged': { label: 'Wallet recharged', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'subscription.updated': { label: 'Website subscription confirmation or management', trigger: true, supportsScope: false, conditions: ALWAYS_ONLY },
-  'plan.closed': { label: 'Plan closed / renewal stopped', trigger: true, supportsScope: true, conditions: ALWAYS_ONLY },
+  // 1. Payments & Invoices
+  'invoice.created': {
+    label: 'Invoice created',
+    folder: 'Payments & Invoices',
+    when: 'When any project, plan, package, installment, or monthly renewal creates a bill (use Unpaid for Payment pending).',
+    entityType: 'invoice',
+    trigger: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'payment.received': {
+    label: 'Payment received',
+    folder: 'Payments & Invoices',
+    when: 'When an invoice or order is fully paid via order approval, installment, wallet, or mark-paid.',
+    entityType: 'invoice',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'order.upi_pending': {
+    label: 'Order created (UPI pending)',
+    folder: 'Payments & Invoices',
+    when: 'When a client submits a new order with pending UPI verification.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    conditions: PAYMENT_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'plan.payment_rejected': {
+    label: 'Plan or wallet payment rejected',
+    folder: 'Payments & Invoices',
+    when: 'When an admin rejects a submitted plan or wallet payment.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'wallet.recharged': {
+    label: 'Wallet recharged',
+    folder: 'Payments & Invoices',
+    when: 'When an admin recharges a client wallet or demo credit is added.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'invoice.resent': {
+    label: 'Invoice resent',
+    folder: 'Payments & Invoices',
+    when: 'When an admin resends a project final invoice or monthly payment invoice.',
+    entityType: 'invoice',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'invoice.manual_reminder': {
+    label: 'Manual payment reminder',
+    folder: 'Payments & Invoices',
+    when: 'When an admin manually triggers a payment reminder from payment records.',
+    entityType: 'invoice',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'bank.account_updated': {
+    label: 'Bank account added, updated or deleted',
+    folder: 'Payments & Invoices',
+    when: 'When a user adds, edits, or removes a saved payout bank account.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 2. Projects & Previews
+  'project.created': {
+    label: 'Project created',
+    folder: 'Projects & Previews',
+    when: 'When a new project is created by an admin, requested by a client, or started from a package.',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    supportsProgress: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'project.step_updated': {
+    label: 'Project step update',
+    folder: 'Projects & Previews',
+    when: 'When project steps or progress % change (use Progress >= X% or Installment due for milestone reminders).',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    supportsProgress: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['payment.received', 'project.completed'],
+  },
+  'project.completed': {
+    label: 'Project completed',
+    folder: 'Projects & Previews',
+    when: 'When a project reaches 100% progress.',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    supportsProgress: true,
+    conditions: PAYMENT_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'project.cancelled': {
+    label: 'Project cancelled',
+    folder: 'Projects & Previews',
+    when: 'When an admin cancels a project order.',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    conditions: ALWAYS_ONLY,
+  },
+  'project.upgraded': {
+    label: 'Project complimentary upgrade',
+    folder: 'Projects & Previews',
+    when: 'When an admin gives a free complimentary upgrade on a project.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    conditions: ALWAYS_ONLY,
+  },
+  'preview.updated': {
+    label: 'Website preview updated or shared',
+    folder: 'Projects & Previews',
+    when: 'When a project website preview is configured, uploaded, shared, or cleaned up.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 3. Plans & Packages
+  'plan.started': {
+    label: 'Plan started',
+    folder: 'Plans & Packages',
+    when: 'When a monthly plan or package starts (admin start, client purchase, or after project completion).',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['upload.completed', 'payment.received'],
+  },
+  'plan.purchased': {
+    label: 'Service plan purchased',
+    folder: 'Plans & Packages',
+    when: 'When a client purchases a service plan from the portal.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'package.purchased': {
+    label: 'Package purchased',
+    folder: 'Plans & Packages',
+    when: 'When a client buys a sales package.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['upload.completed', 'payment.received'],
+  },
+  'plan.requested': {
+    label: 'Plan requested',
+    folder: 'Plans & Packages',
+    when: 'When a visitor or client requests a plan or checks a plan/package quote.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'plan.work_updated': {
+    label: 'Plan work update added',
+    folder: 'Plans & Packages',
+    when: 'When an admin posts a work update or changes release mode on an active plan.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: ALWAYS_ONLY,
+  },
+  'plan.closed': {
+    label: 'Plan closed / renewal stopped',
+    folder: 'Plans & Packages',
+    when: 'When a client or system stops automatic renewal of a service plan.',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    conditions: ALWAYS_ONLY,
+  },
+  'package.start_requested': {
+    label: 'Package start requested',
+    folder: 'Plans & Packages',
+    when: 'When a client requests the team to start their purchased package.',
+    entityType: 'package_start',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['start_request.closed', 'project.created'],
+  },
+  'start_request.closed': {
+    label: 'Start request closed',
+    folder: 'Plans & Packages',
+    when: 'When the team closes or fulfills a package/reservation start request.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'catalogue.plan_updated': {
+    label: 'Plan or sales package catalogue updated',
+    folder: 'Plans & Packages',
+    when: 'When an admin creates, edits, pauses, links, retires, or deletes a plan or sales package.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 4. Data Uploads & Documents
+  'upload.completed': {
+    label: 'Update request / upload completed',
+    folder: 'Data Uploads & Documents',
+    when: 'When a client uploads files (portal or external link) or submits an update request.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'plan.upload_updated': {
+    label: 'Plan upload status changed',
+    folder: 'Data Uploads & Documents',
+    when: 'When an admin changes upload status (in progress, completed, rejected), creates/revokes an upload link, or adds a client document.',
+    entityType: 'order',
+    trigger: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 5. Leads, Offers & Reservations
+  'lead.created': {
+    label: 'Lead created',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When a lead is created, edited, or deleted in the admin panel.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'lead.proposal': {
+    label: 'Proposal sent',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When an admin uploads a proposal or sends a proposal on WhatsApp to a lead.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'lead.message': {
+    label: 'Message sent to lead',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When an admin sends a direct message to a lead.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'lead.final_message_started': {
+    label: 'Final message started',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When a final follow-up message is prepared or decided for a negative/unresponsive lead.',
+    entityType: 'final_message',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['final_message.stopped', 'whatsapp.ad_received'],
+  },
+  'final_message.stopped': {
+    label: 'Final message stopped',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When a lead final message follow-up is stopped.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'reservation.created': {
+    label: 'Offer reserved',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When a visitor or customer reserves a limited-time offer.',
+    entityType: 'reservation',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['payment.received', 'reservation.start_requested', 'reservation.expired'],
+  },
+  'reservation.extended': {
+    label: 'Reservation extended',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When an admin extends the deadline of an offer reservation.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'reservation.start_requested': {
+    label: 'Reservation start requested',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When a customer clicks Start my project on a reserved offer.',
+    entityType: 'reservation',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['start_request.closed', 'project.created'],
+  },
+  'reservation.expired': {
+    label: 'Reservation expired',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When an offer reservation countdown expires without payment.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'offer.target_updated': {
+    label: 'Offer target or stage updated',
+    folder: 'Leads, Offers & Reservations',
+    when: 'When an admin adds people to an offer, updates their offer stage/behaviour, or marks them bought.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 6. Login, Profile, Accounts & Support
+  'user.signed_in': {
+    label: 'User login or role switch',
+    folder: 'Login, Profile, Accounts & Support',
+    when: 'When a user signs in, uses guest login, or switches active role.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'user.signed_up': {
+    label: 'User sign up, OTP or profile updated',
+    folder: 'Login, Profile, Accounts & Support',
+    when: 'When someone signs up, verifies/resends OTP, sets password, or updates their profile.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'client.account_created': {
+    label: 'Client account created',
+    folder: 'Login, Profile, Accounts & Support',
+    when: 'When a lead is converted into a client or an admin creates a team/client account.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'account.updated': {
+    label: 'Account status, password reset or role granted',
+    folder: 'Login, Profile, Accounts & Support',
+    when: 'When an admin resets a client password, changes account active/blocked status, or grants a role.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'ticket.updated': {
+    label: 'Support ticket opened or replied',
+    folder: 'Login, Profile, Accounts & Support',
+    when: 'When a client opens a support ticket or a client/admin replies to a ticket.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+
+  // 7. Website Content, Products, Broadcast & Settings
+  'website.content_updated': {
+    label: 'Website banner, ad, slide or popup changed',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin uploads, edits, or deletes a website banner, advertisement, guest slide, or welcome popup.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'product.updated': {
+    label: 'Store product or category changed',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin adds, updates, deletes, hides, unhides a product/category or changes base prices.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'broadcast.sent': {
+    label: 'Broadcast sent',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin sends/retries a broadcast or manages broadcast templates/media.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['whatsapp.ad_received'],
+  },
+  'whatsapp.ad_received': {
+    label: 'WhatsApp ad message received',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an incoming WhatsApp message matches the Auto Reply ad text.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'subscription.updated': {
+    label: 'Website subscription confirmation or management',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When a website subscription message draft or newsletter subscription is updated.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'trash.updated': {
+    label: 'Record moved to trash, restored or deleted',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin deletes an order, moves a client to Trash, restores from Trash, or purges permanently.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
+  'settings.updated': {
+    label: 'Admin, invoice or communication settings changed',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin updates portal/invoice settings, templates, email policies, auto-reply, WhatsApp, or reminder controls.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 
@@ -58,7 +505,23 @@ const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 async function emitAction(action, { key, entityId, clientId = null, leadId = null, orderId = null, matchKeys = [], details = {}, occurredAt = new Date() }, { session = null } = {}) {
   if (!enabled()) return false;
   if (!ACTIONS[action]) throw new Error(`Unknown action ${action}`);
-  const doc = { action, entityId, clientId, leadId, orderId, matchKeys, details, occurredAt, status: 'new' };
+  let scope = null;
+  try { scope = require('./emailController').getActiveRequestScope?.() || null; } catch { scope = null; }
+  const nextDetails = { ...details };
+  if (scope && !scope.system && scope.req) {
+    if (!nextDetails.originSurface) {
+      try {
+        const matched = require('./communicationActions').matchCatalogAction?.(scope.req.method, scope.req.originalUrl);
+        if (matched?.surface) nextDetails.originSurface = matched.surface;
+      } catch { /* ignore */ }
+    }
+    if (scope.syncReviewedTemplates?.length && !nextDetails.syncReviewedTemplates) {
+      nextDetails.syncReviewedTemplates = [...scope.syncReviewedTemplates];
+    }
+    if (Array.isArray(scope.emittedActions) && !scope.emittedActions.includes(action)) scope.emittedActions.push(action);
+    if (Array.isArray(scope.emittedEventKeys) && !scope.emittedEventKeys.includes(key)) scope.emittedEventKeys.push(key);
+  }
+  const doc = { action, entityId, clientId, leadId, orderId, matchKeys, details: nextDetails, occurredAt, status: 'new' };
   try {
     await Event.updateOne({ key }, { $setOnInsert: { key, ...doc } }, { upsert: true, ...(session ? { session } : {}) });
     return true;
@@ -409,14 +872,18 @@ const projectUpgraded = (order, stage = 'offer') => {
   });
 };
 
-const projectStepUpdated = (order, nodeId) => {
+const projectStepUpdated = (order, nodeOrId) => {
   if (!order?._id) return Promise.resolve(false);
+  const nodeId = typeof nodeOrId === 'object' && nodeOrId !== null
+    ? (nodeOrId.nodeId || nodeOrId._id || order.projectProgress || 'step')
+    : (nodeOrId || order.projectProgress || 'step');
   return emitAction('project.step_updated', {
-    key: `project.step_updated:${id(order._id)}:${id(nodeId)}`,
+    key: `project.step_updated:${id(order._id)}:${id(nodeId)}:${Number(order.projectProgress || 0)}`,
     entityId: order._id,
     clientId: order.userId?._id || order.userId || null,
     orderId: order._id,
     matchKeys: [`order:${id(order._id)}`],
+    details: { progress: Number(order.projectProgress || 0), originSurface: 'Admin' },
   });
 };
 
@@ -442,7 +909,13 @@ const reservationExtended = row => {
   });
 };
 
+const STOP_CHOICES = Object.entries(ACTIONS)
+  .filter(([, meta]) => meta.canStop)
+  .map(([key, meta]) => ({ key, label: meta.label }));
+
 module.exports = {
+  FOLDERS,
+  STOP_CHOICES,
   ACTIONS,
   enabled,
   emitAction,

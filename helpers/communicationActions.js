@@ -2,7 +2,7 @@ const Override = require('../models/communicationActionOverrideModel');
 const ActionRule = require('../models/communicationActionRuleModel');
 const { EmailPolicy } = require('../models/emailControlModel');
 const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCatalog');
-const { ACTIONS: TRIGGER_ACTIONS } = require('./actionEvents');
+const { ACTIONS: TRIGGER_ACTIONS, FOLDERS, STOP_CHOICES } = require('./actionEvents');
 const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
 const { byKey: EMAIL_BY_KEY, isCustomerTriggered } = require('./emailCatalog');
@@ -81,40 +81,103 @@ function builtInFor(actionId, policyByEvent = null, migratedTemplateEvents = nul
   return { templates, reminders: entry.reminders || [] };
 }
 
-// Maps Actions-list IDs (Reminder-mapping.md §A) to backend action-rule trigger keys.
+// Maps all 179 Actions-list IDs (A01-A130, B01-B49) to backend Work Group trigger keys (SSOT).
 const TRIGGER_BY_ACTION_ID = {
+  // Admin & communication settings
+  A01: 'settings.updated',
+  A02: 'settings.updated',
+  A55: 'settings.updated',
+  A56: 'settings.updated',
+  A57: 'settings.updated',
+  A59: 'settings.updated',
+  B08: 'settings.updated',
+  B09: 'settings.updated',
+  B10: 'settings.updated',
+  B11: 'settings.updated',
+  B12: 'settings.updated',
+  B13: 'settings.updated',
+  B14: 'settings.updated',
+  B15: 'settings.updated',
+  B16: 'settings.updated',
+  B17: 'settings.updated',
+  B18: 'settings.updated',
+  B19: 'settings.updated',
+  B20: 'settings.updated',
+  B22: 'settings.updated',
+  B24: 'settings.updated',
+  B25: 'settings.updated',
+  B27: 'settings.updated',
+  B28: 'settings.updated',
+  B29: 'settings.updated',
+  B30: 'settings.updated',
+  B43: 'settings.updated',
+  B44: 'settings.updated',
+  B45: 'settings.updated',
+  B46: 'settings.updated',
+  B47: 'settings.updated',
+  B48: 'settings.updated',
+
+  // Website preview
+  A03: 'preview.updated',
+  A04: 'preview.updated',
+  A05: 'preview.updated',
+  A06: 'preview.updated',
+  A07: 'preview.updated',
+  A08: 'preview.updated',
+
+  // Data uploads & documents
+  A11: 'upload.completed',
+  A12: 'upload.completed',
   A13: 'upload.completed',
+  A14: 'upload.completed',
+  A23: 'upload.completed',
+  A24: 'upload.completed',
+  A25: 'upload.completed',
   A26: 'upload.completed',
+  A27: 'upload.completed',
   A82: 'upload.completed',
-  A15: 'plan.requested',
-  A39: 'plan.requested',
-  A44: 'project.cancelled',
-  A45: 'project.upgraded',
-  A46: 'wallet.recharged',
-  A53: 'plan.work_updated',
+  A21: 'plan.upload_updated',
+  A22: 'plan.upload_updated',
+  A40: 'plan.upload_updated',
   A54: 'plan.upload_updated',
-  A58: 'lead.created',
-  A62: 'client.account_created',
-  A63: 'lead.proposal',
-  A64: 'lead.proposal',
-  A68: 'lead.message',
-  A92: 'plan.payment_rejected',
-  A109: 'plan.closed',
+
+  // Plans & packages
+  A15: 'plan.requested',
+  A36: 'plan.requested',
+  A37: 'plan.requested',
+  A38: 'plan.requested',
+  A39: 'plan.requested',
+  A50: 'plan.requested',
+  A106: 'plan.requested',
+  B40: 'plan.requested',
+  A20: 'catalogue.plan_updated',
+  A30: 'catalogue.plan_updated',
+  A31: 'catalogue.plan_updated',
+  A32: 'catalogue.plan_updated',
+  A33: 'catalogue.plan_updated',
+  A34: 'catalogue.plan_updated',
+  A35: 'catalogue.plan_updated',
+  A48: 'catalogue.plan_updated',
+  A49: 'catalogue.plan_updated',
+  A96: 'catalogue.plan_updated',
+  A97: 'catalogue.plan_updated',
+  A98: 'catalogue.plan_updated',
   A29: 'plan.started',
   A51: 'plan.started',
   A105: 'plan.started',
-  A104: 'invoice.created',
-  A111: 'invoice.resent',
-  A112: 'invoice.resent',
-  A113: 'invoice.manual_reminder',
-  B36: 'reservation.extended',
-  B41: 'invoice.created',
-  A43: 'payment.received',
-  A83: 'payment.received',
-  A89: 'payment.received',
-  A90: 'payment.received',
-  A91: 'payment.received',
-  A110: 'payment.received',
+  A52: 'plan.work_updated',
+  A53: 'plan.work_updated',
+  A109: 'plan.closed',
+  B39: 'package.start_requested',
+  B26: 'start_request.closed',
+  B42: 'start_request.closed',
+
+  // Projects
+  A09: 'project.step_updated',
+  A10: 'project.step_updated',
+  A44: 'project.cancelled',
+  A45: 'project.upgraded',
+  A108: 'project.created',
   A114: 'project.completed',
   A115: 'project.completed',
   A116: 'project.completed',
@@ -122,14 +185,99 @@ const TRIGGER_BY_ACTION_ID = {
   A118: 'project.completed',
   A119: 'project.completed',
   A120: 'project.completed',
-  B05: 'broadcast.sent',
-  B35: 'reservation.created',
-  B37: 'reservation.start_requested',
-  B39: 'package.start_requested',
+
+  // Payments, orders & wallet
+  A18: 'wallet.recharged',
+  A46: 'wallet.recharged',
+  A43: 'payment.received',
+  A83: 'payment.received',
+  A89: 'payment.received',
+  A90: 'payment.received',
+  A91: 'payment.received',
+  A110: 'payment.received',
+  A86: 'bank.account_updated',
+  A87: 'bank.account_updated',
+  A88: 'bank.account_updated',
+  A92: 'plan.payment_rejected',
+  A104: 'invoice.created',
+  A107: 'invoice.created',
+  B41: 'invoice.created',
+  A111: 'invoice.resent',
+  A112: 'invoice.resent',
+  A113: 'invoice.manual_reminder',
+
+  // Leads, offers & reservations
+  A58: 'lead.created',
+  A60: 'lead.created',
+  A61: 'lead.created',
+  A63: 'lead.proposal',
+  A64: 'lead.proposal',
+  A65: 'lead.final_message_started',
   A66: 'lead.final_message_started',
+  B21: 'lead.final_message_started',
   A67: 'final_message.stopped',
-  B26: 'start_request.closed',
-  B42: 'start_request.closed',
+  A68: 'lead.message',
+  B23: 'reservation.created',
+  B35: 'reservation.created',
+  B38: 'reservation.created',
+  B36: 'reservation.extended',
+  B37: 'reservation.start_requested',
+  B31: 'offer.target_updated',
+  B32: 'offer.target_updated',
+  B33: 'offer.target_updated',
+  B34: 'offer.target_updated',
+
+  // Login, profile, accounts & support
+  A16: 'user.signed_up',
+  A72: 'user.signed_up',
+  A73: 'user.signed_up',
+  A74: 'user.signed_up',
+  A76: 'user.signed_up',
+  A77: 'user.signed_up',
+  A78: 'user.signed_up',
+  A17: 'user.signed_in',
+  A19: 'user.signed_in',
+  A75: 'user.signed_in',
+  A41: 'account.updated',
+  A42: 'account.updated',
+  A79: 'account.updated',
+  A80: 'account.updated',
+  A62: 'client.account_created',
+  A81: 'client.account_created',
+  A84: 'ticket.updated',
+  A85: 'ticket.updated',
+
+  // Website content, products, broadcast & trash
+  A28: 'trash.updated',
+  A69: 'trash.updated',
+  A70: 'trash.updated',
+  A71: 'trash.updated',
+  A47: 'product.updated',
+  A93: 'product.updated',
+  A94: 'product.updated',
+  A95: 'product.updated',
+  A99: 'product.updated',
+  A100: 'product.updated',
+  A101: 'product.updated',
+  A102: 'product.updated',
+  A103: 'product.updated',
+  A121: 'website.content_updated',
+  A122: 'website.content_updated',
+  A123: 'website.content_updated',
+  A124: 'website.content_updated',
+  A125: 'website.content_updated',
+  A126: 'website.content_updated',
+  A127: 'website.content_updated',
+  A128: 'website.content_updated',
+  A129: 'website.content_updated',
+  A130: 'website.content_updated',
+  B01: 'broadcast.sent',
+  B02: 'broadcast.sent',
+  B03: 'broadcast.sent',
+  B04: 'broadcast.sent',
+  B05: 'broadcast.sent',
+  B06: 'broadcast.sent',
+  B07: 'subscription.updated',
   B49: 'whatsapp.ad_received',
 };
 
@@ -216,14 +364,19 @@ async function list() {
     .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
   const actions = ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents));
   const triggers = buildTriggers(actions, allRules);
-  return { actions, triggers, surfaces: SURFACES, categories, packages };
+  return { actions, triggers, folders: FOLDERS, stopChoices: STOP_CHOICES, surfaces: SURFACES, categories, packages };
 }
 
 // Cross-flow & system origins that fire a trigger alongside its primary catalog mapping (SSOT).
 const EXTRA_ORIGINS_BY_TRIGGER = {
   'invoice.created': [
     { id: 'A29', title: 'Admin creates unpaid project/package ("Customer will pay")', surface: 'Admin', method: 'POST', endpoint: '/api/admin/clients/:customerId/create-project' },
+    { id: 'A51', title: 'Start a plan for a client', surface: 'Admin', method: 'POST', endpoint: '/api/admin/clients/:customerId/service-plans' },
+    { id: 'A105', title: 'Buy a service plan', surface: 'Client', method: 'POST', endpoint: '/api/customer/service-plan-order' },
     { id: 'CRON-RENEW', title: 'Monthly plan renewal invoice generated', surface: 'System', method: 'CRON', endpoint: 'servicePlanRenewalCron' },
+  ],
+  'plan.started': [
+    { id: 'B41', title: 'Buy a package (monthly/plan activation)', surface: 'Client', method: 'POST', endpoint: '/api/package-starts/purchase' },
   ],
   'project.created': [
     { id: 'A29', title: 'Admin creates a project', surface: 'Admin', method: 'POST', endpoint: '/api/admin/clients/:customerId/create-project' },
@@ -242,7 +395,13 @@ const EXTRA_ORIGINS_BY_TRIGGER = {
     { id: 'CRON-RES', title: 'Offer reservation expired automatically', surface: 'System', method: 'CRON', endpoint: 'reservationClosure' },
   ],
   'project.step_updated': [
-    { id: 'ADMIN-STEP', title: 'Admin updates a project step/node', surface: 'Admin', method: 'PATCH', endpoint: '/api/admin/project-nodes' },
+    { id: 'A114', title: 'Add a project step', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes' },
+    { id: 'A115', title: 'Prepare a message about a project step', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/message' },
+    { id: 'A116', title: 'Edit a project step', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/edit' },
+    { id: 'A117', title: 'Delete project steps', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/delete' },
+    { id: 'A118', title: 'Restore project steps', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/restore' },
+    { id: 'A119', title: 'Show or hide project steps', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/visibility' },
+    { id: 'A120', title: 'Reset project steps', surface: 'Admin', method: 'POST', endpoint: '/api/admin/projects/:orderId/nodes/reset' },
   ],
   'subscription.updated': [
     { id: 'B07', title: 'Website newsletter/subscription form', surface: 'Website', method: 'POST', endpoint: '/api/newsletter/subscribe' },
@@ -289,7 +448,14 @@ function buildTriggers(actions, allRules) {
     triggers.push({
       triggerKey,
       label: meta.label,
+      folder: meta.folder || 'Other',
+      when: meta.when || '',
+      entityType: meta.entityType || 'none',
       supportsScope: !!meta.supportsScope,
+      supportsProgress: !!meta.supportsProgress,
+      supportsLimit: !!meta.supportsLimit,
+      canStop: !!meta.canStop,
+      defaultStopOn: meta.defaultStopOn || [],
       conditions: meta.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
       origins,
       rules: allRules.filter(r => r.action === triggerKey),
@@ -297,6 +463,23 @@ function buildTriggers(actions, allRules) {
     });
   }
   return triggers;
+}
+
+const COMPILED_CATALOG_ROUTES = ACTION_CATALOG
+  .filter(item => item.endpoint.startsWith('/api/'))
+  .map(item => {
+    const pattern = '^' + item.endpoint.replace(/:[^/]+/g, '[^/]+') + '$';
+    return {
+      ...item,
+      triggerKey: TRIGGER_BY_ACTION_ID[item.id] || null,
+      regex: new RegExp(pattern),
+    };
+  });
+
+function matchCatalogAction(method, rawUrl) {
+  const m = String(method || '').toUpperCase();
+  const cleanPath = String(rawUrl || '').split('?')[0].replace(/\/+$/, '') || '/';
+  return COMPILED_CATALOG_ROUTES.find(item => item.method === m && item.regex.test(cleanPath)) || null;
 }
 
 async function update(actionId, body, userId) {
@@ -316,4 +499,4 @@ async function update(actionId, body, userId) {
   return merge(base, saved);
 }
 
-module.exports = { list, update, merge, validatePatch, clean };
+module.exports = { list, update, merge, validatePatch, clean, TRIGGER_BY_ACTION_ID, matchCatalogAction };

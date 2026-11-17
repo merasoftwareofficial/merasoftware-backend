@@ -58,6 +58,7 @@ const saveResponse = async (res, order, message, actorId) => {
     order.$where = { ...order.$where, offerFirstWorkUpdate: null };
   }
   await order.save();
+  await require('../../helpers/actionEvents').projectStepUpdated(order, order.projectNodes?.at(-1));
   if (order.projectProgress >= 100) {
     await activateAfterProjectServices({ projectOrderId: order._id, actorId });
     await require('../../helpers/actionEvents').projectCompleted(order);
@@ -67,6 +68,7 @@ const saveResponse = async (res, order, message, actorId) => {
 
 async function respondWithSavedNode(req, res, order, node) {
   let serviceActivationPending = false;
+  await require('../../helpers/actionEvents').projectStepUpdated(order, node);
   if (order.projectProgress >= 100) {
     try { await activateAfterProjectServices({ projectOrderId: order._id, actorId: req.userId }); }
     catch (error) { serviceActivationPending = true; console.error('[project-node] Service activation pending:', error.message); }

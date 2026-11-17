@@ -28,7 +28,9 @@ const rule = new Schema({
   actionId: { type: String, default: '' },
   originFilter: { type: [String], default: [] },
   audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
-  condition: { type: String, enum: ['anytime', 'unpaid', 'paid', 'upload_pending'], default: 'anytime' },
+  condition: { type: String, enum: ['anytime', 'unpaid', 'paid', 'installment_due', 'upload_pending'], default: 'anytime' },
+  minProgress: { type: Number, min: 0, max: 100, default: 0 },
+  maxRemainingLimit: { type: Number, min: 0, max: 1000, default: null },
   scope: {
     kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package', 'offer_payment'], default: 'all' },
     packageSlug: { type: String, default: '' },
