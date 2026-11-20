@@ -579,10 +579,10 @@ async function planProjectedMonthlyRuns() {
   return planned;
 }
 
-async function processActionRules(now = new Date()) {
+async function processActionRules(now = new Date(), { plan = true } = {}) {
   if (!enabled()) return { enabled: false };
   const events = await processEvents();
-  const projected = await planProjectedMonthlyRuns();
+  const projected = plan ? await planProjectedMonthlyRuns() : 0;
   const dispatched = await dispatchDue(now);
   return { enabled: true, events, projected, dispatched };
 }

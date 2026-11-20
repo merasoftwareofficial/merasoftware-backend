@@ -20,6 +20,8 @@ function createCollectionWake({
   collections = [],
   operations = ['insert', 'update', 'replace', 'delete'],
   filter = null,
+  onChange = null,
+  onReconnect = null,
   maxAwaitTimeMS = 60_000,
   fallbackMs = 15_000,
   keepAlive = false,
@@ -29,6 +31,7 @@ function createCollectionWake({
   let currentVersion = 0;
   let stream = null;
   let live = false;
+  let hasConnectedOnce = false;
   let unsupported = false;
   let closed = false;
   let starting = false;
@@ -78,13 +81,21 @@ function createCollectionWake({
       }
       live = true;
       reconnectAttempts = 0;
-      if (first && (!filter || filter(first))) wakeAll(true);
+      if (hasConnectedOnce && onReconnect) onReconnect();
+      hasConnectedOnce = true;
+      if (first && (!filter || filter(first))) {
+        if (onChange) onChange(first);
+        wakeAll(true);
+      }
 
       void (async () => {
         try {
           for await (const change of cursor) {
             if (closed || stream !== cursor) break;
-            if (!filter || filter(change)) wakeAll(true);
+            if (!filter || filter(change)) {
+              if (onChange) onChange(change);
+              wakeAll(true);
+            }
           }
         } catch (error) {
           if (!closed && isReplicaSetUnsupported(error)) {

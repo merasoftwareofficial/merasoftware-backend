@@ -75,3 +75,20 @@ test('durable worker retries delivery, imports snapshots and emits deletion tomb
     assert.equal(payload.sources[0].captureAllowed, false);
   } finally { global.fetch = originalFetch; }
 });
+test('incremental reconcileOrders syncs changed orders, skips unchanged, and tombstones deleted orders', async () => {
+  const orders = require('../models/orderProductModel');
+  const users = require('../models/userModel');
+  const outbox = require('../models/portfolioOutboxModel');
+  const { reconcileOrders } = require('../scripts/portfolioWorker');
+  const userId = new mongoose.Types.ObjectId(), orderId = new mongoose.Types.ObjectId();
+  await users.collection.insertOne({ _id: userId, name: 'Incremental Client', email: 'incremental@example.test', isGuest: false });
+  await orders.collection.insertOne({ _id: orderId, userId, isWebsiteProject: true, projectSnapshot: { displayName: 'Initial Name', category: 'standard_websites' }, projectProgress: 50, orderVisibility: 'approved' });
+  assert.equal(await reconcileOrders([orderId]), 1);
+  assert.equal(await reconcileOrders([orderId]), 0, 'unchanged order must not rewrite outbox');
+  await orders.updateOne({ _id: orderId }, { $set: { projectProgress: 100 } });
+  assert.equal(await reconcileOrders([orderId]), 1);
+  assert.equal((await outbox.findById(String(orderId)).lean()).source.progress, 100);
+  await orders.deleteOne({ _id: orderId });
+  assert.equal(await reconcileOrders([orderId]), 1);
+  assert.equal((await outbox.findById(String(orderId)).lean()).source.available, false);
+});

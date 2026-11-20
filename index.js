@@ -31,7 +31,8 @@ const server = http.createServer(app)
 const cronsEnabled = process.env.ENABLE_CRONS === 'true';
 // New rule engine is a separate opt-in; legacy reminder jobs remain unchanged.
 if (process.env.COMMUNICATION_REMINDER_JOBS_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Communication Reminders Cron', 'cron', () => require('./helpers/communicationReminderWorker').processCommunicationReminders().catch(error => console.error('[communication reminders]', error.message))), { timezone: 'Asia/Kolkata' });
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Communication Reminders Dispatch Cron', 'cron', () => require('./helpers/communicationReminderWorker').processCommunicationReminders(new Date(), { plan: false }).catch(error => console.error('[communication reminders]', error.message))), { timezone: 'Asia/Kolkata' });
+  cron.schedule('*/30 * * * *', () => bandwidthTracker.runWithProcess('Communication Reminders Planner Cron', 'cron', () => require('./helpers/communicationReminderWorker').processCommunicationReminders(new Date(), { plan: true }).catch(error => console.error('[communication reminders planner]', error.message))), { timezone: 'Asia/Kolkata' });
 }
 if (cronsEnabled) {
   fileCleanupScheduler.scheduleCleanup();
@@ -62,7 +63,8 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
 
 // Action rules (all docs/Reminder.md §4): records actions and sends rule messages. Own switch, default off.
 if (process.env.ACTION_RULES_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Action Rules Cron', 'cron', () => require('./helpers/actionRuleWorker').processActionRules().catch(error => console.error('[action rules]', error.message))));
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Action Rules Dispatch Cron', 'cron', () => require('./helpers/actionRuleWorker').processActionRules(new Date(), { plan: false }).catch(error => console.error('[action rules]', error.message))));
+  cron.schedule('*/30 * * * *', () => bandwidthTracker.runWithProcess('Action Rules Monthly Planner Cron', 'cron', () => require('./helpers/actionRuleWorker').planProjectedMonthlyRuns().catch(error => console.error('[action rules planner]', error.message))));
 }
 
 // Broadcast feeds the existing WhatsApp queue; this switch never enables other production crons.

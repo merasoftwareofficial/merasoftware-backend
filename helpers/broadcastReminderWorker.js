@@ -5,7 +5,7 @@ const { Broadcast } = require('../models/broadcastModel');
 const { planBroadcastReminders } = require('./broadcastReminderSchedule');
 const { dispatchReminder } = require('./communicationReminderDispatch');
 
-async function processBroadcastRule(ruleId, now = new Date()) {
+async function processBroadcastRule(ruleId, now = new Date(), { plan = true } = {}) {
   const owner = randomUUID(), leaseMs = 120000;
   const rule = await Rule.findOneAndUpdate({ _id: ruleId, enabled: true, source: 'broadcast',
     $or: [{ workerLeaseUntil: null }, { workerLeaseUntil: { $lte: new Date() } }] },
@@ -16,17 +16,19 @@ async function processBroadcastRule(ruleId, now = new Date()) {
   renew.unref?.();
   let planned = 0, dispatched = 0;
   try {
-    // Rotate bounded batches. An earlier broadcast that finishes preparing
-    // later is picked up on the next pass, without starving newer broadcasts.
-    const broadcasts = await Broadcast.find({ state: { $in: ['ready', 'finished'] }, createdAt: { $gte: rule.activatedAt }, acceptanceCompletedAt: { $gte: rule.activatedAt },
-      ...(rule.broadcastScanCursor ? { _id: { $gt: rule.broadcastScanCursor } } : {}) }).sort({ _id: 1 }).limit(20).select('_id').lean();
-    for (const broadcast of broadcasts) {
-      if (!await owns()) break;
-      planned += await planBroadcastReminders(rule, broadcast._id);
-      await Rule.updateOne({ _id: rule._id, workerLeaseOwner: owner, enabled: true, revision: rule.revision }, { $set: { broadcastScanCursor: broadcast._id } });
+    if (plan) {
+      // Rotate bounded batches. An earlier broadcast that finishes preparing
+      // later is picked up on the next pass, without starving newer broadcasts.
+      const broadcasts = await Broadcast.find({ state: { $in: ['ready', 'finished'] }, createdAt: { $gte: rule.activatedAt }, acceptanceCompletedAt: { $gte: rule.activatedAt },
+        ...(rule.broadcastScanCursor ? { _id: { $gt: rule.broadcastScanCursor } } : {}) }).sort({ _id: 1 }).limit(20).select('_id').lean();
+      for (const broadcast of broadcasts) {
+        if (!await owns()) break;
+        planned += await planBroadcastReminders(rule, broadcast._id);
+        await Rule.updateOne({ _id: rule._id, workerLeaseOwner: owner, enabled: true, revision: rule.revision }, { $set: { broadcastScanCursor: broadcast._id } });
+      }
+      if (!broadcasts.length) await Rule.updateOne({ _id: rule._id, workerLeaseOwner: owner, enabled: true, revision: rule.revision }, { $unset: { broadcastScanCursor: 1 } });
+      if (!await owns()) return { claimed: true, leaseLost: true, planned, dispatched };
     }
-    if (!broadcasts.length) await Rule.updateOne({ _id: rule._id, workerLeaseOwner: owner, enabled: true, revision: rule.revision }, { $unset: { broadcastScanCursor: 1 } });
-    if (!await owns()) return { claimed: true, leaseLost: true, planned, dispatched };
     const due = await Run.aggregate([
       { $match: { ruleId: rule._id, ruleRevision: rule.revision, dueAt: { $lte: now }, $or: [{ status: 'scheduled' }, { status: 'preparing', lockUntil: { $lte: new Date() } }] } },
       { $sort: { occurrenceKey: 1, dueAt: -1, step: -1 } },

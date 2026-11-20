@@ -8,7 +8,7 @@ const { planPackageRuns, persistPackageRuns } = require('./packageReminderSchedu
 const { dispatchReminder } = require('./communicationReminderDispatch');
 
 const LEASE_MS = 120000;
-async function processMonthlyRule(ruleId, now = new Date()) {
+async function processMonthlyRule(ruleId, now = new Date(), { plan = true } = {}) {
   const owner = randomUUID();
   const clock = () => new Date();
   const rule = await Rule.findOneAndUpdate({ _id: ruleId, enabled: true, source: 'monthly_package',
@@ -20,37 +20,39 @@ async function processMonthlyRule(ruleId, now = new Date()) {
   renew.unref?.();
   let planned = 0, dispatched = 0;
   try {
-    const cursor = Order.find({ isServicePlan: true, 'salesPackage.package.id': { $exists: true, $ne: null }, paymentPolicy: null,
-      orderVisibility: { $ne: 'cancelled' }, servicePlanStatus: { $in: ['active', 'paused', 'expired'] } })
-      .select('userId isServicePlan salesPackage servicePlanSnapshot orderVisibility servicePlanStatus serviceCurrentCycleNumber serviceTotalCycles serviceNextBillingDate serviceCyclePrice serviceAutoRenewalStoppedAt serviceBillingCycleMonths serviceBillingTenureMonths')
-      .lean().cursor();
-    for await (const order of cursor) {
-      if (!await owns()) break;
-      const [invoices, scheduledRuns] = await Promise.all([
-        Invoice.find({ orderId: order._id, invoiceType: 'plan_renewal' }).select('orderId status serviceCycleNumber dueDate amount amountPaid').lean(),
-        Run.find({ ruleId: rule._id, ruleRevision: rule.revision, entityId: order._id, status: 'scheduled' }).select('occurrenceKey').lean(),
-      ]);
-      const scheduledKeys = new Set(scheduledRuns.map(row => row.occurrenceKey));
-      const nextCycle = getNextCycleNumber(order);
-      const candidates = invoices.filter(invoice => ['unpaid', 'partially_paid', 'overdue'].includes(invoice.status));
-      if (!invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) candidates.push(null);
-      for (const invoice of candidates) {
-        const plans = planPackageRuns(rule, order, invoice);
-        await persistPackageRuns(plans); planned += plans.length;
-      }
-      for (const invoice of invoices.filter(row => ['paid', 'cancelled'].includes(row.status))) {
-        const occKey = `${order._id}:${invoice.serviceCycleNumber}`;
-        if (!scheduledKeys.has(occKey)) continue;
-        await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Invoice settled or cancelled.' } });
-      }
-      if (order.serviceAutoRenewalStoppedAt && !invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) {
-        const occKey = `${order._id}:${nextCycle}`;
-        if (scheduledKeys.has(occKey)) {
-          await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Renewal stopped.' } });
+    if (plan) {
+      const cursor = Order.find({ isServicePlan: true, 'salesPackage.package.id': { $exists: true, $ne: null }, paymentPolicy: null,
+        orderVisibility: { $ne: 'cancelled' }, servicePlanStatus: { $in: ['active', 'paused', 'expired'] } })
+        .select('userId isServicePlan salesPackage servicePlanSnapshot orderVisibility servicePlanStatus serviceCurrentCycleNumber serviceTotalCycles serviceNextBillingDate serviceCyclePrice serviceAutoRenewalStoppedAt serviceBillingCycleMonths serviceBillingTenureMonths')
+        .lean().cursor();
+      for await (const order of cursor) {
+        if (!await owns()) break;
+        const [invoices, scheduledRuns] = await Promise.all([
+          Invoice.find({ orderId: order._id, invoiceType: 'plan_renewal' }).select('orderId status serviceCycleNumber dueDate amount amountPaid').lean(),
+          Run.find({ ruleId: rule._id, ruleRevision: rule.revision, entityId: order._id, status: 'scheduled' }).select('occurrenceKey').lean(),
+        ]);
+        const scheduledKeys = new Set(scheduledRuns.map(row => row.occurrenceKey));
+        const nextCycle = getNextCycleNumber(order);
+        const candidates = invoices.filter(invoice => ['unpaid', 'partially_paid', 'overdue'].includes(invoice.status));
+        if (!invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) candidates.push(null);
+        for (const invoice of candidates) {
+          const plans = planPackageRuns(rule, order, invoice);
+          await persistPackageRuns(plans); planned += plans.length;
+        }
+        for (const invoice of invoices.filter(row => ['paid', 'cancelled'].includes(row.status))) {
+          const occKey = `${order._id}:${invoice.serviceCycleNumber}`;
+          if (!scheduledKeys.has(occKey)) continue;
+          await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Invoice settled or cancelled.' } });
+        }
+        if (order.serviceAutoRenewalStoppedAt && !invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) {
+          const occKey = `${order._id}:${nextCycle}`;
+          if (scheduledKeys.has(occKey)) {
+            await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Renewal stopped.' } });
+          }
         }
       }
+      if (!await owns()) return { claimed: true, planned, dispatched, leaseLost: true };
     }
-    if (!await owns()) return { claimed: true, planned, dispatched, leaseLost: true };
     // On a missed scheduler interval, process only the latest due step per
     // occurrence; older scheduled stages are marked skipped to avoid bursts.
     const eligible = await Run.aggregate([
@@ -87,14 +89,22 @@ async function processMonthlyRule(ruleId, now = new Date()) {
     await Rule.updateOne({ _id: rule._id, workerLeaseOwner: owner }, { $unset: { workerLeaseOwner: 1, workerLeaseUntil: 1 } });
   }
 }
-async function processCommunicationReminders(now = new Date()) {
+async function processCommunicationReminders(now = new Date(), { plan = true } = {}) {
   if (process.env.COMMUNICATION_REMINDER_JOBS_ENABLED !== 'true') return { enabled: false, rules: 0 };
   const reconciled = await require('./communicationReminderReconcile').reconcilePendingReminders();
   if (process.env.ENABLE_CRONS !== 'true') return { enabled: true, billingEnabled: false, reconciled, rules: 0 };
+  if (!plan) {
+    const hasDue = await Run.exists({
+      source: { $in: ['monthly_package', 'broadcast'] },
+      dueAt: { $lte: now },
+      $or: [{ status: 'scheduled' }, { status: 'preparing', lockUntil: { $lte: now } }],
+    });
+    if (!hasDue) return { enabled: true, billingEnabled: true, reconciled, rules: 0 };
+  }
   const rules = await Rule.find({ enabled: true, source: { $in: ['monthly_package', 'broadcast'] } }).select('_id source').lean();
   for (const rule of rules) {
-    if (rule.source === 'broadcast') await require('./broadcastReminderWorker').processBroadcastRule(rule._id, now);
-    else await processMonthlyRule(rule._id, now);
+    if (rule.source === 'broadcast') await require('./broadcastReminderWorker').processBroadcastRule(rule._id, now, { plan });
+    else await processMonthlyRule(rule._id, now, { plan });
   }
   return { enabled: true, billingEnabled: true, reconciled, rules: rules.length };
 }
