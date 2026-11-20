@@ -138,7 +138,6 @@ async function accept(req) {
   const files = record.manifest.map(file => ({ filename: file.name.replace(/\s+/g, '_'), originalName: file.name, type: file.type, size: file.size }));
   try {
     const result = await commitSubmission(req, { instructions: record.instructions, files, receipt: true });
-    require('./uploadWorker').wakeUploadWorker?.();
     return { ...result, replay: false };
   } catch (error) {
     const saved = await load(req).catch(() => null);

@@ -12,10 +12,10 @@ const { uploadBatch } = require('./uploadConcurrency');
 const { expireOne, BUDGET_ID, configuration } = require('./stagedUploads');
 const { notifyDeliveryStuck } = require('./uploadNotifications');
 const bandwidthTracker = require('./bandwidthTracker');
+const { createCollectionWake } = require('./collectionWake');
 const LEASE_MS = 120000;
-const ACTIVE_POLL_MS = 2000;
-const IDLE_POLL_MS = 30000;
-let wakeCurrentWorker = null;
+const IDLE_SAFETY_MS = 300_000;
+const FALLBACK_POLL_MS = 15_000;
 
 function driveService() {
   const credentials = process.env.NODE_ENV === 'production' && process.env.GOOGLE_DRIVE_CREDENTIALS_PATH
@@ -92,46 +92,60 @@ async function runOnce({ drive = driveService(), now = new Date() } = {}) {
   return true;
 }
 
-function wakeUploadWorker() {
-  if (typeof wakeCurrentWorker === 'function') wakeCurrentWorker();
+async function nextIdleDelayMs(hadWork) {
+  if (!hadWork) return IDLE_SAFETY_MS;
+  const nextRetry = await Submission.findOne({
+    mode: 'staged',
+    status: 'succeeded',
+    delivery: 'queued',
+    nextAttemptAt: { $gt: new Date() },
+  }).sort({ nextAttemptAt: 1 }).select('nextAttemptAt').lean();
+  if (!nextRetry?.nextAttemptAt) return IDLE_SAFETY_MS;
+  return Math.max(1000, Math.min(IDLE_SAFETY_MS, nextRetry.nextAttemptAt.getTime() - Date.now()));
 }
 
 function startUploadWorker({ keepAlive = false } = {}) {
   if (process.env.ENABLE_UPLOAD_WORKER !== 'true') return;
   try { configuration(); }
   catch { console.error('[upload-worker] Configure UPLOAD_STAGING_MAX_BYTES before enabling uploads'); return; }
-  let busy = false;
+
   let stopped = false;
-  let timer = null;
-  const scheduleNext = delayMs => {
-    if (stopped) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(tick, delayMs);
-    if (!keepAlive) timer.unref();
-  };
-  const tick = async () => {
-    if (busy || stopped) return;
-    busy = true;
-    let didWork = false;
-    try {
-      didWork = Boolean(await bandwidthTracker.runWithProcess('Upload Worker', 'worker', () => runOnce()));
-    } catch { console.warn('[upload-worker] Storage temporarily unavailable'); }
-    finally {
-      busy = false;
-      scheduleNext(didWork ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+  const wake = createCollectionWake({
+    connection: mongoose.connection,
+    collections: [Submission.collection.name],
+    operations: ['insert', 'update', 'replace'],
+    maxAwaitTimeMS: 60_000,
+    fallbackMs: FALLBACK_POLL_MS,
+    keepAlive,
+  });
+
+  const loop = async () => {
+    await wake.start();
+    let hadWorkInBurst = false;
+    while (!stopped) {
+      const before = wake.version();
+      let didWork = false;
+      try {
+        didWork = Boolean(await bandwidthTracker.runWithProcess('Upload Worker', 'worker', () => runOnce()));
+      } catch {
+        console.warn('[upload-worker] Storage temporarily unavailable');
+        await wake.wait(10_000, before);
+        continue;
+      }
+      if (didWork) {
+        hadWorkInBurst = true;
+        continue;
+      }
+      const delayMs = await nextIdleDelayMs(hadWorkInBurst).catch(() => IDLE_SAFETY_MS);
+      hadWorkInBurst = false;
+      await wake.wait(delayMs, before);
     }
   };
-  wakeCurrentWorker = () => {
-    if (stopped) return;
-    if (busy) { scheduleNext(ACTIVE_POLL_MS); return; }
-    if (timer) clearTimeout(timer);
-    void tick();
-  };
-  void tick();
+
+  void loop();
   return () => {
     stopped = true;
-    if (timer) clearTimeout(timer);
-    wakeCurrentWorker = null;
+    void wake.close();
   };
 }
-module.exports = { runOnce, startUploadWorker, wakeUploadWorker };
+module.exports = { runOnce, startUploadWorker };

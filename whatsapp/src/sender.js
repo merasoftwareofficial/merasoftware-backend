@@ -96,9 +96,9 @@ export function createSender({
     finally { await releaseSlot(); }
   }
 
-  async function step() {
+  async function step(prefetchedState = null) {
     const time = now();
-    const state = await ensureState();
+    const state = prefetchedState || await ensureState();
     const rules = effectiveSettings(state.settings);
     // Expire first, even while paused or offline, so the admin page never shows stale messages as waiting.
     await Queue.updateMany({ status: 'pending', createdAt: { $lt: new Date(time.getTime() - rules.maxAgeHours * 3_600_000) } },
@@ -106,8 +106,12 @@ export function createSender({
     if (state.paused || !transport.isConnected()) return { waitMs: POLL_MS, reason: state.paused ? 'paused' : 'offline' };
     if (inQuietHours(rules, time, config.timeZone)) return { waitMs: 60_000, reason: 'quiet-hours' };
     const gapLeft = state.nextSendAt ? state.nextSendAt.getTime() - time.getTime() : 0;
-    if (gapLeft > 0) return { waitMs: Math.min(gapLeft, POLL_MS), reason: 'gap' };
-    if (!await Queue.exists({ status: 'pending', nextAttemptAt: { $lte: time } })) return { waitMs: POLL_MS, reason: 'empty' };
+    if (gapLeft > 0) return { waitMs: Math.min(gapLeft, POLL_MS), gapLeftMs: gapLeft, reason: 'gap' };
+    const nextPending = await Queue.findOne({ status: 'pending' }).sort({ nextAttemptAt: 1 }).select('nextAttemptAt').lean();
+    if (!nextPending) return { waitMs: POLL_MS, nextDueAt: null, reason: 'empty' };
+    if (nextPending.nextAttemptAt && nextPending.nextAttemptAt > time) {
+      return { waitMs: POLL_MS, nextDueAt: nextPending.nextAttemptAt, reason: 'empty' };
+    }
 
     // The real check: slot free, gap over and not paused, all in one write.
     const slot = await takeSlot(time, { paused: { $ne: true }, ...gapOver(time) });
