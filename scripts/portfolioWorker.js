@@ -2,7 +2,6 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const bandwidthTracker = require('../helpers/bandwidthTracker');
 const { createCollectionWake } = require('../helpers/collectionWake');
-bandwidthTracker.installMongoosePlugin(mongoose);
 bandwidthTracker.startChildReporter('Portfolio Worker', 'worker');
 const { randomUUID, createHash } = require('node:crypto');
 const orderModel = require('../models/orderProductModel');
@@ -177,7 +176,8 @@ async function tick({ fullReconcile = true, orderIds = null, runCapture = proces
 async function main() {
   configuration();
   if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is required.');
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000 });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000, monitorCommands: true });
+  bandwidthTracker.attachMongoClient(mongoose.connection.getClient());
   await Outbox.init();
   if (process.argv.includes('--once')) {
     try { await tick(); } catch (error) { console.error('[portfolio]', error.message); process.exitCode = 1; }

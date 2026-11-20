@@ -4,7 +4,6 @@ import mongoose from 'mongoose';
 import pino from 'pino';
 import bandwidthTracker from '../../helpers/bandwidthTracker.js';
 import collectionWakeModule from '../../helpers/collectionWake.js';
-bandwidthTracker.installMongoosePlugin(mongoose);
 bandwidthTracker.startChildReporter('WhatsApp Worker', 'worker');
 const { createCollectionWake } = collectionWakeModule;
 import { loadConfig } from './config.js';
@@ -32,7 +31,8 @@ if (!config.embedded) {
 // Render's free plan shows no memory graph; this line in the logs is how memory is watched.
 setInterval(() => console.log(`[whatsapp] memory rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`), 10 * 60_000).unref();
 
-await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 10_000 });
+await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 10_000, monitorCommands: true });
+bandwidthTracker.attachMongoClient(mongoose.connection.getClient());
 console.log('Connected to DB');
 
 if (!config.senderEnabled) {

@@ -1,13 +1,19 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
+const mongoose = require('mongoose');
 
+const { BSON } = mongoose.mongo;
 const processScope = new AsyncLocalStorage();
 const MAX_MINUTES = 24 * 60;
-const BSON_OVERHEAD_BYTES = 380; // Wire protocol + TLS record framing baseline per DB round-trip
+const TLS_FRAME_OVERHEAD_BYTES = 180;
+const MAX_IN_FLIGHT = 5_000;
+
+const WRITE_COMMANDS = new Set(['insert', 'update', 'delete', 'findAndModify', 'bulkWrite', 'commitTransaction']);
+const INTERNAL_COMMANDS = new Set(['hello', 'isMaster', 'ismaster', 'ping', 'buildInfo', 'saslStart', 'saslContinue', 'endSessions', 'listIndexes', 'createIndexes']);
 
 let startedAt = Date.now();
 let lastPruneMinute = 0;
-let mongooseInstalled = false;
 let childReporterTimer = null;
+const attachedClients = new WeakSet();
 const buckets = new Map(); // minuteKey -> Map<processKey, entry>
 
 function currentMinuteKey(ts = Date.now()) {
@@ -42,7 +48,8 @@ function getEntry(name, category = 'system', ts = Date.now()) {
       httpInBytes: 0,
       dbReads: 0,
       dbWrites: 0,
-      dbBytes: 0,
+      dbOutBytes: 0,
+      dbInBytes: 0,
       externalCalls: 0,
       externalBytes: 0,
       lastAt: ts,
@@ -53,17 +60,20 @@ function getEntry(name, category = 'system', ts = Date.now()) {
   return entry;
 }
 
-function estimateBytes(value) {
-  if (value == null) return 0;
-  if (Buffer.isBuffer(value)) return value.length;
-  if (typeof value === 'string') return Buffer.byteLength(value, 'utf8');
-  if (typeof value === 'number' || typeof value === 'boolean') return 8;
+function safeBsonSize(doc) {
+  if (!doc || typeof doc !== 'object') return 0;
   try {
-    const json = JSON.stringify(value);
-    return json ? Buffer.byteLength(json, 'utf8') : 0;
+    return BSON.calculateObjectSize(doc);
   } catch {
     return 256;
   }
+}
+
+function collectionFromCommand(commandName, command) {
+  if (!command || typeof command !== 'object') return 'unknown';
+  if (commandName === 'getMore' && typeof command.collection === 'string') return command.collection;
+  const direct = command[commandName];
+  return typeof direct === 'string' ? direct : 'unknown';
 }
 
 function normalizeRoutePath(rawPath = '') {
@@ -79,14 +89,17 @@ function recordRun(name, category = 'system') {
   entry.runs += 1;
 }
 
-function recordDbOp({ isWrite = false, bytes = 0, collection = 'unknown' } = {}) {
-  const ctx = processScope.getStore();
-  const name = ctx?.name || `DB: ${collection}`;
-  const category = ctx?.category || 'system';
+function recordDbOp({ isWrite = false, outBytes = 0, inBytes = 0, collection = 'unknown', ctx = undefined, countOp = true } = {}) {
+  const active = ctx !== undefined ? ctx : processScope.getStore();
+  const name = active?.name || `DB: ${collection}`;
+  const category = active?.category || 'system';
   const entry = getEntry(name, category);
-  if (isWrite) entry.dbWrites += 1;
-  else entry.dbReads += 1;
-  entry.dbBytes += BSON_OVERHEAD_BYTES + Math.max(0, Number(bytes) || 0);
+  if (countOp) {
+    if (isWrite) entry.dbWrites += 1;
+    else entry.dbReads += 1;
+  }
+  if (outBytes > 0) entry.dbOutBytes += outBytes;
+  if (inBytes > 0) entry.dbInBytes += inBytes;
 }
 
 function recordHttp({ name, outBytes = 0, inBytes = 0 }) {
@@ -102,7 +115,7 @@ function recordExternal({ name, category, bytes = 0, calls = 1 } = {}) {
   const cat = category || ctx?.category || 'system';
   const entry = getEntry(label, cat);
   entry.externalCalls += calls;
-  entry.externalBytes += BSON_OVERHEAD_BYTES + Math.max(0, Number(bytes) || 0);
+  entry.externalBytes += TLS_FRAME_OVERHEAD_BYTES + Math.max(0, Number(bytes) || 0);
 }
 
 function runWithProcess(name, category, fn) {
@@ -121,14 +134,14 @@ function expressMiddleware(req, res, next) {
   const origWrite = res.write;
   const origEnd = res.end;
 
-  res.write = function wrappedWrite(chunk, encoding, cb) {
+  res.write = function wrappedWrite(chunk, encoding) {
     if (chunk) {
       outBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk), typeof encoding === 'string' ? encoding : 'utf8');
     }
     return origWrite.apply(this, arguments);
   };
 
-  res.end = function wrappedEnd(chunk, encoding, cb) {
+  res.end = function wrappedEnd(chunk, encoding) {
     if (chunk && typeof chunk !== 'function') {
       outBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk), typeof encoding === 'string' ? encoding : 'utf8');
     }
@@ -136,74 +149,55 @@ function expressMiddleware(req, res, next) {
   };
 
   res.once('finish', () => {
-    const headerEstimate = 250;
-    recordHttp({ name: routeName, outBytes: outBytes + headerEstimate, inBytes });
+    recordHttp({ name: routeName, outBytes: outBytes + 250, inBytes });
   });
 
   return processScope.run({ name: routeName, category: 'api' }, () => next());
 }
 
-const READ_HOOKS = ['find', 'findOne', 'countDocuments', 'estimatedDocumentCount', 'distinct'];
-const WRITE_HOOKS = ['findOneAndUpdate', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'replaceOne', 'findOneAndDelete', 'findOneAndReplace'];
+/**
+ * Native MongoDB driver command monitoring (requires monitorCommands: true on mongoose.connect).
+ * Measures exact BSON wire sizes via BSON.calculateObjectSize and links commandStarted -> commandSucceeded
+ * via event.requestId so AsyncLocalStorage attribution is never lost across shared TCP socket callbacks.
+ */
+function attachMongoClient(client) {
+  if (!client || typeof client.on !== 'function' || attachedClients.has(client)) return;
+  attachedClients.add(client);
 
-function installMongoosePlugin(mongoose) {
-  if (mongooseInstalled || !mongoose?.plugin) return;
-  mongooseInstalled = true;
+  const inFlight = new Map();
 
-  mongoose.plugin(function bandwidthMongoosePlugin(schema) {
-    for (const op of READ_HOOKS) {
-      schema.post(op, function onRead(result) {
-        const col = this?.mongooseCollection?.name || this?.model?.collection?.name || 'unknown';
-        const filterBytes = estimateBytes(this?.getFilter?.());
-        // Bound result size estimation so huge cursors/arrays don't slow down the event loop
-        let resBytes = 0;
-        if (Array.isArray(result)) {
-          const sampleCount = Math.min(result.length, 5);
-          if (sampleCount > 0) {
-            let sampleBytes = 0;
-            for (let i = 0; i < sampleCount; i++) sampleBytes += estimateBytes(result[i]);
-            resBytes = Math.round((sampleBytes / sampleCount) * result.length);
-          }
-        } else if (result && typeof result === 'object') {
-          resBytes = estimateBytes(result);
-        }
-        recordDbOp({ isWrite: false, bytes: filterBytes + resBytes, collection: col });
-      });
-    }
+  client.on('commandStarted', event => {
+    const commandName = event?.commandName || 'unknown';
+    const isInternal = INTERNAL_COMMANDS.has(commandName);
+    const collection = isInternal ? 'driver' : collectionFromCommand(commandName, event.command);
+    const ctx = isInternal
+      ? { name: 'MongoDB Driver Heartbeat', category: 'system' }
+      : (processScope.getStore() || null);
+    const isWrite = WRITE_COMMANDS.has(commandName);
+    const outBytes = TLS_FRAME_OVERHEAD_BYTES + safeBsonSize(event.command);
 
-    for (const op of WRITE_HOOKS) {
-      schema.post(op, function onWrite() {
-        const col = this?.mongooseCollection?.name || this?.model?.collection?.name || 'unknown';
-        const filterBytes = estimateBytes(this?.getFilter?.());
-        const updateBytes = estimateBytes(this?.getUpdate?.());
-        recordDbOp({ isWrite: true, bytes: filterBytes + updateBytes, collection: col });
-      });
-    }
+    recordDbOp({ isWrite, outBytes, collection, ctx, countOp: true });
 
-    schema.post('aggregate', function onAggregate(result) {
-      const col = this?.model?.collection?.name || 'unknown';
-      const pipeBytes = estimateBytes(this?.pipeline?.());
-      let resBytes = 0;
-      if (Array.isArray(result) && result.length > 0) {
-        const sampleCount = Math.min(result.length, 5);
-        let sampleBytes = 0;
-        for (let i = 0; i < sampleCount; i++) sampleBytes += estimateBytes(result[i]);
-        resBytes = Math.round((sampleBytes / sampleCount) * result.length);
+    if (event.requestId !== undefined) {
+      if (inFlight.size >= MAX_IN_FLIGHT) {
+        inFlight.delete(inFlight.keys().next().value);
       }
-      recordDbOp({ isWrite: false, bytes: pipeBytes + resBytes, collection: col });
-    });
+      inFlight.set(event.requestId, { ctx, isWrite, collection });
+    }
+  });
 
-    schema.post('save', function onSave(doc) {
-      const col = this?.collection?.name || doc?.constructor?.collection?.name || 'unknown';
-      recordDbOp({ isWrite: true, bytes: estimateBytes(doc), collection: col });
-    });
+  client.on('commandSucceeded', event => {
+    const meta = event?.requestId !== undefined ? inFlight.get(event.requestId) : null;
+    if (event?.requestId !== undefined) inFlight.delete(event.requestId);
+    if (!meta) return;
+    const inBytes = safeBsonSize(event.reply);
+    if (inBytes > 0) {
+      recordDbOp({ isWrite: meta.isWrite, inBytes, collection: meta.collection, ctx: meta.ctx, countOp: false });
+    }
+  });
 
-    schema.post('insertMany', function onInsertMany(docs) {
-      const col = this?.collection?.name || 'unknown';
-      const count = Array.isArray(docs) ? docs.length : 1;
-      const sample = Array.isArray(docs) && docs.length ? estimateBytes(docs[0]) * count : estimateBytes(docs);
-      recordDbOp({ isWrite: true, bytes: sample, collection: col });
-    });
+  client.on('commandFailed', event => {
+    if (event?.requestId !== undefined) inFlight.delete(event.requestId);
   });
 }
 
@@ -217,7 +211,8 @@ function ingestDelta(items) {
     entry.httpInBytes += Number(item.httpInBytes) || 0;
     entry.dbReads += Number(item.dbReads) || 0;
     entry.dbWrites += Number(item.dbWrites) || 0;
-    entry.dbBytes += Number(item.dbBytes) || 0;
+    entry.dbOutBytes += Number(item.dbOutBytes) || 0;
+    entry.dbInBytes += Number(item.dbInBytes) || 0;
     entry.externalCalls += Number(item.externalCalls) || 0;
     entry.externalBytes += Number(item.externalBytes) || 0;
   }
@@ -231,19 +226,19 @@ function attachChildProcess(child) {
 }
 
 function startChildReporter(defaultName, category = 'worker', intervalMs = 30_000) {
-  if (typeof process.send !== 'function') return;
-  if (childReporterTimer) return;
+  if (typeof process.send !== 'function' || childReporterTimer) return;
   const flush = () => {
     if (!buckets.size || typeof process.send !== 'function') return;
     const summary = new Map();
     for (const bucket of buckets.values()) {
       for (const entry of bucket.values()) {
-        const name = entry.name.startsWith('DB: ') ? defaultName : entry.name;
-        const cat = entry.name.startsWith('DB: ') ? category : entry.category;
+        const isUnassigned = entry.name.startsWith('DB: ');
+        const name = isUnassigned ? defaultName : entry.name;
+        const cat = isUnassigned ? category : entry.category;
         const key = `${cat}::${name}`;
         let agg = summary.get(key);
         if (!agg) {
-          agg = { name, category: cat, runs: 0, httpOutBytes: 0, httpInBytes: 0, dbReads: 0, dbWrites: 0, dbBytes: 0, externalCalls: 0, externalBytes: 0, lastAt: 0 };
+          agg = { name, category: cat, runs: 0, httpOutBytes: 0, httpInBytes: 0, dbReads: 0, dbWrites: 0, dbOutBytes: 0, dbInBytes: 0, externalCalls: 0, externalBytes: 0, lastAt: 0 };
           summary.set(key, agg);
         }
         agg.runs += entry.runs;
@@ -251,7 +246,8 @@ function startChildReporter(defaultName, category = 'worker', intervalMs = 30_00
         agg.httpInBytes += entry.httpInBytes;
         agg.dbReads += entry.dbReads;
         agg.dbWrites += entry.dbWrites;
-        agg.dbBytes += entry.dbBytes;
+        agg.dbOutBytes += entry.dbOutBytes;
+        agg.dbInBytes += entry.dbInBytes;
         agg.externalCalls += entry.externalCalls;
         agg.externalBytes += entry.externalBytes;
         if (entry.lastAt > agg.lastAt) agg.lastAt = entry.lastAt;
@@ -287,7 +283,8 @@ function getReport(windowParam = '24h') {
           httpInBytes: 0,
           dbReads: 0,
           dbWrites: 0,
-          dbBytes: 0,
+          dbOutBytes: 0,
+          dbInBytes: 0,
           externalCalls: 0,
           externalBytes: 0,
           lastAt: 0,
@@ -299,7 +296,8 @@ function getReport(windowParam = '24h') {
       agg.httpInBytes += entry.httpInBytes;
       agg.dbReads += entry.dbReads;
       agg.dbWrites += entry.dbWrites;
-      agg.dbBytes += entry.dbBytes;
+      agg.dbOutBytes += entry.dbOutBytes;
+      agg.dbInBytes += entry.dbInBytes;
       agg.externalCalls += entry.externalCalls;
       agg.externalBytes += entry.externalBytes;
       if (entry.lastAt > agg.lastAt) agg.lastAt = entry.lastAt;
@@ -310,7 +308,8 @@ function getReport(windowParam = '24h') {
     totalBytes: 0,
     httpOutBytes: 0,
     httpInBytes: 0,
-    dbBytes: 0,
+    dbOutBytes: 0,
+    dbInBytes: 0,
     externalBytes: 0,
     totalRuns: 0,
     totalDbReads: 0,
@@ -319,11 +318,13 @@ function getReport(windowParam = '24h') {
   };
 
   const list = [...merged.values()].map(item => {
-    const totalBytes = item.httpOutBytes + item.dbBytes + item.externalBytes;
+    // Render bills outbound egress: HTTP responses + outbound DB commands + external requests.
+    const totalBytes = item.httpOutBytes + item.dbOutBytes + item.externalBytes;
     totals.totalBytes += totalBytes;
     totals.httpOutBytes += item.httpOutBytes;
     totals.httpInBytes += item.httpInBytes;
-    totals.dbBytes += item.dbBytes;
+    totals.dbOutBytes += item.dbOutBytes;
+    totals.dbInBytes += item.dbInBytes;
     totals.externalBytes += item.externalBytes;
     totals.totalRuns += item.runs;
     totals.totalDbReads += item.dbReads;
@@ -361,7 +362,7 @@ module.exports = {
   recordHttp,
   recordExternal,
   expressMiddleware,
-  installMongoosePlugin,
+  attachMongoClient,
   attachChildProcess,
   startChildReporter,
   getReport,

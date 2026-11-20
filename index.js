@@ -1,7 +1,4 @@
-const mongoose = require('mongoose')
 const bandwidthTracker = require('./helpers/bandwidthTracker')
-bandwidthTracker.installMongoosePlugin(mongoose)
-
 const express = require('express')
 const http = require('http')
 const cors = require('cors')
