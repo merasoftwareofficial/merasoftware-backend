@@ -1,5 +1,8 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
+const bandwidthTracker = require('../helpers/bandwidthTracker');
+bandwidthTracker.installMongoosePlugin(mongoose);
+bandwidthTracker.startChildReporter('Portfolio Worker', 'worker');
 const { randomUUID, createHash } = require('node:crypto');
 const orderModel = require('../models/orderProductModel');
 require('../models/userModel');
@@ -21,10 +24,12 @@ function configuration() {
 }
 async function website(path, options = {}) {
   const { target, secret } = configuration();
+  const reqBytes = typeof options.body === 'string' ? Buffer.byteLength(options.body, 'utf8') : 0;
   const response = await fetch(`${target}/api/portfolio/${path}`, {
     ...options, redirect: 'error', signal: AbortSignal.timeout(150_000),
     headers: { Authorization: `Bearer ${secret}`, ...options.headers },
   });
+  bandwidthTracker.recordExternal({ name: 'Portfolio Worker', category: 'worker', bytes: reqBytes + (Number(response.headers?.get?.('content-length')) || 256) });
   if (!response.ok) throw new Error(`Portfolio website returned HTTP ${response.status}.`);
   return response.json();
 }
@@ -38,17 +43,22 @@ async function assertLease() {
   const lease = await Lease.findOneAndUpdate({ _id: 'portfolio', owner, expires: { $gt: new Date() } }, { $set: { expires: new Date(Date.now() + 600_000) } }, { new: true });
   if (!lease) throw new Error('Portfolio worker lease expired.');
 }
-async function record(source, run) {
+async function record(source, run, beforeRow) {
   const id = source.id;
   const hash = createHash('sha256').update(JSON.stringify(source)).digest('hex');
-  const before = await Outbox.findById(id).lean();
+  const before = beforeRow !== undefined ? beforeRow : await Outbox.findById(id).lean();
   if (!before || before.hash !== hash) {
     const revision = Math.max(Date.now(), (before?.revision || 0) + 1);
     await Outbox.updateOne({ _id: id }, { $set: { hash, source: { ...source, revision }, revision, lastSeen: run, pending: true, attempts: 0, nextAttemptAt: new Date(), lastError: '' } }, { upsert: true });
-  } else await Outbox.updateOne({ _id: id }, { $set: { lastSeen: run } });
+    return true;
+  }
+  return false;
 }
 async function reconcile() {
   const run = randomUUID();
+  const existingRows = await Outbox.find({}).select('_id hash revision source').lean();
+  const existing = new Map(existingRows.map(row => [String(row._id), row]));
+  const seen = new Set();
   // A cursor bounds memory; tombstones are emitted only after a successful full scan.
   const cursor = orderModel.find({}).select('userId productId projectSnapshot servicePlanSnapshot orderItems isWebsiteProject isServicePlan projectProgress orderVisibility servicePlanStatus planStatus isActive updatesUsed totalYearlyDaysRemaining linkedProjectOrderId projectLink portfolioCaptureAllowed createdAt')
     .populate('userId', '_id name isGuest')
@@ -59,23 +69,29 @@ async function reconcile() {
     for await (const order of cursor) {
       if (++count % 100 === 0) await assertLease();
       const source = portfolioSource(order);
-      if (source) await record(source, run);
+      if (source) {
+        seen.add(source.id);
+        await record(source, run, existing.get(source.id) || null);
+      }
     }
   } finally { await cursor.close(); }
   await assertLease();
-  for await (const row of Outbox.find({ lastSeen: { $ne: run }, 'source.available': true }).lean().cursor()) {
-    const { revision: ignored, ...source } = row.source;
-    void ignored;
-    await record({ ...source, available: false, captureAllowed: false }, run);
+  for (const row of existing.values()) {
+    if (row.source?.available && !seen.has(String(row._id))) {
+      const { revision: ignored, ...source } = row.source;
+      void ignored;
+      await record({ ...source, available: false, captureAllowed: false }, run, row);
+    }
   }
 }
 async function deliver() {
   const rows = await Outbox.find({ pending: true, nextAttemptAt: { $lte: new Date() } }).sort({ nextAttemptAt: 1 }).limit(100).lean();
-  if (!rows.length) return;
+  if (!rows.length) return false;
   await assertLease();
   try {
     await website('integration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: rows.map(row => row.source) }) });
     for (const row of rows) await Outbox.updateOne({ _id: row._id, revision: row.revision }, { $set: { pending: false, lastError: '', deliveredAt: new Date() } });
+    return true;
   } catch (error) {
     for (const row of rows) await Outbox.updateOne({ _id: row._id, revision: row.revision }, { $inc: { attempts: 1 }, $set: { lastError: error.message, nextAttemptAt: new Date(Date.now() + Math.min(900_000, 30_000 * 2 ** Math.min(row.attempts, 5))) } });
     throw error;
@@ -97,10 +113,14 @@ async function captureNext() {
 async function tick() {
   if (!(await claimLease())) return;
   try {
-    await reconcile();
-    // Drain several batches on initial import without delaying capture forever.
-    for (let batch = 0; batch < 10; batch++) await deliver();
-    if (process.env.PORTFOLIO_CAPTURE_ENABLED === 'true') await captureNext();
+    await bandwidthTracker.runWithProcess('Portfolio Worker', 'worker', async () => {
+      await reconcile();
+      // Drain several batches on initial import without delaying capture forever.
+      for (let batch = 0; batch < 10; batch++) {
+        if (!(await deliver())) break;
+      }
+      if (process.env.PORTFOLIO_CAPTURE_ENABLED === 'true') await captureNext();
+    });
   } finally { await Lease.deleteOne({ _id: 'portfolio', owner }); }
 }
 async function main() {

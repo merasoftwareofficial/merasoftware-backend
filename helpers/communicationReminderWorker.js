@@ -21,10 +21,16 @@ async function processMonthlyRule(ruleId, now = new Date()) {
   let planned = 0, dispatched = 0;
   try {
     const cursor = Order.find({ isServicePlan: true, 'salesPackage.package.id': { $exists: true, $ne: null }, paymentPolicy: null,
-      orderVisibility: { $ne: 'cancelled' }, servicePlanStatus: { $in: ['active', 'paused', 'expired'] } }).cursor();
+      orderVisibility: { $ne: 'cancelled' }, servicePlanStatus: { $in: ['active', 'paused', 'expired'] } })
+      .select('userId isServicePlan salesPackage servicePlanSnapshot orderVisibility servicePlanStatus serviceCurrentCycleNumber serviceTotalCycles serviceNextBillingDate serviceCyclePrice serviceAutoRenewalStoppedAt serviceBillingCycleMonths serviceBillingTenureMonths')
+      .lean().cursor();
     for await (const order of cursor) {
       if (!await owns()) break;
-      const invoices = await Invoice.find({ orderId: order._id, invoiceType: 'plan_renewal' }).lean();
+      const [invoices, scheduledRuns] = await Promise.all([
+        Invoice.find({ orderId: order._id, invoiceType: 'plan_renewal' }).select('orderId status serviceCycleNumber dueDate amount amountPaid').lean(),
+        Run.find({ ruleId: rule._id, ruleRevision: rule.revision, entityId: order._id, status: 'scheduled' }).select('occurrenceKey').lean(),
+      ]);
+      const scheduledKeys = new Set(scheduledRuns.map(row => row.occurrenceKey));
       const nextCycle = getNextCycleNumber(order);
       const candidates = invoices.filter(invoice => ['unpaid', 'partially_paid', 'overdue'].includes(invoice.status));
       if (!invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) candidates.push(null);
@@ -33,10 +39,15 @@ async function processMonthlyRule(ruleId, now = new Date()) {
         await persistPackageRuns(plans); planned += plans.length;
       }
       for (const invoice of invoices.filter(row => ['paid', 'cancelled'].includes(row.status))) {
-        await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: `${order._id}:${invoice.serviceCycleNumber}`, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Invoice settled or cancelled.' } });
+        const occKey = `${order._id}:${invoice.serviceCycleNumber}`;
+        if (!scheduledKeys.has(occKey)) continue;
+        await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Invoice settled or cancelled.' } });
       }
       if (order.serviceAutoRenewalStoppedAt && !invoices.some(invoice => Number(invoice.serviceCycleNumber) === nextCycle)) {
-        await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: `${order._id}:${nextCycle}`, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Renewal stopped.' } });
+        const occKey = `${order._id}:${nextCycle}`;
+        if (scheduledKeys.has(occKey)) {
+          await Run.updateMany({ ruleId: rule._id, ruleRevision: rule.revision, occurrenceKey: occKey, status: 'scheduled' }, { $set: { status: 'cancelled', reason: 'Renewal stopped.' } });
+        }
       }
     }
     if (!await owns()) return { claimed: true, planned, dispatched, leaseLost: true };

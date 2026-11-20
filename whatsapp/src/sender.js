@@ -75,10 +75,11 @@ export function createSender({
   const gapOver = time => ({ $or: [{ nextSendAt: null }, { nextSendAt: { $lte: time } }] });
   const holdUntil = time => new Date(time.getTime() + SLOT_MS);
 
-  const ensureState = () => State.findOneAndUpdate({ _id: STATE_ID }, { $setOnInsert: { _id: STATE_ID } },
-    { upsert: true, new: true, setDefaultsOnInsert: true }).lean();
+  const ensureState = async () => await State.findById(STATE_ID).select('-qr').lean()
+    || await State.findOneAndUpdate({ _id: STATE_ID }, { $setOnInsert: { _id: STATE_ID } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }).select('-qr').lean();
   const takeSlot = (time, extra = {}) => State.findOneAndUpdate({ _id: STATE_ID, $and: [slotFree(time), extra] },
-    { $set: { sendingBy: owner, sendingUntil: holdUntil(time) } }, { new: true }).lean();
+    { $set: { sendingBy: owner, sendingUntil: holdUntil(time) } }, { new: true }).select('-qr').lean();
   const releaseSlot = (fields = {}) => State.updateOne({ _id: STATE_ID, sendingBy: owner },
     { $set: { ...fields, sendingUntil: null }, $unset: { sendingBy: 1 } });
 

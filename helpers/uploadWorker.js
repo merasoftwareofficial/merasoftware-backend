@@ -11,7 +11,11 @@ const Drive = require('./googleDriveService');
 const { uploadBatch } = require('./uploadConcurrency');
 const { expireOne, BUDGET_ID, configuration } = require('./stagedUploads');
 const { notifyDeliveryStuck } = require('./uploadNotifications');
+const bandwidthTracker = require('./bandwidthTracker');
 const LEASE_MS = 120000;
+const ACTIVE_POLL_MS = 2000;
+const IDLE_POLL_MS = 30000;
+let wakeCurrentWorker = null;
 
 function driveService() {
   const credentials = process.env.NODE_ENV === 'production' && process.env.GOOGLE_DRIVE_CREDENTIALS_PATH
@@ -88,20 +92,46 @@ async function runOnce({ drive = driveService(), now = new Date() } = {}) {
   return true;
 }
 
+function wakeUploadWorker() {
+  if (typeof wakeCurrentWorker === 'function') wakeCurrentWorker();
+}
+
 function startUploadWorker({ keepAlive = false } = {}) {
   if (process.env.ENABLE_UPLOAD_WORKER !== 'true') return;
   try { configuration(); }
   catch { console.error('[upload-worker] Configure UPLOAD_STAGING_MAX_BYTES before enabling uploads'); return; }
   let busy = false;
-  const tick = async () => {
-    if (busy) return;
-    busy = true;
-    try { await runOnce(); } catch { console.warn('[upload-worker] Storage temporarily unavailable'); }
-    finally { busy = false; }
+  let stopped = false;
+  let timer = null;
+  const scheduleNext = delayMs => {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(tick, delayMs);
+    if (!keepAlive) timer.unref();
   };
-  const timer = setInterval(tick, 2000);
-  if (!keepAlive) timer.unref();
+  const tick = async () => {
+    if (busy || stopped) return;
+    busy = true;
+    let didWork = false;
+    try {
+      didWork = Boolean(await bandwidthTracker.runWithProcess('Upload Worker', 'worker', () => runOnce()));
+    } catch { console.warn('[upload-worker] Storage temporarily unavailable'); }
+    finally {
+      busy = false;
+      scheduleNext(didWork ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+    }
+  };
+  wakeCurrentWorker = () => {
+    if (stopped) return;
+    if (busy) { scheduleNext(ACTIVE_POLL_MS); return; }
+    if (timer) clearTimeout(timer);
+    void tick();
+  };
   void tick();
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    wakeCurrentWorker = null;
+  };
 }
-module.exports = { runOnce, startUploadWorker };
+module.exports = { runOnce, startUploadWorker, wakeUploadWorker };

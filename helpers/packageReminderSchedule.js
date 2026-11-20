@@ -20,8 +20,21 @@ function planPackageRuns(rule, order, invoice = null) {
 // Idempotent persistence of plans; never contacts a channel. A duplicate-key
 // collision means another scheduler persisted the same identity first.
 async function persistPackageRuns(plans) {
+  if (!plans.length) return;
   const Run = require('../models/communicationReminderRunModel');
+  const first = plans[0];
+  const existingRows = await Run.find({
+    ruleId: first.ruleId,
+    ruleRevision: first.ruleRevision,
+    occurrenceKey: { $in: [...new Set(plans.map(plan => plan.occurrenceKey))] },
+  }).select('occurrenceKey step status dueAt anchorAt').lean();
+  const byKey = new Map(existingRows.map(row => [`${row.occurrenceKey}:${row.step}`, row]));
   for (const plan of plans) {
+    const existing = byKey.get(`${plan.occurrenceKey}:${plan.step}`);
+    if (existing) {
+      if (existing.status !== 'scheduled') continue;
+      if (+new Date(existing.dueAt) === +new Date(plan.dueAt) && +new Date(existing.anchorAt) === +new Date(plan.anchorAt)) continue;
+    }
     const key = { ruleId: plan.ruleId, ruleRevision: plan.ruleRevision, occurrenceKey: plan.occurrenceKey, step: plan.step };
     const { dueAt, anchorAt, ...initial } = plan;
     // A newly issued invoice can carry a different actual due date. Only a

@@ -1,4 +1,7 @@
 const mongoose = require("mongoose")
+const bandwidthTracker = require("../helpers/bandwidthTracker")
+
+bandwidthTracker.installMongoosePlugin(mongoose);
 
 async function connnectDB () {
     const mongoUri = process.env.MONGODB_URI;

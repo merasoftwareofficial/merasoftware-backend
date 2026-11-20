@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { fork } = require('node:child_process');
+const { attachChildProcess } = require('./bandwidthTracker');
 
 // Opt-in supervisor for the WhatsApp sender (whatsapp/, ESM). It runs as its own process so a
 // WhatsApp crash restarts only the sender, never the API. Same pattern as portfolioWorkerService.
@@ -13,6 +14,7 @@ function startWhatsappWorkerService() {
       cwd: path.join(__dirname, '..'), stdio: 'inherit', windowsHide: true,
       env: { ...process.env, ENABLE_SENDER: 'true', WHATSAPP_EMBEDDED: 'true' },
     });
+    attachChildProcess(worker);
     worker.once('error', error => console.error('[whatsapp] Worker process error:', error.code || 'unknown'));
     worker.once('exit', () => {
       if (!stopping) restart = setTimeout(launch, 15_000);

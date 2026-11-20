@@ -75,7 +75,11 @@ export function createConnection({ Auth, State, logger, onMessages, makeSocket =
           await setState({ connection: 'disconnected', qr: null, lastError: update.lastDisconnect?.error?.message || null });
         }
         failures += 1;
-        schedule(code === DisconnectReason.restartRequired ? 0 : Math.min(5_000 * failures, 60_000));
+        const linked = Boolean(auth?.state?.creds?.me?.id);
+        const delayMs = code === DisconnectReason.restartRequired ? 0
+          : linked || failures <= 2 ? Math.min(5_000 * failures, 60_000)
+          : Math.min(30_000 * 2 ** (failures - 3), 15 * 60_000);
+        schedule(delayMs);
       }
     });
   }

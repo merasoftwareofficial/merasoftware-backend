@@ -1,6 +1,11 @@
+const mongoose = require('mongoose')
+const bandwidthTracker = require('./helpers/bandwidthTracker')
+bandwidthTracker.installMongoosePlugin(mongoose)
+
 const express = require('express')
 const http = require('http')
 const cors = require('cors')
+const compression = require('compression')
 const cookieParser = require('cookie-parser')
 require('dotenv').config()
 require('./helpers/sessionToken').sessionSecret()
@@ -26,7 +31,7 @@ const server = http.createServer(app)
 const cronsEnabled = process.env.ENABLE_CRONS === 'true';
 // New rule engine is a separate opt-in; legacy reminder jobs remain unchanged.
 if (process.env.COMMUNICATION_REMINDER_JOBS_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => require('./helpers/communicationReminderWorker').processCommunicationReminders().catch(error => console.error('[communication reminders]', error.message)), { timezone: 'Asia/Kolkata' });
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Communication Reminders Cron', 'cron', () => require('./helpers/communicationReminderWorker').processCommunicationReminders().catch(error => console.error('[communication reminders]', error.message))), { timezone: 'Asia/Kolkata' });
 }
 if (cronsEnabled) {
   fileCleanupScheduler.scheduleCleanup();
@@ -41,7 +46,7 @@ if (cronsEnabled) {
 // Reservation jobs have their own switch (owner decision 12): enabling them never starts the
 // wallet-charging renewal crons above. Each job also checks its own feature flag.
 if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
-  cron.schedule('* * * * *', async () => {
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Offer & Package Reservation Cron', 'cron', async () => {
     await require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message));
     await require('./helpers/reservationRepricing').reconcileDueReservations().catch(error => console.error('[reservation repricing]', error.message));
     await require('./helpers/reservationClosure').closeDueReservations().catch(error => console.error('[reservation closure]', error.message));
@@ -51,24 +56,24 @@ if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
     // Package Start requests (helpers/packageStart.js); each call checks PACKAGE_START_REQUESTS_ENABLED.
     await require('./helpers/packageStart').deliverPackageStartNotices().catch(error => console.error('[package start notices]', error.message));
     await require('./helpers/packageStart').alertPendingPackageStarts().catch(error => console.error('[package start alerts]', error.message));
-  });
+  }));
   console.log('Offer reservation jobs initialized');
 }
 
 // Action rules (all docs/Reminder.md §4): records actions and sends rule messages. Own switch, default off.
 if (process.env.ACTION_RULES_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => require('./helpers/actionRuleWorker').processActionRules().catch(error => console.error('[action rules]', error.message)));
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Action Rules Cron', 'cron', () => require('./helpers/actionRuleWorker').processActionRules().catch(error => console.error('[action rules]', error.message))));
 }
 
 // Broadcast feeds the existing WhatsApp queue; this switch never enables other production crons.
 if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => require('./helpers/broadcastJobs').dispatch().catch(error => console.error('[broadcast]', error.message)));
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Broadcast Dispatch Cron', 'cron', () => require('./helpers/broadcastJobs').dispatch().catch(error => console.error('[broadcast]', error.message))));
 }
 
 // Auto Reply: on with WhatsApp itself, no switch of its own; the admin's switches are in the database.
 if (process.env.ENABLE_WHATSAPP === 'true') {
-  cron.schedule('* * * * *', () => require('./helpers/autoReplyJobs').processInbox().catch(error => console.error('[auto reply]', error.message)));
-  cron.schedule('* * * * *', () => require('./helpers/finalMessageJobs').followFinalMessages().catch(error => console.error('[final message]', error.message)));
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Auto Reply Inbox Cron', 'cron', () => require('./helpers/autoReplyJobs').processInbox().catch(error => console.error('[auto reply]', error.message))));
+  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Final Message Cron', 'cron', () => require('./helpers/finalMessageJobs').followFinalMessages().catch(error => console.error('[final message]', error.message))));
 }
 
 const allowedOrigins = getAllowedOrigins();
@@ -99,6 +104,13 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+app.use(compression({
+  filter: (req, res) => {
+    if (req.path === '/api/portal-updates' || req.path === '/api/admin/lead-updates') return false;
+    return compression.filter(req, res);
+  },
+}));
+app.use(bandwidthTracker.expressMiddleware);
 
 
 app.use(require('./helpers/uploadTiming').uploadTimingMiddleware)
@@ -110,12 +122,13 @@ app.use(cookieParser())
 app.use("/api", require("./helpers/emailController").requestMiddleware)
 app.use("/api/email-control", require("./routes/emailControl"))
 app.use("/api/whatsapp-control", require("./routes/whatsappControl"))
+app.use("/api/bandwidth-control", require("./routes/bandwidthControl"))
 app.use("/api/broadcast", require("./routes/broadcast"))
 app.use("/api/offer-targets", require("./routes/offerTargets"))
 app.use("/api/auto-reply", require("./routes/autoReply"))
 app.use("/api", router)
 
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static('uploads', { maxAge: '7d' }));
 
 app.head('/ping', (req, res) => {
   console.log('HEAD Ping received at:', new Date().toISOString());
@@ -129,10 +142,11 @@ const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 // Keep-alive only matters for a real deployment that can go idle (e.g. Render free
 // tier). It does not write any data, but there is no reason to run it locally.
 if (cronsEnabled) {
-  cron.schedule("*/5 * * * *", async () => {
+  cron.schedule("*/5 * * * *", () => bandwidthTracker.runWithProcess('Keep-Alive Self Ping', 'cron', async () => {
     try {
       if (KEEP_ALIVE_URL) {
         await axios.head(KEEP_ALIVE_URL);
+        bandwidthTracker.recordExternal({ name: 'Keep-Alive Self Ping', category: 'cron', bytes: 256 });
         console.log(` ✅ Keep-alive request sent to ${KEEP_ALIVE_URL}`);
       } else {
         console.warn("⚠️ KEEP_ALIVE_URL is not set in .env file");
@@ -140,7 +154,7 @@ if (cronsEnabled) {
     } catch (error) {
       console.error("❌ Keep-alive request failed:", error.message);
     }
-  });
+  }));
 }
 
 async function startServer() {

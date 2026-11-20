@@ -24,6 +24,7 @@ module.exports = {
     }, { $set: { delivery: 'queued', attempts: 0, nextAttemptAt: new Date(), deliveryFailure: '' } }, { new: true });
     if (!record) return res.status(404).json({ success: false, message: 'Upload does not require a retry' });
     await require('../../models/updateRequestModel').updateOne({ _id: record.requestId }, { $set: { deliveryStatus: 'queued' } });
+    require('../../helpers/uploadWorker').wakeUploadWorker?.();
     return res.json({ success: true });
   }),
   begin: wrap(async (req, res) => {

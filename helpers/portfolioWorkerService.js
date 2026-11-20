@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { fork } = require('node:child_process');
+const { attachChildProcess } = require('./bandwidthTracker');
 
 // Opt-in process supervisor for hosts that run the existing Node web service.
 // The worker keeps its own Mongo connection and durable lease/outbox.
@@ -13,6 +14,7 @@ function startPortfolioWorkerService() {
   function launch() {
     if (stopping) return;
     worker = fork(path.join(__dirname, '../scripts/portfolioWorker.js'), [], { cwd: path.join(__dirname, '..'), stdio: 'inherit', windowsHide: true });
+    attachChildProcess(worker);
     worker.once('error', error => console.error('[portfolio] Worker process error:', error.code || 'unknown'));
     worker.once('exit', () => {
       if (!stopping) restart = setTimeout(launch, 15_000);

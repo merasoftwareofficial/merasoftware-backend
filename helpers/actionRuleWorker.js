@@ -533,14 +533,20 @@ async function planProjectedMonthlyRuns() {
     orderVisibility: { $ne: 'cancelled' },
     servicePlanStatus: 'active',
     serviceAutoRenewalStoppedAt: null,
-  }).lean();
+  }).select('userId isServicePlan salesPackage servicePlanSnapshot orderItems servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber serviceTotalCycles serviceBillingTenureMonths serviceCyclePrice serviceStartNotifiedAt createdAt currentMonthUpdatesRemaining demoMode projectProgress').lean();
+  if (!orders.length) return 0;
+  const needsUploadCheck = rules.some(rule => rule.condition === 'upload_pending');
+  const ruleIds = rules.map(rule => rule._id);
   let planned = 0;
   for (const order of orders) {
     const candidate = packageReminderCandidate(order, null);
     if (!candidate) continue;
     const packageSlug = packageSlugOf(order);
-    const hasUploaded = await orderHasUpload(order);
+    const hasUploaded = needsUploadCheck ? await orderHasUpload(order) : false;
     const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, hasUploaded, originSurface: '', dueDate: candidate.due };
+    const occurrenceKey = `projected:${order._id}:${candidate.cycle}`;
+    const existingRows = await Run.find({ ruleId: { $in: ruleIds }, occurrenceKey }).select('ruleId ruleRevision step').lean();
+    const existingKeys = new Set(existingRows.map(row => `${row.ruleId}:${row.ruleRevision}:${row.step}`));
     for (const rule of rules) {
       if (!rule.activatedAt) continue;
       const activatedAt = new Date(rule.activatedAt);
@@ -551,7 +557,7 @@ async function planProjectedMonthlyRuns() {
       if (!dueSteps.length) continue;
       const fakeEvent = {
         action: rule.action,
-        key: `projected:${order._id}:${candidate.cycle}`,
+        key: occurrenceKey,
         entityId: order._id,
         clientId: order.userId,
         leadId: null,
@@ -561,8 +567,11 @@ async function planProjectedMonthlyRuns() {
       };
       for (const run of planRuns({ ...rule, steps: dueSteps }, fakeEvent, candidate.due)) {
         if (!startedAfterActivation && run.dueAt < activatedAt) continue;
+        const stepKey = `${run.ruleId}:${run.ruleRevision}:${run.step}`;
+        if (existingKeys.has(stepKey)) continue;
         const id = { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: run.step };
         await Run.updateOne(id, { $setOnInsert: run }, { upsert: true });
+        existingKeys.add(stepKey);
         planned++;
       }
     }

@@ -139,6 +139,7 @@ async function closeRow(row) {
 async function recordLaterSends(row) {
   if (!row.altPhone) return;
   const known = new Set((row.sends || []).map(send => send.phone));
+  if (known.has(row.altPhone)) return;
   const later = (await originalCopies(row.draftId)).filter(copy => copy.status === 'sent' && !known.has(copy.to));
   if (!later.length) return;
   const { modifiedCount } = await FinalMessage.updateOne({ _id: row._id, draftId: row.draftId, status: { $in: ['waiting', 'dead', 'replied'] } }, { $push: { sends: { $each: later.map(sendOf) } } });
@@ -164,7 +165,7 @@ async function followFinalMessages() {
     }
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead', 'replied'] }, altPhone: { $nin: [null, ''] } }).lean()) await attempt(row, recordLaterSends);
-    for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] } }).lean()) {
+    for (const row of await FinalMessage.find({ $or: [{ status: 'waiting' }, { status: 'dead', $or: [{ expirySentAt: null }, { 'outboundChecks.0': { $exists: true } }] }] }).lean()) {
       await attempt(row, item => require('./stopFinalMessage').processOutbound(item));
     }
     if (!clientAutomationEnabled()) {
@@ -173,7 +174,7 @@ async function followFinalMessages() {
     // After the closure message, before the replies below: any message from then on brings the person back as an
     // Inquiry instead (helpers/finalMessageComeback.js). This also keeps when the closure went, before the queue forgets it.
     const { closureSentAt, comeBackIfWrote } = require('./finalMessageComeback');
-    for (const row of await FinalMessage.find({ status: 'dead', expiryQueuedAt: { $ne: null } }).lean()) await attempt(row, comeBackIfWrote);
+    for (const row of await FinalMessage.find({ status: 'dead', expiryQueuedAt: { $ne: null }, $or: [{ expirySentAt: null }, { lastReplyAt: { $ne: null } }, { lastIgnoredAt: { $ne: null } }] }).lean()) await attempt(row, comeBackIfWrote);
     // Replies before deadlines: a reply and an expired deadline in the same minute is a reply.
     // Never after the closure: that one is left for the step above to retry.
     for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead'] }, lastReplyAt: { $ne: null } }).lean()) {

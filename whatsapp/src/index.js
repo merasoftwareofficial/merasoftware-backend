@@ -2,6 +2,9 @@ import http from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import mongoose from 'mongoose';
 import pino from 'pino';
+import bandwidthTracker from '../../helpers/bandwidthTracker.js';
+bandwidthTracker.installMongoosePlugin(mongoose);
+bandwidthTracker.startChildReporter('WhatsApp Worker', 'worker');
 import { loadConfig } from './config.js';
 import { Auth, Inbox, Lock, Queue, Rule, State, STATE_ID } from './models.js';
 import { createInbound } from './inbound.js';
@@ -53,6 +56,7 @@ if (!config.senderEnabled) {
 
   let held = false;
   let heartbeatAt = 0;
+  let idleSteps = 0;
   // A long send must not let the lease run out under it (the loop renews only between steps).
   setInterval(() => { if (held && !stopping) lease.ensure().catch(error => logger.warn({ err: error }, 'lease renewal failed')); }, 20_000).unref();
   while (!stopping) {
@@ -61,25 +65,35 @@ if (!config.senderEnabled) {
       if (!nowHeld) {
         if (held) await connection.stop();
         held = false;
+        idleSteps = 0;
         await sleep(30_000);
         continue;
       }
       if (!held) {
         held = true;
+        idleSteps = 0;
         const interrupted = await sender.recoverInterrupted();
         if (interrupted) console.log(`${interrupted} message(s) were mid-send at the last stop; marked failed, not resent.`);
         connection.start();
         console.log('Sender lease held — connecting to WhatsApp.');
       }
-      const state = await State.findById(STATE_ID).lean();
+      const state = await State.findById(STATE_ID).select('logoutRequested').lean();
       if (state?.logoutRequested) await connection.logout();
       if (Date.now() - heartbeatAt > 30_000) {
         heartbeatAt = Date.now();
         await State.updateOne({ _id: STATE_ID }, { $set: { heartbeatAt: new Date() } }, { upsert: true });
       }
-      const { waitMs } = await sender.step();
-      await sleep(waitMs);
+      const { waitMs, reason } = await bandwidthTracker.runWithProcess('WhatsApp Worker', 'worker', () => sender.step());
+      if (['empty', 'paused', 'offline'].includes(reason)) {
+        idleSteps += 1;
+        const adaptiveWait = idleSteps <= 2 ? waitMs : idleSteps <= 5 ? 10_000 : 20_000;
+        await sleep(Math.max(waitMs, adaptiveWait));
+      } else {
+        idleSteps = 0;
+        await sleep(waitMs);
+      }
     } catch (error) {
+      idleSteps = 0;
       logger.error({ err: error }, 'sender loop error');
       await sleep(10_000);
     }
