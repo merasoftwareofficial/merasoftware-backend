@@ -176,7 +176,7 @@ async function tick({ fullReconcile = true, orderIds = null, runCapture = proces
 async function main() {
   configuration();
   if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is required.');
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000, monitorCommands: true });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000, heartbeatFrequencyMS: 30_000, monitorCommands: true });
   bandwidthTracker.attachMongoClient(mongoose.connection.getClient());
   await Outbox.init();
   if (process.argv.includes('--once')) {

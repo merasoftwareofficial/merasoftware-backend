@@ -148,6 +148,14 @@ async function recordLaterSends(row) {
 
 async function followFinalMessages() {
   if (process.env.ENABLE_WHATSAPP !== 'true') return { reason: 'disabled' };
+  const hasWork = await FinalMessage.exists({
+    $or: [
+      { status: { $in: ['review', 'queued', 'waiting'] } },
+      { status: 'replied', $or: [{ decision: null }, { lastIgnoredAt: { $ne: null } }] },
+      { status: 'dead', $or: [{ expiryEnabled: true, expiryQueuedAt: null }, { expirySentAt: null }, { lastReplyAt: { $ne: null } }, { lastIgnoredAt: { $ne: null } }, { 'outboundChecks.0': { $exists: true } }] },
+    ],
+  });
+  if (!hasWork) return { reason: 'done' };
   const owner = crypto.randomUUID();
   const time = new Date();
   try {

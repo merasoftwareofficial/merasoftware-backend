@@ -31,7 +31,7 @@ if (!config.embedded) {
 // Render's free plan shows no memory graph; this line in the logs is how memory is watched.
 setInterval(() => console.log(`[whatsapp] memory rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`), 10 * 60_000).unref();
 
-await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 10_000, monitorCommands: true });
+await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 10_000, heartbeatFrequencyMS: 30_000, monitorCommands: true });
 bandwidthTracker.attachMongoClient(mongoose.connection.getClient());
 console.log('Connected to DB');
 

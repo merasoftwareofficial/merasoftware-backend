@@ -10,6 +10,7 @@ async function connnectDB () {
 
     await mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 10000,
+      heartbeatFrequencyMS: 30000,
       monitorCommands: true,
     });
     bandwidthTracker.attachMongoClient(mongoose.connection.getClient());

@@ -185,6 +185,7 @@ async function copyReplyResults() {
 
 async function processInbox() {
   if (process.env.ENABLE_WHATSAPP !== 'true') return { reason: 'disabled', closed: 0 };
+  if (!await Inbox.exists({ $or: [{ status: 'new' }, { replyStatus: { $in: UNSETTLED } }] })) return { reason: 'done', closed: 0 };
   const owner = crypto.randomUUID();
   const time = new Date();
   try {

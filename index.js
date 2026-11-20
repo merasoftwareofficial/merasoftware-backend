@@ -44,7 +44,7 @@ if (cronsEnabled) {
 // Reservation jobs have their own switch (owner decision 12): enabling them never starts the
 // wallet-charging renewal crons above. Each job also checks its own feature flag.
 if (process.env.OFFER_RESERVATION_JOBS_ENABLED === 'true') {
-  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Offer & Package Reservation Cron', 'cron', async () => {
+  cron.schedule('*/5 * * * *', () => bandwidthTracker.runWithProcess('Offer & Package Reservation Cron', 'cron', async () => {
     await require('./helpers/offerReservationConfirmation').drainReservationConfirmations().catch(error => console.error('[reservation confirmation]', error.message));
     await require('./helpers/reservationRepricing').reconcileDueReservations().catch(error => console.error('[reservation repricing]', error.message));
     await require('./helpers/reservationClosure').closeDueReservations().catch(error => console.error('[reservation closure]', error.message));
@@ -72,7 +72,7 @@ if (process.env.BROADCAST_JOBS_ENABLED === 'true') {
 // Auto Reply: on with WhatsApp itself, no switch of its own; the admin's switches are in the database.
 if (process.env.ENABLE_WHATSAPP === 'true') {
   cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Auto Reply Inbox Cron', 'cron', () => require('./helpers/autoReplyJobs').processInbox().catch(error => console.error('[auto reply]', error.message))));
-  cron.schedule('* * * * *', () => bandwidthTracker.runWithProcess('Final Message Cron', 'cron', () => require('./helpers/finalMessageJobs').followFinalMessages().catch(error => console.error('[final message]', error.message))));
+  cron.schedule('*/3 * * * *', () => bandwidthTracker.runWithProcess('Final Message Cron', 'cron', () => require('./helpers/finalMessageJobs').followFinalMessages().catch(error => console.error('[final message]', error.message))));
 }
 
 const allowedOrigins = getAllowedOrigins();

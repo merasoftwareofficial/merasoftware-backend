@@ -48,6 +48,12 @@ async function reconcile() {
 
 async function dispatch({ now = new Date() } = {}) {
   if (process.env.BROADCAST_JOBS_ENABLED !== 'true') return { reason: 'disabled' };
+  const [hasBroadcast, hasQueued, hasGate] = await Promise.all([
+    Broadcast.exists({ state: { $in: ['preparing', 'ready'] } }),
+    Recipient.exists({ channel: { $ne: 'email' }, state: { $in: QUEUED } }),
+    Gate.exists({ _id: 'main', recipientId: { $exists: true } }),
+  ]);
+  if (!hasBroadcast && !hasQueued && !hasGate) return { reason: 'empty' };
   const owner = crypto.randomUUID();
   // Lease makes recovery possible; the persistent gate + queue uniqueness fence stale claimants.
   try {
@@ -81,7 +87,7 @@ async function dispatch({ now = new Date() } = {}) {
       await Broadcast.updateOne({ _id: preparing._id, state: 'preparing' }, { $set: { state: 'ready', total, excluded } });
     }
     await releaseEmail(ownsLease);
-    const state = await State.findById(STATE_ID).lean();
+    const state = await State.findById(STATE_ID).select('-qr').lean();
     const stopped = stoppedReason(state, now);
     if (stopped) return { reason: stopped };
     if (inQuietHours(effectiveSettings(state?.settings), now, loadConfig().timeZone)) return { reason: 'quiet-hours' };
