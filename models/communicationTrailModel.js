@@ -19,7 +19,7 @@ const communicationTrailSchema = new Schema({
   activatedAt: { type: Date, default: null },
   revision: { type: Number, default: 1, min: 1 },
   createdBy: { type: Schema.Types.ObjectId, ref: 'user', required: true },
-}, { timestamps: true });
+}, { timestamps: true, minimize: false });
 
 communicationTrailSchema.index({ enabled: 1, updatedAt: -1 });
 communicationTrailSchema.index({ triggers: 1 });
