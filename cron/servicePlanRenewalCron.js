@@ -4,6 +4,7 @@ const invoiceModel = require('../models/invoiceModel');
 const { createProjectInvoice } = require('../helpers/paymentRecording');
 const { getNextCycleNumber, isFinalCycle, isFixedTenureService, getCycleDates, resolveServiceRenewalPrice } = require('../helpers/serviceBillingSchedule');
 const { syncServiceBillingStatement } = require('../helpers/serviceBillingStatement');
+const { planExpired } = require('../helpers/actionEvents');
 
 const processServicePlanRenewals = async (now = new Date()) => {
   const dueServices = await orderModel.find({ isServicePlan: true, servicePlanStatus: 'active', serviceNextBillingDate: { $lte: now } });
@@ -15,6 +16,7 @@ const processServicePlanRenewals = async (now = new Date()) => {
       service.serviceNextBillingDate = null;
       await service.save();
       await syncServiceBillingStatement(service);
+      await planExpired(service).catch(() => {});
       continue;
     }
     if (service.paymentPolicy) {
@@ -28,6 +30,7 @@ const processServicePlanRenewals = async (now = new Date()) => {
       service.serviceNextBillingDate = null;
       await service.save();
       await syncServiceBillingStatement(service);
+      await planExpired(service).catch(() => {});
       continue;
     }
     if (!isFixedTenureService(service) && !service.serviceAutoRenew) {

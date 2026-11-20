@@ -5,6 +5,7 @@ const User = require('../models/userModel');
 const Lead = require('../models/leadModel');
 const { ACTIONS } = require('../helpers/actionEvents');
 const { createRule, updateRule, setRuleEnabled, deleteRule } = require('../helpers/actionRules');
+const { listTrails, createTrail, updateTrail, setTrailEnabled, deleteTrail } = require('../helpers/communicationTrails');
 const { enrollPendingInvoices } = require('../helpers/actionRuleWorker');
 const { migrateLegacyReminderRules, cleanupActionRules } = require('../helpers/migrateLegacyReminderRules');
 
@@ -14,6 +15,12 @@ const handle = fn => async (req, res) => {
   try { res.json({ success: true, data: await fn(req) }); }
   catch (error) { res.status(error.status || 400).json({ success: false, message: error.message }); }
 };
+
+router.get('/trails', handle(() => listTrails()));
+router.post('/trails', handle(req => createTrail(req.body || {}, req.userId)));
+router.put('/trails/:id', handle(req => updateTrail(req.params.id, req.body || {}, req.userId)));
+router.post('/trails/:id/enabled', handle(req => setTrailEnabled(req.params.id, !!req.body?.enabled)));
+router.post('/trails/:id/delete', handle(req => deleteTrail(req.params.id)));
 
 router.get('/', handle(() => ActionRule.find().sort({ createdAt: -1 }).lean()));
 router.post('/', handle(req => createRule(req.body || {}, req.userId)));

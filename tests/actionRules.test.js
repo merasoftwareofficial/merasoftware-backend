@@ -26,6 +26,7 @@ before(async () => {
 after(async () => { emailController.sendSystemMail = realSend; await mongoose.disconnect(); if (database) await database.stop(); });
 beforeEach(async () => {
   process.env.ACTION_RULES_ENABLED = 'true';
+  process.env.ACTION_RULES_LEGACY_ENABLED = 'true';
   for (const collection of Object.values(mongoose.connection.collections)) await collection.deleteMany({});
   [admin, customer] = await User.create([
     { name: 'Admin', email: 'admin@example.test', roles: ['admin'] },
@@ -86,7 +87,7 @@ test('invoice created schedules steps and repeats once, even if handled twice', 
   const days = runs.map(run => Math.round((run.dueAt - event.occurredAt) / DAY));
   assert.deepEqual(days, [0, 3, 5, 7]);
   assert.equal(String(runs[0].entityId), String(bill._id));
-  assert.equal(runs[0].subject, 'Invoice created');
+  assert.equal(runs[0].subject, 'Payment Due (Any Bill / Order / Installment / Renewal)');
 });
 
 test('full payment stops the remaining reminders of that invoice only', async () => {
@@ -1182,4 +1183,95 @@ test('Admin Review mode migrated template stages synchronous EmailDraft for inst
   // 2. Worker processes the event and skips creating a duplicate background run for the already-staged review template
   await worker.processEvents();
   assert.equal(await Run.countDocuments({ ruleId: reviewRule._id, entityId: cancelledOrder._id }), 0);
+});
+
+test('Phase 3 trails-only default: legacy trailId:null rules stay isolated while new CommunicationTrail rules fire', async () => {
+  delete process.env.ACTION_RULES_LEGACY_ENABLED;
+  const { createTrail } = require('../helpers/communicationTrails');
+  const legacyRule = await activeRule({
+    action: 'invoice.created',
+    control: 'auto',
+    stopOn: ['payment.received'],
+    steps: [{ afterDays: 0, channel: 'whatsapp', text: 'Legacy should not fire' }],
+  });
+  const trail = await createTrail({
+    triggers: ['invoice.created'],
+    scope: 'all',
+    instant: {
+      audience: 'client',
+      client: { channel: 'whatsapp', subject: '', text: 'New trail instant msg' },
+      admin: { channel: 'whatsapp', subject: '', text: '' },
+    },
+    reminders: [],
+  }, admin._id);
+  const inv = await invoice();
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(await Run.countDocuments({ ruleId: legacyRule._id }), 0);
+  const trailRules = await Rule.find({ trailId: trail._id }).lean();
+  assert.equal(trailRules.length, 1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mail.text, 'New trail instant msg');
+  assert.equal(await worker.hasActiveActionRule('invoice.created'), true);
+});
+
+test('Phase 3 admin multi-number WhatsApp + reminder.automated ignores stale EmailPolicy mode:off', async () => {
+  delete process.env.ACTION_RULES_LEGACY_ENABLED;
+  const prevWa = process.env.ENABLE_WHATSAPP;
+  process.env.ENABLE_WHATSAPP = 'true';
+  try {
+    const { EmailPolicy } = require('../models/emailControlModel');
+    const { availability } = require('../helpers/reviewDelivery');
+    const { createTrail } = require('../helpers/communicationTrails');
+
+    await EmailPolicy.create({ event: 'reminder.automated', mode: 'off', channel: 'whatsapp' });
+    await User.updateOne({ _id: admin._id }, {
+      $set: { adminContact: { email: 'ops@example.test', whatsappNumbers: ['9876543211', '9876543212'] } },
+    });
+
+    const rendered = await emailController.applyDefault('reminder.automated', {
+      reviewed: true, to: ['ops@example.test'], subject: 'Admin alert', text: 'Hello admin',
+    }, {});
+    assert.ok(rendered && rendered.text === 'Hello admin');
+
+    const trail = await createTrail({
+      triggers: ['invoice.created'],
+      scope: 'all',
+      instant: {
+        audience: 'admin',
+        client: { channel: 'whatsapp', subject: '', text: '' },
+        admin: { channel: 'whatsapp', subject: '', text: 'Admin instant alert' },
+      },
+      reminders: [],
+    }, admin._id);
+    const trailRule = await Rule.findOne({ trailId: trail._id }).lean();
+    const run = await Run.create({
+      ruleId: trailRule._id,
+      ruleRevision: trailRule.revision,
+      source: 'action',
+      action: 'invoice.created',
+      audience: 'admin',
+      occurrenceKey: `test-admin-wa:${Date.now()}`,
+      step: 0,
+      entityId: (await invoice())._id,
+      clientId: customer._id,
+      dueAt: new Date(),
+      channel: 'whatsapp',
+      subject: 'Admin alert',
+      text: 'Admin instant alert',
+      status: 'scheduled',
+    });
+
+    const avail = await availability({ event: 'reminder.automated', to: ['ops@example.test'], reminderRunId: run._id });
+    assert.equal(avail.choices.find(c => c.id === 'whatsapp')?.enabled, true);
+    const phones = avail.recipients.map(r => r.phone).sort();
+    assert.deepEqual(phones, ['919876543211', '919876543212']);
+
+    for (const phone of phones) {
+      const check = await worker.actionEligibility(run, { phone });
+      assert.equal(check.allowed, true);
+    }
+  } finally {
+    if (prevWa === undefined) delete process.env.ENABLE_WHATSAPP;
+    else process.env.ENABLE_WHATSAPP = prevWa;
+  }
 });

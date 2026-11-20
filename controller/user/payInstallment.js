@@ -110,12 +110,13 @@ const payInstallment = async (req, res) => {
           transactionData.upiTransactionId = upiTransactionId;
         }
         
-        await Transaction.create(transactionData);
+        const createdTx = await Transaction.create(transactionData);
         
         // Update installment status to pending but don't mark as paid yet
         order.installments[installmentIndex].paymentStatus = 'pending-approval';
         
         await order.save();
+        await require('../../helpers/actionEvents').orderUpiPending(order, { txId: createdTx._id }).catch(() => {});
         
         return res.status(200).json({
           success: true,

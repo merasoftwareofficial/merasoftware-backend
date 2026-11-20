@@ -4,9 +4,10 @@ const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
 
 const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
-const CONDITIONS = ['anytime', 'unpaid', 'paid', 'installment_due', 'upload_pending'];
+const CONDITIONS = ['anytime', 'unpaid', 'pending_approval', 'paid', 'installment_due', 'upload_pending'];
+const BASE_DATES = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'];
 const ORIGIN_SURFACES = ['Admin', 'Client', 'Website', 'System'];
-const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'offer_payment'];
+const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'include', 'exclude', 'offer_payment'];
 const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
 const fail = message => { const error = new Error(message); error.status = 400; throw error; };
 const int = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
@@ -40,25 +41,41 @@ function normalizeStep(step = {}, index = 0, isTemplate = false) {
 
 // Checks a rule from the form in plain words. Returns the clean fields to save.
 function cleanRule(raw = {}) {
-  const actionMeta = ACTIONS[raw.action];
-  if (!actionMeta?.trigger) fail('Choose the action that starts this message.');
+  const actionsList = Array.isArray(raw.actions) && raw.actions.length
+    ? [...new Set(raw.actions.filter(a => ACTIONS[a]?.trigger))]
+    : (ACTIONS[raw.action]?.trigger ? [raw.action] : []);
+  if (!actionsList.length) fail('Choose the action that starts this message.');
+  const primaryAction = actionsList[0];
+  const actionMeta = ACTIONS[primaryAction];
   const kind = raw.kind === 'template' ? 'template' : 'reminder';
   const audience = raw.audience === 'admin' ? 'admin' : 'customer';
-  const allowedConditions = (actionMeta.conditions || [{ key: 'anytime' }]).map(c => c.key);
+  const allowedConditions = [...new Set(actionsList.flatMap(a => (ACTIONS[a]?.conditions || [{ key: 'anytime' }]).map(c => c.key)))];
   const condition = raw.condition || 'anytime';
   if (!CONDITIONS.includes(condition) || !allowedConditions.includes(condition)) fail('Choose a valid condition for this action.');
   const minProgress = raw.minProgress !== undefined && raw.minProgress !== null && raw.minProgress !== ''
     ? Number(raw.minProgress)
     : 0;
   if (!int(minProgress, 0, 100)) fail('Minimum progress must be a whole number from 0 to 100%.');
+  const minRemainingLimit = raw.minRemainingLimit !== undefined && raw.minRemainingLimit !== null && raw.minRemainingLimit !== ''
+    ? Number(raw.minRemainingLimit)
+    : null;
+  if (minRemainingLimit !== null && !int(minRemainingLimit, 0, 1000)) fail('Minimum remaining limit must be a whole number from 0 to 1000.');
   const maxRemainingLimit = raw.maxRemainingLimit !== undefined && raw.maxRemainingLimit !== null && raw.maxRemainingLimit !== ''
     ? Number(raw.maxRemainingLimit)
     : null;
   if (maxRemainingLimit !== null && !int(maxRemainingLimit, 0, 1000)) fail('Remaining limit threshold must be a whole number from 0 to 1000.');
+  const baseDate = BASE_DATES.includes(raw.baseDate) ? raw.baseDate : 'due_date';
+  const supportsScope = actionsList.some(a => ACTIONS[a]?.supportsScope);
   const scopeKind = SCOPE_KINDS.includes(raw.scope?.kind) ? raw.scope.kind : 'all';
-  if (scopeKind !== 'all' && !actionMeta.supportsScope) fail('Package/plan scope is not available for this action.');
+  if (scopeKind !== 'all' && !supportsScope) fail('Package/plan scope is not available for this action.');
   const packageSlug = scopeKind === 'package' ? String(raw.scope?.packageSlug || '').trim() : '';
   if (scopeKind === 'package' && !packageSlug) fail('Choose a specific package.');
+  const includedPackages = scopeKind === 'include'
+    ? [...new Set((Array.isArray(raw.scope?.includedPackages) ? raw.scope.includedPackages : []).map(s => String(s || '').trim()).filter(Boolean))]
+    : [];
+  const excludedPackages = scopeKind === 'exclude'
+    ? [...new Set((Array.isArray(raw.scope?.excludedPackages) ? raw.scope.excludedPackages : []).map(s => String(s || '').trim()).filter(Boolean))]
+    : [];
 
   const steps = Array.isArray(raw.steps) ? raw.steps : [];
   if (!steps.length || steps.length > 10) fail('Add 1 to 10 messages.');
@@ -70,16 +87,23 @@ function cleanRule(raw = {}) {
     clean.sort((a, b) => rank(a) - rank(b));
   }
 
-  const times = isTemplate ? 0 : (raw.repeat?.times || 0);
-  const perDay = times ? (raw.repeat?.perDay ?? 1) : 1;
-  if (!int(times, 0, 60)) fail('Repeat can be 0 to 60 times.');
-  if (times && !int(raw.repeat.everyDays, 1, 90)) fail('Repeat every 1 to 90 days.');
-  if (times && !int(perDay, 1, 4)) fail('Repeat can be 1 to 4 times a day.');
-  if (clean.length + times * perDay > MAX_SENDS) fail(`At most ${MAX_SENDS} messages per action.`);
+  const rawRepeatMode = raw.repeat?.mode;
+  const repeatMode = isTemplate ? 'off'
+    : (['off', 'permanent', 'limited'].includes(rawRepeatMode) ? rawRepeatMode : ((raw.repeat?.times || 0) > 0 ? 'limited' : 'off'));
+  const everyDays = repeatMode !== 'off' ? Number(raw.repeat?.everyDays || 1) : 1;
+  const perDay = repeatMode !== 'off' ? Number(raw.repeat?.perDay ?? 1) : 1;
+  const forDays = repeatMode === 'limited' ? Number(raw.repeat?.forDays || 0) : 0;
+  const times = isTemplate || repeatMode === 'off' ? 0
+    : repeatMode === 'permanent' ? 0
+      : (raw.repeat?.times !== undefined ? Number(raw.repeat.times) : Math.min(60, Math.max(1, Math.floor((forDays || 1) / Math.max(1, everyDays)))));
+  if (repeatMode === 'limited' && !int(times, 0, 60)) fail('Repeat can be 0 to 60 times.');
+  if (repeatMode !== 'off' && !int(everyDays, 1, 90)) fail('Repeat every 1 to 90 days.');
+  if (repeatMode !== 'off' && !int(perDay, 1, 4)) fail('Repeat can be 1 to 4 times a day.');
+  if (repeatMode === 'limited' && clean.length + times * perDay > MAX_SENDS) fail(`At most ${MAX_SENDS} messages per action.`);
 
   const stopOn = isTemplate ? [] : [...new Set(Array.isArray(raw.stopOn) ? raw.stopOn : [])];
   if (stopOn.some(key => !ACTIONS[key])) fail('Choose a valid stop action.');
-  if (!isTemplate && clean.length + times > 1 && !stopOn.length) fail('A reminder needs a stop action.');
+  if (!isTemplate && (repeatMode === 'permanent' || clean.length + times > 1) && !stopOn.length) fail('A reminder needs a stop action.');
 
   const rawDoAlso = Array.isArray(raw.doAlso) ? raw.doAlso : [];
   if (rawDoAlso.length > 5) fail('At most 5 automatic steps per rule.');
@@ -105,16 +129,23 @@ function cleanRule(raw = {}) {
   return {
     purpose,
     kind,
-    action: raw.action,
+    action: primaryAction,
+    actions: actionsList,
     actionId: String(raw.actionId || '').trim(),
     originFilter,
     audience,
     condition,
     minProgress,
+    minRemainingLimit,
     maxRemainingLimit,
-    scope: { kind: scopeKind, packageSlug },
+    baseDate,
+    scope: { kind: scopeKind, packageSlug, includedPackages, excludedPackages },
     steps: clean,
-    repeat: times ? { everyDays: raw.repeat.everyDays, times, perDay } : { times: 0, perDay: 1 },
+    repeat: repeatMode === 'permanent'
+      ? { mode: 'permanent', forDays: 0, everyDays, times: 0, perDay }
+      : times
+        ? (rawRepeatMode ? { mode: 'limited', forDays, everyDays, times, perDay } : { everyDays, times, perDay })
+        : { times: 0, perDay: 1 },
     stopOn,
     doAlso,
     control,

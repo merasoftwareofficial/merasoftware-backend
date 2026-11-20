@@ -18,6 +18,8 @@ const HOUR = 3600000;
 const LOCK_MS = 120000;
 const OPEN = ['unpaid', 'partially_paid', 'overdue'];
 const BILLED = ['project', 'plan_renewal'];
+// Fail-closed SSOT filter: only new Automated Message System trails (`trailId != null`) run unless legacy mode is explicitly opted in.
+const activeRuleFilter = () => (process.env.ACTION_RULES_LEGACY_ENABLED === 'true' ? {} : { trailId: { $ne: null } });
 
 async function orderFullyPaid(orderId) {
   if (!orderId) return false;
@@ -55,15 +57,26 @@ function orderRemainingLimit(order) {
   return null;
 }
 
-async function resolveEventContext(event) {
+const ORDER_CONTEXT_SELECT = 'userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments paymentPolicy expectedCompletionDate';
+
+async function orderHasPendingApproval(order) {
+  if (!order?._id) return false;
+  if (Array.isArray(order.installments) && order.installments.some(inst => inst?.paymentStatus === 'pending-approval')) {
+    return true;
+  }
+  const Transaction = require('../models/transactionModel');
+  return !!(await Transaction.exists({ orderId: order._id, status: 'pending', paymentStatus: 'pending-approval' }));
+}
+
+async function resolveEventContext(event, { needsPendingCheck = true, needsUploadCheck = true } = {}) {
   const entityType = ACTIONS[event.action]?.entityType || 'none';
   const originSurface = String(event.details?.originSurface || '').trim();
-  if (entityType === 'none' || entityType === 'package_start' || entityType === 'final_message' || event.action === 'project.created') {
+  if (entityType === 'none' || entityType === 'package_start' || entityType === 'final_message') {
     return {
-      invoice: null, order: null, isPaid: false, isInstallmentDue: false,
-      progress: Number(event.details?.progress || 0), remainingLimit: null,
+      invoice: null, order: null, isPaid: false, isPendingApproval: false, isInstallmentDue: false,
+      progress: Number(event.details?.progress || 0), remainingLimit: event.details?.remainingLimit ?? null,
       isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '',
-      originSurface, dueDate: event.details?.dueDate || null,
+      originSurface, dueDate: event.details?.dueDate || null, expiryDate: null, deadlineDate: null,
     };
   }
   if (entityType === 'reservation') {
@@ -71,45 +84,53 @@ async function resolveEventContext(event) {
     const row = await Reservation.findById(event.entityId).select('expiresAt extendedUntil').lean();
     const dueDate = row ? (row.extendedUntil || row.expiresAt) : (event.details?.dueDate || null);
     return {
-      invoice: null, order: null, isPaid: false, isInstallmentDue: false,
+      invoice: null, order: null, isPaid: false, isPendingApproval: false, isInstallmentDue: false,
       progress: 0, remainingLimit: null,
       isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '',
-      originSurface, dueDate,
+      originSurface, dueDate, expiryDate: dueDate, deadlineDate: dueDate,
     };
   }
   let invoice = null;
   let order = null;
   if (entityType === 'invoice') {
-    invoice = await Invoice.findById(event.entityId).lean();
-    order = invoice?.orderId ? await Order.findById(invoice.orderId).lean() : null;
+    invoice = await Invoice.findById(event.entityId).select('orderId userId invoiceType status amount amountPaid dueDate installmentNumber createdAt').lean();
+    order = invoice?.orderId ? await Order.findById(invoice.orderId).select(ORDER_CONTEXT_SELECT).lean() : null;
   } else {
-    order = await Order.findById(event.entityId).lean();
+    order = await Order.findById(event.entityId).select(ORDER_CONTEXT_SELECT).lean();
     if (order) {
       invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } })
+        .select('orderId userId invoiceType status amount amountPaid dueDate installmentNumber createdAt')
         .sort({ createdAt: -1 }).lean();
     }
   }
   const isPaid = invoice ? !OPEN.includes(invoice.status) : await orderFullyPaid(order?._id);
+  const isPendingApproval = (!isPaid && needsPendingCheck && order) ? await orderHasPendingApproval(order) : false;
   const dueInst = order ? require('./projectDuePayment').dueInstallment(order) : null;
   const isInstallmentDue = !!dueInst || !!(invoice?.installmentNumber && OPEN.includes(invoice.status));
   const progress = Number(order?.projectProgress ?? event.details?.progress ?? 0);
-  const remainingLimit = orderRemainingLimit(order);
+  const remainingLimit = orderRemainingLimit(order) ?? (event.details?.remainingLimit ?? null);
   const isMonthly = invoice?.invoiceType === 'plan_renewal' || !!order?.salesPackage || !!order?.isServicePlan;
   const isOfferPayment = !!order?.paymentPolicy;
   const offerOffsets = Array.isArray(order?.paymentPolicy?.reminderOffsets) ? order.paymentPolicy.reminderOffsets : [];
   const packageSlug = packageSlugOf(order);
-  const hasUploaded = order ? await orderHasUpload(order) : false;
+  const hasUploaded = (needsUploadCheck && order) ? await orderHasUpload(order) : false;
   const dueDate = invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
-  return { invoice, order, isPaid, isInstallmentDue, progress, remainingLimit, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate };
+  const expiryDate = order?.serviceNextBillingDate || dueDate;
+  const deadlineDate = order?.expectedCompletionDate || dueDate;
+  return { invoice, order, isPaid, isPendingApproval, isInstallmentDue, progress, remainingLimit, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate, expiryDate, deadlineDate };
 }
 
 function ruleMatchesContext(rule, ctx) {
   if (Array.isArray(rule.originFilter) && rule.originFilter.length && ctx.originSurface && !rule.originFilter.includes(ctx.originSurface)) return false;
-  if (rule.condition === 'unpaid' && ctx.isPaid) return false;
+  if (rule.condition === 'unpaid' && (ctx.isPaid || ctx.isPendingApproval)) return false;
+  if (rule.condition === 'pending_approval' && !ctx.isPendingApproval) return false;
   if (rule.condition === 'paid' && !ctx.isPaid) return false;
-  if (rule.condition === 'installment_due' && !ctx.isInstallmentDue) return false;
+  if (rule.condition === 'installment_due' && (!ctx.isInstallmentDue || ctx.isPendingApproval)) return false;
   if (rule.condition === 'upload_pending' && ctx.hasUploaded) return false;
   if (Number(rule.minProgress || 0) > 0 && Number(ctx.progress || 0) < Number(rule.minProgress)) return false;
+  if (rule.minRemainingLimit !== null && rule.minRemainingLimit !== undefined) {
+    if (ctx.remainingLimit === null || ctx.remainingLimit === undefined || ctx.remainingLimit < Number(rule.minRemainingLimit)) return false;
+  }
   if (rule.maxRemainingLimit !== null && rule.maxRemainingLimit !== undefined) {
     if (ctx.remainingLimit === null || ctx.remainingLimit === undefined || ctx.remainingLimit > Number(rule.maxRemainingLimit)) return false;
   }
@@ -118,7 +139,23 @@ function ruleMatchesContext(rule, ctx) {
   if (scopeKind === 'monthly' && !ctx.isMonthly) return false;
   if (scopeKind === 'one_time' && ctx.isMonthly) return false;
   if (scopeKind === 'package' && (!rule.scope?.packageSlug || ctx.packageSlug !== rule.scope.packageSlug)) return false;
+  if (scopeKind === 'include') {
+    const inc = Array.isArray(rule.scope?.includedPackages) ? rule.scope.includedPackages : [];
+    if (!inc.length || !ctx.packageSlug || !inc.includes(ctx.packageSlug)) return false;
+  }
+  if (scopeKind === 'exclude') {
+    const exc = Array.isArray(rule.scope?.excludedPackages) ? rule.scope.excludedPackages : [];
+    if (ctx.packageSlug && exc.includes(ctx.packageSlug)) return false;
+  }
   return true;
+}
+
+function resolveBaseDate(rule, occurredAt, dueDate, ctx) {
+  const mode = rule.baseDate || 'due_date';
+  if (mode === 'trigger_date') return occurredAt;
+  if (mode === 'expiry_date') return ctx?.expiryDate || dueDate;
+  if (mode === 'deadline_date') return ctx?.deadlineDate || dueDate;
+  return dueDate;
 }
 
 function stepDueAt(step, occurredAt, dueDate) {
@@ -138,36 +175,56 @@ function stepDueAt(step, occurredAt, dueDate) {
 // Steps first, then repeats after the last step.
 function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = null) {
   const sends = [];
-  if (rule.scope?.kind === 'offer_payment' && ctx?.offerOffsets?.length && dueDate && rule.steps?.length) {
+  const effectiveBase = resolveBaseDate(rule, event.occurredAt, dueDate, ctx);
+  if (rule.scope?.kind === 'offer_payment' && ctx?.offerOffsets?.length && effectiveBase && rule.steps?.length) {
     const baseStep = rule.steps[0];
-    const baseMs = +new Date(dueDate);
+    const baseMs = +new Date(effectiveBase);
     const sortedOffsets = [...ctx.offerOffsets].map(Number).filter(Number.isFinite).sort((a, b) => a - b);
     for (const offsetDays of sortedOffsets) {
       sends.push({ ...baseStep, dueAt: new Date(baseMs + offsetDays * DAY) });
     }
   } else {
     for (const step of rule.steps) {
-      const dueAt = stepDueAt(step, event.occurredAt, dueDate);
+      const dueAt = stepDueAt(step, event.occurredAt, effectiveBase);
       if (dueAt) sends.push({ ...step, dueAt });
     }
   }
   if (!sends.length) return [];
   const last = sends[sends.length - 1];
+  const repeatMode = rule.repeat?.mode === 'permanent'
+    ? 'permanent'
+    : ((rule.repeat?.mode === 'limited' || (rule.repeat?.times || 0) > 0) ? 'limited' : 'off');
+  const everyDays = Math.max(1, Number(rule.repeat?.everyDays || 1));
   const perDay = Math.max(1, Number(rule.repeat?.perDay || 1));
-  for (let n = 1; n <= (rule.repeat?.times || 0); n++) {
-    const dayBase = +last.dueAt + n * rule.repeat.everyDays * DAY;
+  if (repeatMode === 'permanent') {
+    // Rolling permanent repeat: schedule only the first repeat cycle; dispatchRun schedules the next one on send.
+    const dayBase = +last.dueAt + everyDays * DAY;
     for (let slot = 0; slot < perDay; slot++) {
       const offsetMs = Math.round((slot * DAY) / perDay);
       sends.push({ ...last, dueAt: new Date(dayBase + offsetMs) });
     }
+  } else if (repeatMode === 'limited') {
+    const repeatTimes = Number(rule.repeat?.times || 0) || Math.min(60, Math.max(1, Math.floor(Number(rule.repeat?.forDays || 0) / everyDays)));
+    for (let n = 1; n <= repeatTimes; n++) {
+      const dayBase = +last.dueAt + n * everyDays * DAY;
+      for (let slot = 0; slot < perDay; slot++) {
+        const offsetMs = Math.round((slot * DAY) / perDay);
+        sends.push({ ...last, dueAt: new Date(dayBase + offsetMs) });
+      }
+    }
   }
+  // Entity-level dedupe for multi-action trail rules so overlapping events never double-send.
+  const isMultiAction = Array.isArray(rule.actions) && rule.actions.length > 1;
+  const occurrenceKey = (rule.trailId && isMultiAction)
+    ? `trail:${String(rule.trailId)}:entity:${String(event.orderId || event.entityId)}`
+    : event.key;
   return sends.map((send, step) => ({
     ruleId: rule._id,
     ruleRevision: rule.revision,
     source: 'action',
     action: event.action,
     audience: rule.audience || 'customer',
-    occurrenceKey: event.key,
+    occurrenceKey,
     step,
     entityId: event.entityId,
     clientId: event.clientId || null,
@@ -193,12 +250,34 @@ async function handleEvent(event) {
   let keys = event.matchKeys || [];
   if (event.action === 'payment.received' && await orderFullyPaid(event.orderId)) keys = [...keys, `order:${event.orderId}`];
   if (keys.length) {
-    await Run.updateMany({ source: 'action', status: 'scheduled', stopOn: event.action, matchKeys: { $in: keys } },
-      { $set: { status: 'cancelled', reason: `Stopped: ${ACTIONS[event.action].label}.` } });
+    const stopFilter = { source: 'action', status: { $in: ['scheduled', 'queued'] }, stopOn: event.action, matchKeys: { $in: keys } };
+    const matchingRuns = await Run.find(stopFilter).select('_id status').lean();
+    if (matchingRuns.length) {
+      const stopReason = `Stopped: ${ACTIONS[event.action].label}.`;
+      const scheduledIds = matchingRuns.filter(r => r.status === 'scheduled').map(r => r._id);
+      if (scheduledIds.length) {
+        await Run.updateMany({ _id: { $in: scheduledIds }, status: 'scheduled' }, { $set: { status: 'cancelled', reason: stopReason } });
+      }
+      // Also cancel any pending WhatsApp Queue rows belonging to stopped runs.
+      const allStoppedIds = matchingRuns.map(r => r._id);
+      const { Queue, finishedExpiry } = require('../whatsapp/src/models.js');
+      await Queue.updateMany(
+        { reminderRunId: { $in: allStoppedIds }, status: 'pending' },
+        { $set: { status: 'cancelled', lastError: stopReason, expiresAt: finishedExpiry(new Date()) } },
+      );
+    }
   }
-  const rules = await Rule.find({ action: event.action, enabled: true, control: { $in: ['auto', 'review'] }, activatedAt: { $lte: event.occurredAt } }).lean();
+  const rules = await Rule.find({
+    ...activeRuleFilter(),
+    $or: [{ action: event.action }, { actions: event.action }],
+    enabled: true,
+    control: { $in: ['auto', 'review'] },
+    activatedAt: { $lte: event.occurredAt },
+  }).lean();
   if (!rules.length) return;
-  const ctx = await resolveEventContext(event);
+  const needsPendingCheck = rules.some(r => ['unpaid', 'pending_approval', 'installment_due'].includes(r.condition));
+  const needsUploadCheck = rules.some(r => r.condition === 'upload_pending');
+  const ctx = await resolveEventContext(event, { needsPendingCheck, needsUploadCheck });
   const syncReviewed = Array.isArray(event.details?.syncReviewedTemplates) ? event.details.syncReviewedTemplates : [];
   for (const rule of rules) {
     if (DIRECT_TEMPLATE_MIGRATED.has(rule.migratedFrom)) continue;
@@ -233,7 +312,8 @@ async function processEvents(limit = 200) {
 // The check right before sending: the reason for the message must still be true, even if the
 // stop action came through a path that records no event.
 async function stillValid(run) {
-  const rule = await Rule.findOne({ _id: run.ruleId, enabled: true, control: { $in: ['auto', 'review'] } }).select('_id condition minProgress maxRemainingLimit control scope').lean();
+  const rule = await Rule.findOne({ _id: run.ruleId, ...activeRuleFilter(), enabled: true, control: { $in: ['auto', 'review'] } })
+    .select('_id condition minProgress minRemainingLimit maxRemainingLimit control scope repeat').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -259,7 +339,7 @@ async function stillValid(run) {
   const waitsForPayment = (run.stopOn || []).includes('payment.received') || rule.condition === 'unpaid' || rule.condition === 'installment_due';
   const entityType = ACTIONS[run.action]?.entityType || 'none';
   let invoice = null, order = null;
-  if (entityType === 'none' || run.action === 'project.created') {
+  if (entityType === 'none') {
     // Non-order / non-invoice actions need no invoice or order lookup.
   } else if (run.action === 'reservation.start_requested') {
     const Reservation = require('../models/offerReservationModel');
@@ -297,7 +377,8 @@ async function stillValid(run) {
       invoice = await Invoice.findOne({ orderId: order._id, invoiceType: 'plan_renewal', status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
       if (invoice && waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
     } else {
-      invoice = await Invoice.findById(run.entityId).lean();
+      invoice = await Invoice.findById(run.entityId)
+        .select('orderId userId invoiceType status amount amountPaid dueDate installmentNumber offerRemindersPaused').lean();
       if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
       if (rule.scope?.kind === 'offer_payment' && invoice.offerRemindersPaused) return { ok: false, reason: 'Offer reminders are paused for this invoice.' };
       if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
@@ -314,11 +395,23 @@ async function stillValid(run) {
     }
     invoice = await Invoice.findOne({ orderId: order._id, invoiceType: { $in: BILLED }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean();
   }
+  if (rule.condition === 'unpaid' && order && await orderHasPendingApproval(order)) {
+    return { ok: false, reason: 'Payment already submitted by client (pending admin approval).' };
+  }
+  if (rule.condition === 'pending_approval' && (!order || !(await orderHasPendingApproval(order)))) {
+    return { ok: false, reason: 'No client-submitted payment is waiting for admin approval.' };
+  }
   if (rule.condition === 'upload_pending' && order && await orderHasUpload(order)) {
     return { ok: false, reason: 'Customer already uploaded data.' };
   }
   if (Number(rule.minProgress || 0) > 0 && order && Number(order.projectProgress || 0) < Number(rule.minProgress)) {
     return { ok: false, reason: 'Project progress is below rule threshold.' };
+  }
+  if (rule.minRemainingLimit !== null && rule.minRemainingLimit !== undefined && order) {
+    const rem = orderRemainingLimit(order);
+    if (rem === null || rem < Number(rule.minRemainingLimit)) {
+      return { ok: false, reason: 'Remaining upload limit is below rule threshold.' };
+    }
   }
   if (rule.maxRemainingLimit !== null && rule.maxRemainingLimit !== undefined && order) {
     const rem = orderRemainingLimit(order);
@@ -329,9 +422,9 @@ async function stillValid(run) {
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
     if (!contacts.length) return { ok: false, reason: 'No admin contact configured.' };
-    return { ok: true, control: rule.control, client, lead, invoice, order, contacts };
+    return { ok: true, control: rule.control, repeat: rule.repeat, client, lead, invoice, order, contacts };
   }
-  return { ok: true, control: rule.control, client, lead, invoice, order };
+  return { ok: true, control: rule.control, repeat: rule.repeat, client, lead, invoice, order };
 }
 
 // Same check for the email provider and WhatsApp handoff (communicationReminderEligibility.js),
@@ -341,9 +434,22 @@ async function actionEligibility(run, target = {}) {
   if (!check.ok) return { allowed: false, reason: check.reason };
   const digits = value => String(value || '').replace(/\D/g, '');
   if (run.audience === 'admin') {
-    const adminEmails = new Set((await teamRecipients()).map(e => e.toLowerCase()));
-    const adminPhones = new Set((check.contacts || []).flatMap(c => c.numbers).map(n => digits(n).slice(-10)).filter(Boolean));
-    if (target.phone && !adminPhones.has(digits(target.phone).slice(-10))) return { allowed: false, reason: 'Admin WhatsApp destination changed.' };
+    const contacts = check.contacts || [];
+    const adminEmails = new Set(contacts.map(c => String(c.email || '').toLowerCase()).filter(Boolean));
+    const adminPhones = new Set(contacts.flatMap(c => c.numbers || []).map(n => digits(n).slice(-10)).filter(Boolean));
+    if (target.phone) {
+      const target10 = digits(target.phone).slice(-10);
+      if (!adminPhones.has(target10)) {
+        // Admins with no saved WhatsApp numbers in Settings keep their account phone (teamContacts.js).
+        const { savedPhoneFor } = require('./whatsappQueue');
+        for (const c of contacts) {
+          if (c.numbers?.length || !c.email) continue;
+          const fallback = digits(await savedPhoneFor(c.email)).slice(-10);
+          if (fallback) adminPhones.add(fallback);
+        }
+      }
+      if (!adminPhones.has(target10)) return { allowed: false, reason: 'Admin WhatsApp destination changed.' };
+    }
     if (target.emails?.length && target.emails.some(e => !adminEmails.has(String(e).toLowerCase()))) return { allowed: false, reason: 'Admin email destination changed.' };
     return { allowed: true, candidate: check };
   }
@@ -488,6 +594,33 @@ async function dispatchRun(runId, now = new Date()) {
       const draft = await EmailDraft.findOne({ dedupeKey: key }).select('_id delivery sentAt').lean();
       const queued = draft?.delivery?.whatsappStatus === 'queued';
       await finish(queued ? 'queued' : 'sent', { ...(draft?._id ? { emailDraftId: draft._id } : {}), ...(!queued ? { sentAt: draft?.sentAt || new Date() } : {}) });
+      // Rolling Permanent Repeat: schedule the next run only after this one succeeds, if no later step is already scheduled.
+      if (check.repeat?.mode === 'permanent') {
+        const hasNext = await Run.exists({
+          ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey,
+          step: { $gt: run.step }, status: 'scheduled',
+        });
+        if (!hasNext) {
+          const everyDays = Math.max(1, Number(check.repeat.everyDays || 1));
+          const perDay = Math.max(1, Number(check.repeat.perDay || 1));
+          const intervalMs = perDay > 1 ? Math.round(DAY / perDay) : everyDays * DAY;
+          const nextStep = run.step + 1;
+          const nextDue = new Date(Math.max(+new Date(run.dueAt), +now) + intervalMs);
+          await Run.updateOne(
+            { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: run.occurrenceKey, step: nextStep },
+            {
+              $setOnInsert: {
+                ruleId: run.ruleId, ruleRevision: run.ruleRevision, source: 'action', action: run.action,
+                audience: run.audience, occurrenceKey: run.occurrenceKey, step: nextStep, entityId: run.entityId,
+                clientId: run.clientId, leadId: run.leadId, dueAt: nextDue, channel: run.channel,
+                subject: run.subject, text: run.text, stopOn: run.stopOn, doAlso: run.doAlso,
+                matchKeys: run.matchKeys, status: 'scheduled',
+              },
+            },
+            { upsert: true },
+          );
+        }
+      }
       return queued ? 'queued' : 'sent';
     }
     await finish('skipped', { reason: `Delivery ${result}.` });
@@ -516,12 +649,14 @@ async function dispatchDue(now = new Date(), limit = 100) {
 
 // Plans due-date steps for upcoming monthly cycles before the renewal invoice is created.
 async function planProjectedMonthlyRuns() {
+  const projectedActions = ['invoice.created', 'plan.started', 'package.purchased'];
   const rules = await Rule.find({
-    action: { $in: ['invoice.created', 'plan.started'] },
+    ...activeRuleFilter(),
+    $or: [{ action: { $in: projectedActions } }, { actions: { $in: projectedActions } }],
     kind: 'reminder',
     enabled: true,
     control: { $in: ['auto', 'review'] },
-    'scope.kind': { $in: ['all', 'monthly', 'package'] },
+    'scope.kind': { $in: ['all', 'monthly', 'package', 'include', 'exclude'] },
     'steps.timingRef': { $in: ['before_due', 'on_due', 'after_due'] },
   }).lean();
   if (!rules.length) return 0;
@@ -533,9 +668,10 @@ async function planProjectedMonthlyRuns() {
     orderVisibility: { $ne: 'cancelled' },
     servicePlanStatus: 'active',
     serviceAutoRenewalStoppedAt: null,
-  }).select('userId isServicePlan salesPackage servicePlanSnapshot orderItems servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber serviceTotalCycles serviceBillingTenureMonths serviceCyclePrice serviceStartNotifiedAt createdAt currentMonthUpdatesRemaining demoMode projectProgress').lean();
+  }).select('userId isServicePlan salesPackage servicePlanSnapshot orderItems servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber serviceTotalCycles serviceBillingTenureMonths serviceCyclePrice serviceStartNotifiedAt createdAt currentMonthUpdatesRemaining demoMode projectProgress installments expectedCompletionDate').lean();
   if (!orders.length) return 0;
   const needsUploadCheck = rules.some(rule => rule.condition === 'upload_pending');
+  const needsPendingCheck = rules.some(rule => ['unpaid', 'pending_approval', 'installment_due'].includes(rule.condition));
   const ruleIds = rules.map(rule => rule._id);
   let planned = 0;
   for (const order of orders) {
@@ -543,7 +679,14 @@ async function planProjectedMonthlyRuns() {
     if (!candidate) continue;
     const packageSlug = packageSlugOf(order);
     const hasUploaded = needsUploadCheck ? await orderHasUpload(order) : false;
-    const ctx = { invoice: null, order, isPaid: false, isMonthly: true, packageSlug, hasUploaded, originSurface: '', dueDate: candidate.due };
+    const isPendingApproval = needsPendingCheck ? await orderHasPendingApproval(order) : false;
+    const remainingLimit = orderRemainingLimit(order);
+    const progress = Number(order.projectProgress || 0);
+    const ctx = {
+      invoice: null, order, isPaid: false, isPendingApproval, isInstallmentDue: false,
+      progress, remainingLimit, isMonthly: true, packageSlug, hasUploaded, originSurface: '',
+      dueDate: candidate.due, expiryDate: candidate.due, deadlineDate: order.expectedCompletionDate || candidate.due,
+    };
     const occurrenceKey = `projected:${order._id}:${candidate.cycle}`;
     const existingRows = await Run.find({ ruleId: { $in: ruleIds }, occurrenceKey }).select('ruleId ruleRevision step').lean();
     const existingKeys = new Set(existingRows.map(row => `${row.ruleId}:${row.ruleRevision}:${row.step}`));
@@ -589,7 +732,7 @@ async function processActionRules(now = new Date(), { plan = true } = {}) {
 
 async function hasActiveActionRule(action, scopeKind = null) {
   if (!enabled()) return false;
-  const filter = { action, enabled: true, control: { $in: ['auto', 'review'] } };
+  const filter = { ...activeRuleFilter(), $or: [{ action }, { actions: action }], enabled: true, control: { $in: ['auto', 'review'] } };
   if (scopeKind) filter['scope.kind'] = scopeKind;
   return !!(await Rule.exists(filter));
 }

@@ -14,6 +14,31 @@ const router = express.Router();
 const RECENT_ROWS = 20;
 const SWITCHES = ['recognise', 'sendReplies', 'addLeads'];
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+
+// Internal website-to-backend signal bridge (e.g. Website Comment posted/approved).
+// Protected by shared internal secret — never publicly callable.
+router.post('/internal/comment-signal', async (req, res) => {
+  try {
+    const expected = process.env.INTERNAL_ACTION_SIGNAL_SECRET || process.env.PORTAL_INTERNAL_SECRET || '';
+    const provided = String(req.get('x-internal-secret') || '');
+    if (!expected || provided !== expected) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const { type, commentId, blogId, userId, userName, status } = req.body || {};
+    const { commentPosted, commentApproved } = require('../helpers/actionEvents');
+    if (type === 'comment.posted') {
+      await commentPosted({ commentId, blogId, userId, userName, status });
+    } else if (type === 'comment.approved') {
+      await commentApproved({ commentId, blogId, status });
+    } else {
+      return res.status(400).json({ success: false, message: 'Unknown signal type.' });
+    }
+    return res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 router.use(communicationAdmin);
 // Communication > Actions: the list of data-changing actions and the owner's changes to it (admin only, as above).
 router.use('/actions', require('./communicationActions'));

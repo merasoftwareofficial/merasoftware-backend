@@ -23,20 +23,32 @@ const doAlsoStep = new Schema({
 const rule = new Schema({
   name: { type: String, required: true, maxlength: 200 },
   purpose: { type: String, default: '', maxlength: 120 },
+  trailId: { type: Schema.Types.ObjectId, ref: 'CommunicationTrail', default: null },
   kind: { type: String, enum: ['template', 'reminder'], default: 'reminder' },
   action: { type: String, required: true },
+  actions: { type: [String], default: [] },
   actionId: { type: String, default: '' },
   originFilter: { type: [String], default: [] },
   audience: { type: String, enum: ['customer', 'admin'], default: 'customer' },
-  condition: { type: String, enum: ['anytime', 'unpaid', 'paid', 'installment_due', 'upload_pending'], default: 'anytime' },
+  condition: { type: String, enum: ['anytime', 'unpaid', 'pending_approval', 'paid', 'installment_due', 'upload_pending'], default: 'anytime' },
   minProgress: { type: Number, min: 0, max: 100, default: 0 },
+  minRemainingLimit: { type: Number, min: 0, max: 1000, default: null },
   maxRemainingLimit: { type: Number, min: 0, max: 1000, default: null },
+  baseDate: { type: String, enum: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'], default: 'due_date' },
   scope: {
-    kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package', 'offer_payment'], default: 'all' },
+    kind: { type: String, enum: ['all', 'monthly', 'one_time', 'package', 'include', 'exclude', 'offer_payment'], default: 'all' },
     packageSlug: { type: String, default: '' },
+    includedPackages: { type: [String], default: [] },
+    excludedPackages: { type: [String], default: [] },
   },
   steps: { type: [step], default: [] },
-  repeat: { everyDays: { type: Number, min: 1, max: 90 }, times: { type: Number, min: 0, max: 60, default: 0 }, perDay: { type: Number, min: 1, max: 4, default: 1 } },
+  repeat: {
+    mode: { type: String, enum: ['off', 'permanent', 'limited'], default: 'off' },
+    forDays: { type: Number, min: 0, max: 180, default: 0 },
+    everyDays: { type: Number, min: 1, max: 90 },
+    times: { type: Number, min: 0, max: 60, default: 0 },
+    perDay: { type: Number, min: 1, max: 4, default: 1 },
+  },
   stopOn: { type: [String], default: [] },
   doAlso: { type: [doAlsoStep], default: [] },
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'off' },
@@ -49,4 +61,6 @@ const rule = new Schema({
   createdBy: { type: Schema.Types.ObjectId, ref: 'user', required: true },
 }, { timestamps: true });
 rule.index({ action: 1, enabled: 1 });
+rule.index({ actions: 1, enabled: 1 });
+rule.index({ trailId: 1 });
 module.exports = mongoose.models.CommunicationActionRule || mongoose.model('CommunicationActionRule', rule);

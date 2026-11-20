@@ -57,7 +57,7 @@ const DIRECT_MIGRATED_OVERRIDE_EVENTS = new Set([
 ]);
 
 async function migratedRuleFor(event) {
-  if (process.env.ACTION_RULES_ENABLED !== 'true' || !event || event === 'reminder.automated') return null;
+  if (process.env.ACTION_RULES_ENABLED !== 'true' || process.env.ACTION_RULES_LEGACY_ENABLED !== 'true' || !event || event === 'reminder.automated') return null;
   const ActionRule = require('../models/communicationActionRuleModel');
   return ActionRule.findOne({ migratedFrom: `template:${event}` }).lean();
 }
@@ -80,7 +80,7 @@ async function applyDefault(event, mail, values = {}) {
       return { ...mail, ...composeTemplate(template, values, mail.blocks, mail.requiredLinks) };
     }
   }
-  const policy = await EmailPolicy.findOne({ event }).lean();
+  const policy = event === 'reminder.automated' ? null : await EmailPolicy.findOne({ event }).lean();
   // Customer-started mail exists only while its action is On; it is Off until an admin turns it on.
   if (policy?.mode === 'off' || (isCustomerTriggered(event) && policy?.mode !== 'auto')) return null;
   // The lead form's mail is reviewed before the lead is saved: its text is final, never re-templated.
@@ -222,14 +222,15 @@ function requestMiddleware(req, res, next) {
           const matched = matchCatalogAction(req.method, req.originalUrl);
           if (matched?.triggerKey && !scope.emittedActions.includes(matched.triggerKey)) {
             const mongoose = require('mongoose');
-            const rawId = req.params?.customerId || req.params?.orderId || req.params?.projectId || req.params?.leadId || req.params?.id || req.userId;
+            const rawId = req.params?.orderId || req.params?.projectId || req.params?.invoiceId || req.params?.leadId || req.params?.id || req.params?.customerId || req.userId;
             const entityId = rawId && mongoose.Types.ObjectId.isValid(String(rawId)) ? new mongoose.Types.ObjectId(String(rawId)) : new mongoose.Types.ObjectId();
             const clientId = (req.params?.customerId && mongoose.Types.ObjectId.isValid(String(req.params.customerId)))
               ? req.params.customerId
               : (req.userId && mongoose.Types.ObjectId.isValid(String(req.userId)) ? req.userId : null);
             const leadId = (req.params?.leadId && mongoose.Types.ObjectId.isValid(String(req.params.leadId))) ? req.params.leadId : null;
+            const bucket = Math.floor(Date.now() / 5000);
             await emitAction(matched.triggerKey, {
-              key: `${matched.triggerKey}:${matched.id}:${String(entityId)}:${Date.now()}`,
+              key: `${matched.triggerKey}:${matched.id}:${String(entityId)}:${bucket}`,
               entityId,
               clientId,
               leadId,
@@ -323,8 +324,10 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   const policyDraft = await EmailDraft.findOne(query).lean();
   if (!policyDraft) throw new Error('Draft is unavailable');
   if (policyDraft.event.startsWith('website.subscription.') && !access.validatedWebsite) throw new Error('Review this subscription email from the website panel');
-  const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
-  if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
+  if (policyDraft.event !== 'reminder.automated') {
+    const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
+    if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
+  }
   const text = withRequiredLinks(decision.text, policyDraft.requiredLinks, policyDraft.values);
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {

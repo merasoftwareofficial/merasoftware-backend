@@ -36,8 +36,8 @@ async function savedPhoneFor(email) {
  * Admin → Settings (helpers/teamContacts.js), the second as an extra row (alt), as an alternate number is.
  * null when that admin saved no number: the address then keeps its account phone (savedPhoneFor).
  */
-async function teamPhoneRows(draft, email) {
-  if (!require('./emailCatalog').isAdminRecipientEvent(draft.event)) return null;
+async function teamPhoneRows(draft, email, { forceTeam = false } = {}) {
+  if (!forceTeam && !require('./emailCatalog').isAdminRecipientEvent(draft.event)) return null;
   const numbers = await require('./teamContacts').teamNumbersFor(email);
   return numbers && numbers.map((number, index) => ({ email, phone: normalizePhone(number), saved: number, ...(index ? { alt: true } : {}) }));
 }

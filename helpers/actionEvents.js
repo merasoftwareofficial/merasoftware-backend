@@ -2,7 +2,8 @@ const Event = require('../models/communicationActionEventModel');
 
 const PAYMENT_CONDITIONS = [
   { key: 'anytime', label: 'Anytime (always)' },
-  { key: 'unpaid', label: 'Only if payment is pending (unpaid)' },
+  { key: 'unpaid', label: 'Only if payment is still unpaid' },
+  { key: 'pending_approval', label: 'Only if UPI is submitted (waiting for admin approval)' },
   { key: 'paid', label: 'Only if already paid' },
   { key: 'installment_due', label: 'Only if current installment is due (unpaid)' },
 ];
@@ -28,20 +29,20 @@ const FOLDERS = [
 const ACTIONS = {
   // 1. Payments & Invoices
   'invoice.created': {
-    label: 'Invoice created',
+    label: 'Payment Due (Any Bill / Order / Installment / Renewal)',
     folder: 'Payments & Invoices',
-    when: 'When any project, plan, package, installment, or monthly renewal creates a bill (use Unpaid for Payment pending).',
+    when: 'When any project, plan, package, installment, or monthly renewal creates a due bill.',
     entityType: 'invoice',
     trigger: true,
     supportsScope: true,
     supportsLimit: true,
     conditions: PACKAGE_CONDITIONS,
-    defaultStopOn: ['payment.received'],
+    defaultStopOn: ['payment.received', 'order.upi_pending'],
   },
   'payment.received': {
-    label: 'Payment received',
+    label: 'Payment Approved / Recorded (Paid)',
     folder: 'Payments & Invoices',
-    when: 'When an invoice or order is fully paid via order approval, installment, wallet, or mark-paid.',
+    when: 'When an invoice or order is approved, recorded paid, or paid via wallet/installment.',
     entityType: 'invoice',
     trigger: true,
     canStop: true,
@@ -49,21 +50,23 @@ const ACTIONS = {
     conditions: ALWAYS_ONLY,
   },
   'order.upi_pending': {
-    label: 'Order created (UPI pending)',
+    label: 'Payment Submitted by Client (Approval Pending)',
     folder: 'Payments & Invoices',
-    when: 'When a client submits a new order with pending UPI verification.',
+    when: 'When a client submits a UPI order or installment payment waiting for admin approval.',
     entityType: 'order',
     trigger: true,
+    canStop: true,
     supportsScope: true,
     conditions: PAYMENT_CONDITIONS,
-    defaultStopOn: ['payment.received'],
+    defaultStopOn: ['payment.received', 'plan.payment_rejected'],
   },
   'plan.payment_rejected': {
-    label: 'Plan or wallet payment rejected',
+    label: 'Payment Rejected (by Admin)',
     folder: 'Payments & Invoices',
-    when: 'When an admin rejects a submitted plan or wallet payment.',
+    when: 'When an admin rejects a submitted plan, order, or wallet payment.',
     entityType: 'order',
     trigger: true,
+    canStop: true,
     supportsScope: false,
     conditions: ALWAYS_ONLY,
   },
@@ -496,6 +499,38 @@ const ACTIONS = {
     supportsScope: false,
     conditions: ALWAYS_ONLY,
   },
+  'plan.expired': {
+    label: 'Plan / Package Expired',
+    folder: 'Plans & Packages',
+    when: 'When a monthly plan or package expires (can filter by remaining portal upload limit).',
+    entityType: 'order',
+    trigger: true,
+    canStop: true,
+    supportsScope: true,
+    supportsLimit: true,
+    conditions: PACKAGE_CONDITIONS,
+    defaultStopOn: ['payment.received'],
+  },
+  'comment.posted': {
+    label: 'Website Comment / Review Posted',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When a visitor or client posts a new comment or review on the website.',
+    entityType: 'none',
+    trigger: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+    defaultStopOn: ['comment.approved'],
+  },
+  'comment.approved': {
+    label: 'Comment Approved / Moderated',
+    folder: 'Website Content, Products, Broadcast & Settings',
+    when: 'When an admin approves or moderates a website comment.',
+    entityType: 'none',
+    trigger: true,
+    canStop: true,
+    supportsScope: false,
+    conditions: ALWAYS_ONLY,
+  },
 };
 const enabled = () => process.env.ACTION_RULES_ENABLED === 'true';
 
@@ -759,10 +794,10 @@ const uploadCompleted = record => {
   });
 };
 
-const orderUpiPending = order => {
+const orderUpiPending = (order, { txId = null } = {}) => {
   if (!order?._id) return Promise.resolve(false);
   return emitAction('order.upi_pending', {
-    key: `order.upi_pending:${id(order._id)}`,
+    key: txId ? `order.upi_pending:${id(order._id)}:${id(txId)}` : `order.upi_pending:${id(order._id)}`,
     entityId: order._id,
     clientId: order.userId?._id || order.userId || null,
     orderId: order._id,
@@ -909,6 +944,48 @@ const reservationExtended = row => {
   });
 };
 
+const planExpired = order => {
+  if (!order?._id) return Promise.resolve(false);
+  return emitAction('plan.expired', {
+    key: `plan.expired:${id(order._id)}:${order.serviceCurrentCycleNumber || 1}`,
+    entityId: order._id,
+    clientId: order.userId || null,
+    orderId: order._id,
+    matchKeys: [`order:${id(order._id)}`],
+    details: { remainingLimit: order.currentMonthUpdatesRemaining ?? null },
+  });
+};
+
+const commentPosted = ({ commentId, blogId = '', userId = null, userName = '', status = 'pending' } = {}) => {
+  if (!commentId) return Promise.resolve(false);
+  const mongoose = require('mongoose');
+  const entityId = mongoose.Types.ObjectId.isValid(String(commentId))
+    ? new mongoose.Types.ObjectId(String(commentId))
+    : new mongoose.Types.ObjectId();
+  const clientId = userId && mongoose.Types.ObjectId.isValid(String(userId)) ? userId : null;
+  return emitAction('comment.posted', {
+    key: `comment.posted:${String(commentId)}`,
+    entityId,
+    clientId,
+    matchKeys: [`comment:${String(commentId)}`],
+    details: { commentId: String(commentId), blogId: String(blogId || ''), userName: String(userName || ''), status: String(status || '') },
+  });
+};
+
+const commentApproved = ({ commentId, blogId = '', status = 'visible' } = {}) => {
+  if (!commentId) return Promise.resolve(false);
+  const mongoose = require('mongoose');
+  const entityId = mongoose.Types.ObjectId.isValid(String(commentId))
+    ? new mongoose.Types.ObjectId(String(commentId))
+    : new mongoose.Types.ObjectId();
+  return emitAction('comment.approved', {
+    key: `comment.approved:${String(commentId)}`,
+    entityId,
+    matchKeys: [`comment:${String(commentId)}`],
+    details: { commentId: String(commentId), blogId: String(blogId || ''), status: String(status || '') },
+  });
+};
+
 const STOP_CHOICES = Object.entries(ACTIONS)
   .filter(([, meta]) => meta.canStop)
   .map(([key, meta]) => ({ key, label: meta.label }));
@@ -951,4 +1028,7 @@ module.exports = {
   projectStepUpdated,
   packagePurchased,
   reservationExtended,
+  planExpired,
+  commentPosted,
+  commentApproved,
 };

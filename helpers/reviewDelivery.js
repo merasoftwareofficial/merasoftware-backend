@@ -7,8 +7,10 @@ const fail = (message, status = 409) => { throw Object.assign(new Error(message)
 async function availability(draft) {
   const emails = draft.to || [];
   const email = emails.length > 0 && emails.every(value => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value));
+  let isAdminRun = false;
   if (draft.reminderRunId) {
-    const run = await require('../models/communicationReminderRunModel').findById(draft.reminderRunId).select('source').lean();
+    const run = await require('../models/communicationReminderRunModel').findById(draft.reminderRunId).select('source audience').lean();
+    isAdminRun = run?.audience === 'admin';
     if (run?.source === 'broadcast') {
       const result = await require('./communicationReminderEligibility').maySendReminder(draft.reminderRunId);
       if (!result.allowed) fail(result.reason);
@@ -18,9 +20,9 @@ async function availability(draft) {
   }
   // Team mail to the admins: the numbers saved in Admin → Settings, and WhatsApp goes to every admin that has one
   // (an admin without a number still gets the email). Everyone else: each recipient must have a number.
-  const team = isAdminRecipientEvent(draft.event);
+  const team = isAdminRun || isAdminRecipientEvent(draft.event);
   if (team && emails.length) {
-    const rows = (await Promise.all(emails.map(async address => await teamPhoneRows(draft, address)
+    const rows = (await Promise.all(emails.map(async address => await teamPhoneRows(draft, address, { forceTeam: team })
       || [{ email: address, phone: normalizePhone(await savedPhoneFor(address)) }]))).flat();
     return choicesFor(draft, { email, whatsapp: rows.some(row => row.phone), recipients: rows });
   }
@@ -47,7 +49,7 @@ async function choicesFor(draft, { email, whatsapp: reachable, recipients: all }
 }
 // The action's "Send via" (emailCatalog.js channelFor): every send without an explicit choice uses it.
 async function actionChannel(event) {
-  if (process.env.ACTION_RULES_ENABLED === 'true' && event) {
+  if (process.env.ACTION_RULES_ENABLED === 'true' && process.env.ACTION_RULES_LEGACY_ENABLED === 'true' && event) {
     const ActionRule = require('../models/communicationActionRuleModel');
     const rule = await ActionRule.findOne({ migratedFrom: `template:${event}` }).select('steps.channel').lean();
     if (rule?.steps?.[0]?.channel) return channelFor(event, { channel: rule.steps[0].channel });
@@ -61,12 +63,12 @@ function channelsFor(selection) {
 const selectionFor = channels => channels.length === 2 ? 'both' : channels[0];
 
 async function deliver({ draft, actor, decision, sendEmail, recordHistory, reviewedMail, validateContent }) {
-  const migratedRule = process.env.ACTION_RULES_ENABLED === 'true' && draft.event
+  const migratedRule = process.env.ACTION_RULES_ENABLED === 'true' && process.env.ACTION_RULES_LEGACY_ENABLED === 'true' && draft.event
     ? await require('../models/communicationActionRuleModel').findOne({ migratedFrom: `template:${draft.event}` }).select('enabled control').lean()
     : null;
   if (migratedRule) {
     if (!migratedRule.enabled || migratedRule.control === 'off') fail('Messages for this action are Off.');
-  } else {
+  } else if (draft.event !== 'reminder.automated') {
     const policy = await EmailPolicy.findOne({ event: draft.event }).lean();
     if (policy?.mode === 'off') fail('Messages for this action are Off.');
   }

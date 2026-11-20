@@ -131,6 +131,9 @@ const verifyPaymentController = async (req, res) => {
         
         // Save transaction
         await transaction.save();
+        if (!isWalletRecharge && processedOrderId) {
+            await require('../../helpers/actionEvents').orderUpiPending({ _id: processedOrderId, userId: req.userId }, { txId: transaction._id }).catch(() => {});
+        }
         
         console.log(`New transaction created: ${transaction._id}, Type: ${transactionType}, IsInstallment: ${!!isInstallmentPayment}`);
         
