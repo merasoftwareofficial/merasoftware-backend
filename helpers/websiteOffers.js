@@ -12,7 +12,24 @@ const unavailable = (message) => {
   return error;
 };
 
-const fetchWebsiteCatalogue = async () => {
+const CACHE_TTL_MS = 5 * 60_000;
+let cachedCatalogue = null;
+let inflightCatalogue = null;
+let cacheEpoch = 0;
+let cacheInTest = false;
+
+const isCacheEnabled = () => (process.env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT && !process.execArgv.includes('--test')) || cacheInTest;
+const clearWebsiteOffersCache = () => {
+  cacheEpoch += 1;
+  cachedCatalogue = null;
+  inflightCatalogue = null;
+};
+const setWebsiteOffersCacheForTest = (enabled) => {
+  cacheInTest = Boolean(enabled);
+  clearWebsiteOffersCache();
+};
+
+const loadWebsiteCatalogue = async () => {
   const origin = process.env.PORTFOLIO_WEBSITE_URL;
   const secret = process.env.PORTFOLIO_INTEGRATION_SECRET || "";
   if (!origin || secret.length < 32) {
@@ -43,6 +60,26 @@ const fetchWebsiteCatalogue = async () => {
     .map(({ slug, title }) => ({ slug, title }));
   return { offers, packagePages };
 };
+
+const fetchWebsiteCatalogue = async () => {
+  if (!isCacheEnabled()) return loadWebsiteCatalogue();
+  if (cachedCatalogue && cachedCatalogue.expiresAt > Date.now()) return cachedCatalogue.value;
+  if (inflightCatalogue) return inflightCatalogue;
+
+  const startEpoch = cacheEpoch;
+  inflightCatalogue = loadWebsiteCatalogue()
+    .then((value) => {
+      // Do not store a stale response if an invalidation arrived mid-flight.
+      if (cacheEpoch === startEpoch) {
+        cachedCatalogue = { value, expiresAt: Date.now() + CACHE_TTL_MS };
+      }
+      return value;
+    })
+    .finally(() => {
+      if (cacheEpoch === startEpoch) inflightCatalogue = null;
+    });
+  return inflightCatalogue;
+};
 const fetchLiveWebsiteOffers = async () => (await fetchWebsiteCatalogue()).offers.filter(offer => (!offer.status || offer.status === 'published') && Date.parse(offer.endsAt) > Date.now());
 
 // The offer a project may be attached to — re-checked server-side at create time, because an
@@ -52,4 +89,4 @@ const findLiveWebsiteOffer = async (slug) => {
   return offers.find((offer) => offer.slug === slug) || null;
 };
 
-module.exports = { fetchWebsiteCatalogue, fetchLiveWebsiteOffers, findLiveWebsiteOffer };
+module.exports = { fetchWebsiteCatalogue, fetchLiveWebsiteOffers, findLiveWebsiteOffer, clearWebsiteOffersCache, setWebsiteOffersCacheForTest };

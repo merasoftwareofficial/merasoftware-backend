@@ -219,6 +219,15 @@ router.patch('/admin/sales-packages/page-unlink', authToken, require('../control
 router.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
 router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
 router.patch('/integration/sales-packages/quote', require('../controller/order/salesPackagesController').integrationQuote);
+router.post('/integration/website-offers/invalidate', (req, res) => {
+  try {
+    require('../helpers/integrationAuth').requireIntegration(req);
+    require('../helpers/websiteOffers').clearWebsiteOffersCache();
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+});
 // Flexible Plans: public plan catalogue + estimator quote for the website (bearer, helpers/integrationAuth.js).
 router.get('/integration/plan-catalogue', require('../controller/order/servicePlanQuote').integrationCatalogue);
 router.patch('/integration/plan-catalogue/quote', require('../controller/order/servicePlanQuote').integrationQuote);
