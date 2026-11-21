@@ -72,11 +72,19 @@ async function resolveEventContext(event, { needsPendingCheck = true, needsUploa
   const entityType = ACTIONS[event.action]?.entityType || 'none';
   const originSurface = String(event.details?.originSurface || '').trim();
   if (entityType === 'none' || entityType === 'package_start' || entityType === 'final_message') {
+    let linkedOrder = null;
+    if (entityType === 'none' && event.orderId) {
+      linkedOrder = await Order.findById(event.orderId).select(ORDER_CONTEXT_SELECT).lean();
+    }
     return {
-      invoice: null, order: null, isPaid: false, isPendingApproval: false, isInstallmentDue: false,
-      progress: Number(event.details?.progress || 0), remainingLimit: event.details?.remainingLimit ?? null,
-      isMonthly: false, isOfferPayment: false, offerOffsets: [], packageSlug: '',
-      originSurface, dueDate: event.details?.dueDate || null, expiryDate: null, deadlineDate: null,
+      invoice: null, order: linkedOrder, isPaid: false, isPendingApproval: false, isInstallmentDue: false,
+      progress: Number(linkedOrder?.projectProgress ?? event.details?.progress ?? 0),
+      remainingLimit: orderRemainingLimit(linkedOrder) ?? (event.details?.remainingLimit ?? null),
+      isMonthly: !!linkedOrder?.salesPackage || !!linkedOrder?.isServicePlan,
+      isOfferPayment: !!linkedOrder?.paymentPolicy,
+      offerOffsets: Array.isArray(linkedOrder?.paymentPolicy?.reminderOffsets) ? linkedOrder.paymentPolicy.reminderOffsets : [],
+      packageSlug: packageSlugOf(linkedOrder),
+      originSurface, dueDate: event.details?.dueDate || null, expiryDate: linkedOrder?.serviceNextBillingDate || null, deadlineDate: linkedOrder?.expectedCompletionDate || null,
     };
   }
   if (entityType === 'reservation') {

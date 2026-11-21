@@ -74,6 +74,10 @@ test('the phone comes from the user account (any letter case), else from the new
 test('the message is the email subject in bold, then the email text unchanged', () => {
   assert.equal(messageText({ subject: 'Payment *reminder*', plain: 'Hello\n\n- Item' }), '*Payment reminder*\n\nHello\n\n- Item');
   assert.equal(messageText({ subject: '', text: 'Only text' }), 'Only text');
+  assert.equal(
+    messageText({ event: 'reminder.automated', subject: 'Payment Due (Any Bill / Order)', plain: '*Custom Heading*\n\nPlease pay' }),
+    '*Custom Heading*\n\nPlease pay',
+  );
 });
 
 test('a legacy retry: a sent email queues one WhatsApp per recipient; without a usable phone the row is skipped with the reason', async () => {

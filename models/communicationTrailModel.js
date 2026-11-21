@@ -14,6 +14,7 @@ const communicationTrailSchema = new Schema({
   selectedPackages: { type: [String], default: [] },
   instant: { type: Schema.Types.Mixed, default: () => ({ audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } }) },
   reminders: { type: [Schema.Types.Mixed], default: [] },
+  stages: { type: [Schema.Types.Mixed], default: [] },
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'auto' },
   enabled: { type: Boolean, default: true },
   activatedAt: { type: Date, default: null },

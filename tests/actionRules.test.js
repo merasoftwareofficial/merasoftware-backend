@@ -267,7 +267,7 @@ test('admin audience resolves and verifies against configured teamContacts', asy
   assert.equal((await worker.actionEligibility(run, { phone: '+911111122222' })).allowed, false);
 });
 
-test('action-aware validation rejects unsupported condition or scope for payment.received', () => {
+test('action-aware validation rejects unsupported condition or scope for non-scoped action', () => {
   assert.throws(() => cleanRule({
     kind: 'template',
     action: 'payment.received',
@@ -276,7 +276,7 @@ test('action-aware validation rejects unsupported condition or scope for payment
   }), /valid condition/i);
   assert.throws(() => cleanRule({
     kind: 'template',
-    action: 'payment.received',
+    action: 'user.signed_up',
     condition: 'anytime',
     scope: { kind: 'monthly' },
     steps: [{ timingRef: 'after_action', days: 0, channel: 'whatsapp', text: 'Thanks' }],
@@ -1366,4 +1366,163 @@ test('3-stage SSOT trail loop: Template 1 -> Reminder 1 -> Stop(UPI) -> Template
   assert.equal(await Run.countDocuments({ ruleId: stage2RemRule._id, status: 'cancelled' }), 1);
   assert.equal(sent.length, 3);
   assert.equal(sent[2].mail.text, 'Stage 3 Template: Payment approved');
+});
+
+test('Linear stages[] + supportsScope: monthly trail fires on monthly payment.received & upload.completed, ignores one-time', async () => {
+  delete process.env.ACTION_RULES_LEGACY_ENABLED;
+  const Order = require('../models/orderProductModel');
+  const UpdateRequest = require('../models/updateRequestModel');
+  const { createTrail } = require('../helpers/communicationTrails');
+  const { uploadCompleted } = require('../helpers/actionEvents');
+
+  const monthlyOrder = await Order.create({
+    userId: customer._id,
+    price: 1999,
+    isServicePlan: true,
+    salesPackage: { packageSlug: 'monthly-pack', packageName: 'Monthly Pack', months: 1 },
+    orderItems: [{ name: 'Monthly Pack', qty: 1, price: 1999 }],
+  });
+  const onetimeOrder = await Order.create({
+    userId: customer._id,
+    price: 4999,
+    isServicePlan: false,
+    orderItems: [{ name: 'One-Time Site', qty: 1, price: 4999 }],
+  });
+
+  const trail = await createTrail({
+    triggers: ['invoice.created'],
+    scope: 'monthly',
+    instant: {
+      audience: 'client',
+      client: { channel: 'email', subject: 'Monthly bill', text: 'Monthly S1 Template' },
+      admin: { channel: 'whatsapp', subject: '', text: '' },
+    },
+    reminders: [{
+      id: 1,
+      startTrigger: '__main__',
+      audience: 'client',
+      clientMode: 'separate',
+      adminMode: 'separate',
+      clientSteps: [{ amount: 3, unit: 'days', pos: 'before', channel: 'email', subject: 'Pay monthly', text: 'Monthly S1 Rem' }],
+      adminSteps: [],
+      repeatMode: 'off',
+      countDaysFrom: 'due_date',
+      condition: 'unpaid',
+      stopOn: ['payment.received'],
+    }],
+    stages: [
+      {
+        id: 2,
+        trigger: 'payment.received',
+        instant: {
+          audience: 'client',
+          client: { channel: 'email', subject: 'Monthly paid', text: 'Monthly S2 Paid Template' },
+          admin: { channel: 'whatsapp', subject: '', text: '' },
+        },
+        reminder: null,
+      },
+      {
+        id: 3,
+        trigger: 'upload.completed',
+        instant: {
+          audience: 'client',
+          client: { channel: 'email', subject: 'Upload done', text: 'Monthly S3 Upload Template' },
+          admin: { channel: 'whatsapp', subject: '', text: '' },
+        },
+        reminder: null,
+      },
+    ],
+  }, admin._id);
+
+  assert.equal(await Rule.countDocuments({ trailId: trail._id }), 4);
+
+  const due = new Date(Date.now() + 10 * DAY);
+  const [mBill, oBill] = [
+    await invoice({ orderId: monthlyOrder._id, dueDate: due }),
+    await invoice({ orderId: onetimeOrder._id, dueDate: due }),
+  ];
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mail.text, 'Monthly S1 Template');
+
+  // Pay both -> only monthly payment.received triggers Stage 2 Template
+  await markProjectInvoicePaid({ invoice: mBill, customerId: customer._id, paymentMethod: 'cash', actorId: admin._id, amount: 1000 });
+  await markProjectInvoicePaid({ invoice: oBill, customerId: customer._id, paymentMethod: 'cash', actorId: admin._id, amount: 1000 });
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].mail.text, 'Monthly S2 Paid Template');
+
+  // Upload on both -> only monthly upload.completed triggers Stage 3 Template
+  const [mUp, oUp] = await UpdateRequest.create([
+    { userId: customer._id, updatePlanId: monthlyOrder._id, title: 'M files' },
+    { userId: customer._id, updatePlanId: onetimeOrder._id, title: 'O files' },
+  ]);
+  await uploadCompleted(mUp);
+  await uploadCompleted(oUp);
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].mail.text, 'Monthly S3 Upload Template');
+});
+
+test('Multi-trigger Stage 2: entity dedupe prevents double-send and include package scope isolates orders', async () => {
+  delete process.env.ACTION_RULES_LEGACY_ENABLED;
+  const Order = require('../models/orderProductModel');
+  const { createTrail } = require('../helpers/communicationTrails');
+  const { orderUpiPending } = require('../helpers/actionEvents');
+
+  const proOrder = await Order.create({
+    userId: customer._id,
+    price: 3999,
+    isServicePlan: true,
+    salesPackage: { packageSlug: 'pro-growth', packageName: 'Pro Growth', months: 1 },
+    orderItems: [{ name: 'Pro Growth', qty: 1, price: 3999 }],
+  });
+  const otherOrder = await Order.create({
+    userId: customer._id,
+    price: 999,
+    isServicePlan: true,
+    salesPackage: { packageSlug: 'basic-pack', packageName: 'Basic Pack', months: 1 },
+    orderItems: [{ name: 'Basic Pack', qty: 1, price: 999 }],
+  });
+
+  const trail = await createTrail({
+    triggers: ['invoice.created'],
+    scope: 'include',
+    selectedPackages: ['pro-growth'],
+    instant: {
+      audience: 'client',
+      client: { channel: 'email', subject: 'Pro bill', text: 'Pro S1 Template' },
+      admin: { channel: 'whatsapp', subject: '', text: '' },
+    },
+    reminders: [],
+    stages: [{
+      id: 2,
+      triggers: ['order.upi_pending', 'payment.received'],
+      instant: {
+        audience: 'client',
+        client: { channel: 'email', subject: 'Pro update', text: 'Pro S2 Multi-Trigger Template' },
+        admin: { channel: 'whatsapp', subject: '', text: '' },
+      },
+      reminder: null,
+    }],
+  }, admin._id);
+
+  assert.equal(trail.stages[0].triggers.length, 2);
+  const due = new Date(Date.now() + 10 * DAY);
+  const [proBill, otherBill] = [
+    await invoice({ orderId: proOrder._id, dueDate: due }),
+    await invoice({ orderId: otherOrder._id, dueDate: due }),
+  ];
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mail.text, 'Pro S1 Template');
+
+  // Fire BOTH stage 2 triggers on proOrder + both on otherOrder -> proOrder gets sent ONCE (deduped), otherOrder gets 0
+  await orderUpiPending(proOrder, { txId: new mongoose.Types.ObjectId() });
+  await orderUpiPending(otherOrder, { txId: new mongoose.Types.ObjectId() });
+  await markProjectInvoicePaid({ invoice: proBill, customerId: customer._id, paymentMethod: 'cash', actorId: admin._id, amount: 1000 });
+  await markProjectInvoicePaid({ invoice: otherBill, customerId: customer._id, paymentMethod: 'cash', actorId: admin._id, amount: 1000 });
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].mail.text, 'Pro S2 Multi-Trigger Template');
 });

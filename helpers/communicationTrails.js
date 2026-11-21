@@ -167,14 +167,42 @@ function validateAndCompileTrail(raw = {}) {
     ? raw.instant
     : { audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } };
   const reminders = Array.isArray(raw.reminders) ? raw.reminders : [];
+  const rawStages = Array.isArray(raw.stages) ? raw.stages : [];
+  if (rawStages.length > MAX_CHAIN_DEPTH) fail(`Maximum ${MAX_CHAIN_DEPTH} follow-up stages allowed.`);
 
   const compiled = [];
   const topScope = mapScope(scope, selectedPackages, triggers);
   compileInstant(instant, triggers, topScope, control, compiled);
   compileReminders(reminders, triggers, scope, selectedPackages, control, compiled, 0, new Set(triggers));
 
+  const stages = [];
+  for (let i = 0; i < rawStages.length; i++) {
+    const st = rawStages[i] && typeof rawStages[i] === 'object' ? rawStages[i] : {};
+    const rawStageTriggers = Array.isArray(st.triggers) && st.triggers.length
+      ? st.triggers
+      : (st.trigger ? [st.trigger] : []);
+    const stageTriggers = [...new Set(rawStageTriggers.map(k => String(k || '').trim()).filter(k => ACTIONS[k]?.trigger))];
+    if (!stageTriggers.length) fail(`Choose a valid trigger point for stage ${i + 2}.`);
+    const stageInstant = st.instant && typeof st.instant === 'object'
+      ? st.instant
+      : { audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } };
+    const stageReminder = st.reminder && typeof st.reminder === 'object' ? st.reminder : null;
+    const stageScope = mapScope(scope, selectedPackages, stageTriggers);
+    compileInstant(stageInstant, stageTriggers, stageScope, control, compiled);
+    if (stageReminder) {
+      compileReminders([stageReminder], stageTriggers, scope, selectedPackages, control, compiled, 0, new Set(stageTriggers));
+    }
+    stages.push({
+      id: st.id || i + 1,
+      triggers: stageTriggers,
+      trigger: stageTriggers[0],
+      instant: stageInstant,
+      reminder: stageReminder,
+    });
+  }
+
   return {
-    trailFields: { triggers, scope, selectedPackages, instant, reminders, control, enabled },
+    trailFields: { triggers, scope, selectedPackages, instant, reminders, stages, control, enabled },
     compiled,
   };
 }
@@ -238,6 +266,7 @@ async function updateTrail(id, raw, actorId) {
   existing.selectedPackages = trailFields.selectedPackages;
   existing.instant = trailFields.instant;
   existing.reminders = trailFields.reminders;
+  existing.stages = trailFields.stages;
   existing.control = trailFields.control;
   existing.enabled = trailFields.enabled;
   existing.activatedAt = trailFields.enabled ? (existing.activatedAt || new Date()) : null;

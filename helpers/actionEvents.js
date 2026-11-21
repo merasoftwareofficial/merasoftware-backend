@@ -46,7 +46,7 @@ const ACTIONS = {
     entityType: 'invoice',
     trigger: true,
     canStop: true,
-    supportsScope: false,
+    supportsScope: true,
     conditions: ALWAYS_ONLY,
   },
   'order.upi_pending': {
@@ -67,7 +67,7 @@ const ACTIONS = {
     entityType: 'order',
     trigger: true,
     canStop: true,
-    supportsScope: false,
+    supportsScope: true,
     conditions: ALWAYS_ONLY,
   },
   'wallet.recharged': {
@@ -274,7 +274,7 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     canStop: true,
-    supportsScope: false,
+    supportsScope: true,
     conditions: ALWAYS_ONLY,
   },
   'plan.upload_updated': {
