@@ -1275,3 +1275,95 @@ test('Phase 3 admin multi-number WhatsApp + reminder.automated ignores stale Ema
     else process.env.ENABLE_WHATSAPP = prevWa;
   }
 });
+
+test('3-stage SSOT trail loop: Template 1 -> Reminder 1 -> Stop(UPI) -> Template 2 -> Reminder 2 -> Stop(Paid) -> Template 3', async () => {
+  delete process.env.ACTION_RULES_LEGACY_ENABLED;
+  const Order = require('../models/orderProductModel');
+  const { createTrail } = require('../helpers/communicationTrails');
+  const { orderUpiPending } = require('../helpers/actionEvents');
+
+  await User.updateOne({ _id: admin._id }, { $set: { adminContact: { email: admin.email, whatsappNumbers: ['9876543211'] } } });
+  const order = await Order.create({ userId: customer._id, price: 2500, orderItems: [{ name: 'Starter Site', qty: 1, price: 2500 }] });
+
+  const trail = await createTrail({
+    triggers: ['invoice.created'],
+    scope: 'all',
+    instant: {
+      audience: 'client',
+      client: { channel: 'email', subject: 'Bill ready', text: 'Stage 1 Template: Bill ready' },
+      admin: { channel: 'whatsapp', subject: '', text: '' },
+    },
+    reminders: [{
+      id: 1,
+      startTrigger: '__main__',
+      audience: 'client',
+      clientMode: 'separate',
+      adminMode: 'separate',
+      clientSteps: [{ amount: 3, unit: 'days', pos: 'before', channel: 'email', subject: 'Pay soon', text: 'Stage 1 Reminder' }],
+      adminSteps: [],
+      repeatMode: 'off',
+      countDaysFrom: 'due_date',
+      condition: 'unpaid',
+      stopOn: ['order.upi_pending'],
+      stopChains: {
+        'order.upi_pending': {
+          instant: {
+            audience: 'admin',
+            client: { channel: 'whatsapp', subject: '', text: '' },
+            admin: { channel: 'email', subject: 'UPI submitted', text: 'Stage 2 Template: Review UPI' },
+          },
+          reminders: [{
+            id: 2,
+            startTrigger: '__main__',
+            audience: 'admin',
+            clientMode: 'separate',
+            adminMode: 'separate',
+            clientSteps: [],
+            adminSteps: [{ amount: 2, unit: 'hours', pos: 'after', channel: 'email', subject: 'Approve UPI', text: 'Stage 2 Reminder' }],
+            repeatMode: 'off',
+            countDaysFrom: 'trigger_date',
+            condition: 'any',
+            stopOn: ['payment.received'],
+            stopChains: {
+              'payment.received': {
+                instant: {
+                  audience: 'client',
+                  client: { channel: 'email', subject: 'Paid', text: 'Stage 3 Template: Payment approved' },
+                  admin: { channel: 'whatsapp', subject: '', text: '' },
+                },
+                reminders: [],
+              },
+            },
+          }],
+        },
+      },
+    }],
+  }, admin._id);
+
+  const rules = await Rule.find({ trailId: trail._id }).lean();
+  assert.equal(rules.length, 5);
+
+  const due = new Date(Date.now() + 10 * DAY);
+  const bill = await invoice({ orderId: order._id, dueDate: due });
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mail.text, 'Stage 1 Template: Bill ready');
+  const stage1RemRule = rules.find(r => r.action === 'invoice.created' && r.kind === 'reminder');
+  assert.equal(await Run.countDocuments({ ruleId: stage1RemRule._id, status: 'scheduled' }), 1);
+
+  // Stop 1: Client submits UPI -> cancels Stage 1 Reminder, sends Stage 2 Template, schedules Stage 2 Reminder
+  await orderUpiPending(order, { txId: new mongoose.Types.ObjectId() });
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(await Run.countDocuments({ ruleId: stage1RemRule._id, status: 'cancelled' }), 1);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].mail.text, 'Stage 2 Template: Review UPI');
+  const stage2RemRule = rules.find(r => r.action === 'order.upi_pending' && r.kind === 'reminder');
+  assert.equal(await Run.countDocuments({ ruleId: stage2RemRule._id, status: 'scheduled' }), 1);
+
+  // Stop 2: Admin approves payment -> cancels Stage 2 Reminder, sends Stage 3 Template
+  await markProjectInvoicePaid({ invoice: bill, customerId: customer._id, paymentMethod: 'cash', actorId: admin._id, amount: 1000 });
+  await worker.processActionRules(new Date(Date.now() + 60000));
+  assert.equal(await Run.countDocuments({ ruleId: stage2RemRule._id, status: 'cancelled' }), 1);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].mail.text, 'Stage 3 Template: Payment approved');
+});

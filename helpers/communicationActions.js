@@ -335,7 +335,32 @@ function validatePatch(body = {}) {
   return patch;
 }
 
-async function list() {
+async function list(options = {}) {
+  if (options?.view === 'catalog') {
+    const catalogue = await readPackages().catch(() => []);
+    const packages = (Array.isArray(catalogue) ? catalogue : [])
+      .filter(p => p && (p.slug || p.id))
+      .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
+    const triggers = [];
+    for (const [triggerKey, meta] of Object.entries(TRIGGER_ACTIONS)) {
+      if (!meta?.trigger) continue;
+      triggers.push({
+        triggerKey,
+        label: meta.label,
+        folder: meta.folder || 'Other',
+        when: meta.when || '',
+        entityType: meta.entityType || 'none',
+        supportsScope: !!meta.supportsScope,
+        supportsProgress: !!meta.supportsProgress,
+        supportsLimit: !!meta.supportsLimit,
+        canStop: !!meta.canStop,
+        defaultStopOn: meta.defaultStopOn || [],
+        conditions: meta.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
+        origins: [],
+      });
+    }
+    return { triggers, folders: FOLDERS, packages };
+  }
   const [overrides, allRules, catalogue, policies] = await Promise.all([
     Override.find().lean(),
     ActionRule.find().sort({ createdAt: 1 }).lean(),

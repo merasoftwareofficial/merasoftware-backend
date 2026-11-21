@@ -148,11 +148,25 @@ async function recordLaterSends(row) {
 
 async function followFinalMessages() {
   if (process.env.ENABLE_WHATSAPP !== 'true') return { reason: 'disabled' };
+  const unnotedIgnored = {
+    sentAt: { $ne: null },
+    lastIgnoredAt: { $ne: null },
+    $or: [{ ignoredNotedAt: null }, { $expr: { $gt: ['$lastIgnoredAt', '$ignoredNotedAt'] } }],
+  };
   const hasWork = await FinalMessage.exists({
     $or: [
       { status: { $in: ['review', 'queued', 'waiting'] } },
-      { status: 'replied', $or: [{ decision: null }, { lastIgnoredAt: { $ne: null } }] },
-      { status: 'dead', $or: [{ expiryEnabled: true, expiryQueuedAt: null }, { expirySentAt: null }, { lastReplyAt: { $ne: null } }, { lastIgnoredAt: { $ne: null } }, { 'outboundChecks.0': { $exists: true } }] },
+      { status: 'replied', $or: [{ decision: null }, unnotedIgnored] },
+      {
+        status: 'dead',
+        $or: [
+          { expiryEnabled: true, expiryQueuedAt: null },
+          { expiryQueuedAt: { $ne: null }, expirySentAt: null },
+          { sentAt: { $ne: null }, lastReplyAt: { $ne: null }, $expr: { $gte: ['$lastReplyAt', '$sentAt'] } },
+          unnotedIgnored,
+          { 'outboundChecks.0': { $exists: true } },
+        ],
+      },
     ],
   });
   if (!hasWork) return { reason: 'done' };
@@ -172,12 +186,12 @@ async function followFinalMessages() {
       await attempt(row, item => reconcileCycle(item.leadId));
     }
     for (const row of await FinalMessage.find({ status: { $in: ['review', 'queued'] } }).lean()) await attempt(row, followMessage);
-    for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead', 'replied'] }, altPhone: { $nin: [null, ''] } }).lean()) await attempt(row, recordLaterSends);
-    for (const row of await FinalMessage.find({ $or: [{ status: 'waiting' }, { status: 'dead', $or: [{ expirySentAt: null }, { 'outboundChecks.0': { $exists: true } }] }] }).lean()) {
+    for (const row of await FinalMessage.find({ status: { $in: ['waiting', 'dead', 'replied'] }, altPhone: { $nin: [null, ''] } }).select('_id draftId status leadId altPhone sends').lean()) await attempt(row, recordLaterSends);
+    for (const row of await FinalMessage.find({ $or: [{ status: 'waiting' }, { status: 'dead', $or: [{ expiryEnabled: true, expirySentAt: null }, { 'outboundChecks.0': { $exists: true } }] }] }).lean()) {
       await attempt(row, item => require('./stopFinalMessage').processOutbound(item));
     }
     if (!clientAutomationEnabled()) {
-      for (const row of await FinalMessage.find({ subjectKind: 'client', status: 'waiting' }).lean()) await attempt(row, item => endRow(item, 'stopped'));
+      for (const row of await FinalMessage.find({ subjectKind: 'client', status: 'waiting' }).select('_id draftId status subjectKind episodeId').lean()) await attempt(row, item => endRow(item, 'stopped'));
     }
     // After the closure message, before the replies below: any message from then on brings the person back as an
     // Inquiry instead (helpers/finalMessageComeback.js). This also keeps when the closure went, before the queue forgets it.

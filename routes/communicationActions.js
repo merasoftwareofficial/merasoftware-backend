@@ -8,7 +8,7 @@ const handle = fn => async (req, res) => {
   catch (error) { res.status(error.status || 400).json({ success: false, message: error.message }); }
 };
 
-router.get('/', handle(() => service.list()));
+router.get('/', handle(req => service.list({ view: req.query.view })));
 router.put('/:id', handle(req => service.update(req.params.id, req.body || {}, req.userId)));
 
 module.exports = router;
