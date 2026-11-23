@@ -2,8 +2,8 @@ const mongoose = require('mongoose');
 const Trail = require('../models/communicationTrailModel');
 const Rule = require('../models/communicationActionRuleModel');
 const { EmailPolicy } = require('../models/emailControlModel');
-const { byKey, isAdminRecipientEvent, isCustomerTriggered, channelFor } = require('./emailCatalog');
-const { normalizeMessageBlock, defaultTemplateOf } = require('./communicationTrails');
+const { byKey, isAdminRecipientEvent, isCustomerTriggered, isAutomaticEvent, channelFor } = require('./emailCatalog');
+const { resolveActionControls, normalizeMessageBlock, defaultTemplateOf } = require('./communicationTrails');
 const { templateWithDocs } = require('./emailTemplates');
 
 const HEX24_RE = /^[a-f\d]{24}$/i;
@@ -23,6 +23,12 @@ function safeSubject(subject, event, fallbackName) {
 
 function trailSyncKey(trailId, audience) {
   return `${String(trailId)}:${audience === 'admin' ? 'admin' : 'customer'}`;
+}
+
+function actionControlForEvent(trail, event) {
+  if (!trail || !trail.enabled || trail.control === 'off') return 'off';
+  const controls = resolveActionControls(trail);
+  return isAutomaticEvent(event) ? controls.user : controls.admin;
 }
 
 function isTrailActiveForAudience(trail, audience) {
@@ -49,10 +55,14 @@ async function resolveMailTrail(event, mail = {}, scope = null) {
   if (!isTrailActiveForAudience(trail, audience)) {
     return { migrated: true, action: 'suppress', trail, audience };
   }
+  const actorControl = actionControlForEvent(trail, event);
+  if (actorControl === 'off' && !mail?.reviewed && !mail?.interactiveReview) {
+    return { migrated: true, action: 'suppress', trail, audience };
+  }
   const interactive = Boolean(
     mail?.reviewed
     || mail?.interactiveReview
-    || (trail.control === 'review' && scope && !scope.system && !isCustomerTriggered(event)),
+    || (actorControl === 'review' && scope && !scope.system && !isCustomerTriggered(event)),
   );
   if (interactive) {
     return {
@@ -281,6 +291,7 @@ module.exports = {
   audienceForEvent,
   safeSubject,
   trailSyncKey,
+  actionControlForEvent,
   isTrailActiveForAudience,
   activeTrailForEvent,
   resolveMailTrail,

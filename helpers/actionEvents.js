@@ -550,6 +550,10 @@ async function emitAction(action, { key, entityId, clientId = null, leadId = nul
         if (matched?.surface) nextDetails.originSurface = matched.surface;
       } catch { /* ignore */ }
     }
+    if (!nextDetails.originSurface) {
+      const url = String(scope.req.originalUrl || '');
+      nextDetails.originSurface = url.includes('/admin/') ? 'Admin' : 'Client';
+    }
     if (scope.syncReviewedTemplates?.length && !nextDetails.syncReviewedTemplates) {
       nextDetails.syncReviewedTemplates = [...scope.syncReviewedTemplates];
     }
@@ -559,6 +563,7 @@ async function emitAction(action, { key, entityId, clientId = null, leadId = nul
     if (Array.isArray(scope.emittedActions) && !scope.emittedActions.includes(action)) scope.emittedActions.push(action);
     if (Array.isArray(scope.emittedEventKeys) && !scope.emittedEventKeys.includes(key)) scope.emittedEventKeys.push(key);
   }
+  if (!nextDetails.originSurface) nextDetails.originSurface = 'System';
   const doc = { action, entityId, clientId, leadId, orderId, matchKeys, details: nextDetails, occurredAt, status: 'new' };
   try {
     await Event.updateOne({ key }, { $setOnInsert: { key, ...doc } }, { upsert: true, ...(session ? { session } : {}) });

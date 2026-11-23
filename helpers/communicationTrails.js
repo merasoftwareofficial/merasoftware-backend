@@ -8,11 +8,29 @@ const { cleanRule } = require('./actionRules');
 const MAX_CHAIN_DEPTH = 6;
 const MAX_TEMPLATES_PER_AUDIENCE = 25;
 const HEX24_RE = /^[a-f\d]{24}$/i;
+const ADMIN_ORIGINS = ['Admin'];
+const USER_ORIGINS = ['Client', 'Website', 'System'];
+const VALID_CONTROLS = ['auto', 'review', 'off'];
 const fail = (message, status = 400) => {
   const err = new Error(message);
   err.status = status;
   throw err;
 };
+
+function resolveActionControls(raw = {}) {
+  const base = VALID_CONTROLS.includes(raw.control) ? raw.control : 'auto';
+  const enabled = raw.enabled !== false && base !== 'off';
+  const fallback = base === 'review' ? 'review' : 'auto';
+  const rawAdmin = VALID_CONTROLS.includes(raw.adminActionControl) ? raw.adminActionControl : fallback;
+  const rawUser = VALID_CONTROLS.includes(raw.userActionControl) ? raw.userActionControl : fallback;
+  return {
+    enabled,
+    rawAdmin,
+    rawUser,
+    admin: enabled ? rawAdmin : 'off',
+    user: enabled ? rawUser : 'off',
+  };
+}
 
 function cleanChannel(ch) {
   return ['whatsapp', 'email', 'both'].includes(ch) ? ch : 'whatsapp';
@@ -125,8 +143,18 @@ function mapCondition(condition, value) {
   return { condition: 'anytime', minProgress: 0, minRemainingLimit: null, maxRemainingLimit: null };
 }
 
-function compileInstant(instant, actionsList, scopeObj, control, out) {
+function compileInstant(instant, actionsList, scopeObj, actionControls, out) {
   if (!instant || instant.audience === 'off') return;
+  const ctrls = typeof actionControls === 'string'
+    ? { admin: actionControls, user: actionControls }
+    : (actionControls || { admin: 'auto', user: 'auto' });
+  const variants = ctrls.admin === ctrls.user
+    ? (ctrls.admin === 'off' ? [] : [{ control: ctrls.admin, originFilter: [] }])
+    : [
+        ...(ctrls.admin !== 'off' ? [{ control: ctrls.admin, originFilter: ADMIN_ORIGINS }] : []),
+        ...(ctrls.user !== 'off' ? [{ control: ctrls.user, originFilter: USER_ORIGINS }] : []),
+      ];
+  if (!variants.length) return;
   const targets = instant.audience === 'both' ? ['client', 'admin'] : [instant.audience];
   for (const who of targets) {
     const msg = who === 'client' ? instant.client : instant.admin;
@@ -135,18 +163,21 @@ function compileInstant(instant, actionsList, scopeObj, control, out) {
     if (!text) continue;
     const channel = cleanChannel(def?.channel);
     const subject = channel === 'whatsapp' ? '' : (String(def?.subject || '').trim() || ACTIONS[actionsList[0]]?.label || 'Notification');
-    out.push(cleanRule({
-      kind: 'template',
-      actions: actionsList,
-      action: actionsList[0],
-      audience: who === 'admin' ? 'admin' : 'customer',
-      condition: 'anytime',
-      scope: scopeObj,
-      steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel, subject, text }],
-      repeat: { mode: 'off', times: 0, perDay: 1 },
-      stopOn: [],
-      control,
-    }));
+    for (const variant of variants) {
+      out.push(cleanRule({
+        kind: 'template',
+        actions: actionsList,
+        action: actionsList[0],
+        audience: who === 'admin' ? 'admin' : 'customer',
+        condition: 'anytime',
+        originFilter: variant.originFilter,
+        scope: scopeObj,
+        steps: [{ timingRef: 'after_action', unit: 'days', days: 0, channel, subject, text }],
+        repeat: { mode: 'off', times: 0, perDay: 1 },
+        stopOn: [],
+        control: variant.control,
+      }));
+    }
   }
 }
 
@@ -237,9 +268,9 @@ function validateAndCompileTrail(raw = {}) {
   const selectedPackages = (scope === 'include' || scope === 'exclude')
     ? [...new Set((Array.isArray(raw.selectedPackages) ? raw.selectedPackages : []).map(s => String(s || '').trim()).filter(Boolean))]
     : [];
-  const control = ['auto', 'review', 'off'].includes(raw.control) ? raw.control : 'auto';
-  const enabled = raw.enabled !== false && control !== 'off';
-  const instantControl = enabled ? control : 'off';
+  const actionControls = resolveActionControls(raw);
+  const { enabled, rawAdmin: adminActionControl, rawUser: userActionControl } = actionControls;
+  const control = !enabled ? 'off' : ((adminActionControl === 'review' || userActionControl === 'review') ? 'review' : 'auto');
   // Scheduled Reminders always run `auto` while the Trail is enabled (never blocked by Instant `review` mode).
   const reminderControl = enabled ? 'auto' : 'off';
   const instant = normalizeInstantBlock(raw.instant);
@@ -249,7 +280,7 @@ function validateAndCompileTrail(raw = {}) {
 
   const compiled = [];
   const topScope = mapScope(scope, selectedPackages, triggers);
-  compileInstant(instant, triggers, topScope, instantControl, compiled);
+  compileInstant(instant, triggers, topScope, actionControls, compiled);
   compileReminders(reminders, triggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(triggers));
 
   const stages = [];
@@ -263,7 +294,7 @@ function validateAndCompileTrail(raw = {}) {
     const stageInstant = normalizeInstantBlock(st.instant);
     const stageReminder = st.reminder && typeof st.reminder === 'object' ? st.reminder : null;
     const stageScope = mapScope(scope, selectedPackages, stageTriggers);
-    compileInstant(stageInstant, stageTriggers, stageScope, instantControl, compiled);
+    compileInstant(stageInstant, stageTriggers, stageScope, actionControls, compiled);
     if (stageReminder) {
       compileReminders([stageReminder], stageTriggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(stageTriggers));
     }
@@ -277,7 +308,7 @@ function validateAndCompileTrail(raw = {}) {
   }
 
   return {
-    trailFields: { triggers, scope, selectedPackages, instant, reminders, stages, control, enabled },
+    trailFields: { triggers, scope, selectedPackages, instant, reminders, stages, control, adminActionControl, userActionControl, enabled },
     compiled,
   };
 }
@@ -346,6 +377,8 @@ async function updateTrail(id, raw, actorId) {
   existing.reminders = trailFields.reminders;
   existing.stages = trailFields.stages;
   existing.control = trailFields.control;
+  existing.adminActionControl = trailFields.adminActionControl;
+  existing.userActionControl = trailFields.userActionControl;
   existing.enabled = trailFields.enabled;
   existing.activatedAt = trailFields.enabled ? (existing.activatedAt || new Date()) : null;
   existing.revision = (existing.revision || 1) + 1;
@@ -367,10 +400,19 @@ async function setTrailEnabled(id, enabled) {
   if (!existing.enabled) {
     await cancelRunsForTrail(existing._id, 'Trail turned off by admin.');
   }
+  const controls = resolveActionControls(existing);
   await Promise.all([
     Rule.updateMany(
-      { trailId: existing._id, kind: 'template' },
-      { $set: { enabled: existing.enabled, control: existing.enabled ? existing.control : 'off', activatedAt: existing.activatedAt } },
+      { trailId: existing._id, kind: 'template', originFilter: { $size: 0 } },
+      { $set: { enabled: existing.enabled, control: controls.admin, activatedAt: existing.activatedAt } },
+    ),
+    Rule.updateMany(
+      { trailId: existing._id, kind: 'template', originFilter: 'Admin' },
+      { $set: { enabled: existing.enabled, control: controls.admin, activatedAt: existing.activatedAt } },
+    ),
+    Rule.updateMany(
+      { trailId: existing._id, kind: 'template', originFilter: { $in: USER_ORIGINS } },
+      { $set: { enabled: existing.enabled, control: controls.user, activatedAt: existing.activatedAt } },
     ),
     Rule.updateMany(
       { trailId: existing._id, kind: 'reminder' },
@@ -390,6 +432,7 @@ async function deleteTrail(id) {
 }
 
 module.exports = {
+  resolveActionControls,
   normalizeMessageBlock,
   normalizeInstantBlock,
   defaultTemplateOf,

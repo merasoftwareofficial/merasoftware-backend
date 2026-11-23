@@ -26,6 +26,9 @@ const communicationTrailSchema = new Schema({
   stages: { type: [Schema.Types.Mixed], default: [] },
   // Applies to Instant Auto Msg (`auto` vs `review`); scheduled Reminders always run `auto` while trail is enabled.
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'auto' },
+  // Separate action-actor controls on the same trigger point (reuses existing SSOT originSurface + originFilter).
+  adminActionControl: { type: String, enum: ['auto', 'review', 'off'], default: null },
+  userActionControl: { type: String, enum: ['auto', 'review', 'off'], default: null },
   enabled: { type: Boolean, default: true },
   activatedAt: { type: Date, default: null },
   revision: { type: Number, default: 1, min: 1 },

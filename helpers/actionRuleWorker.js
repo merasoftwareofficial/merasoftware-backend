@@ -129,7 +129,10 @@ async function resolveEventContext(event, { needsPendingCheck = true, needsUploa
 }
 
 function ruleMatchesContext(rule, ctx) {
-  if (Array.isArray(rule.originFilter) && rule.originFilter.length && ctx.originSurface && !rule.originFilter.includes(ctx.originSurface)) return false;
+  if (Array.isArray(rule.originFilter) && rule.originFilter.length) {
+    const effectiveOrigin = ctx.originSurface || 'System';
+    if (!rule.originFilter.includes(effectiveOrigin)) return false;
+  }
   if (rule.condition === 'unpaid' && (ctx.isPaid || ctx.isPendingApproval)) return false;
   if (rule.condition === 'pending_approval' && !ctx.isPendingApproval) return false;
   if (rule.condition === 'paid' && !ctx.isPaid) return false;

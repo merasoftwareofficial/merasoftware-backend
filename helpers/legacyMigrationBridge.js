@@ -136,7 +136,10 @@ async function getLegacyForTriggers(triggerKeys = []) {
   const adminTemplates = [];
   const pulledEvents = [];
   const pulledTemplateIds = [];
-  let wantsReview = false;
+  let adminWantsReview = false;
+  let adminExplicitOff = false;
+  let userWantsAuto = false;
+  let userExplicitOff = false;
 
   const clientEventCount = activeEvents.filter(ev => !isAdminRecipientEvent(ev) && byKey.get(ev)?.audience !== 'team').length;
   const adminEventCount = activeEvents.length - clientEventCount;
@@ -149,9 +152,13 @@ async function getLegacyForTriggers(triggerKeys = []) {
     const needsPrefix = isAdmin ? adminEventCount > 1 : clientEventCount > 1;
     const prefix = needsPrefix && meta?.label ? `${meta.label} — ` : '';
 
-    if (!isAutomaticEvent(ev)) {
+    if (isAutomaticEvent(ev)) {
+      if (policy?.mode === 'auto') userWantsAuto = true;
+      else if (policy?.mode === 'off') userExplicitOff = true;
+    } else {
       const effectiveMode = policy?.mode || 'review';
-      if (effectiveMode === 'review') wantsReview = true;
+      if (effectiveMode === 'review') adminWantsReview = true;
+      else if (effectiveMode === 'off') adminExplicitOff = true;
     }
 
     const rows = templatesByEvent.get(ev) || [];
@@ -208,11 +215,16 @@ async function getLegacyForTriggers(triggerKeys = []) {
     pulledRuleIds.push(String(rule._id));
   }
 
+  const adminActionControl = adminWantsReview ? 'review' : (adminExplicitOff ? 'off' : 'auto');
+  const userActionControl = userWantsAuto ? 'auto' : (userExplicitOff ? 'off' : 'auto');
+
   return {
     clientTemplates,
     adminTemplates,
     reminders,
-    control: wantsReview ? 'review' : 'auto',
+    control: adminWantsReview ? 'review' : 'auto',
+    adminActionControl,
+    userActionControl,
     events: [...new Set(pulledEvents)],
     templateIds: [...new Set(pulledTemplateIds)],
     ruleIds: [...new Set(pulledRuleIds)],

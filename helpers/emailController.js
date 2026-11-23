@@ -85,7 +85,7 @@ async function applyDefault(event, mail, values = {}) {
     const { migrated, trail, audience } = await trailBridge.activeTrailForEvent(event);
     if (migrated) {
       if (!trailBridge.isTrailActiveForAudience(trail, audience)) return null;
-      if (!mail?.reviewed && !mail?.interactiveReview && !mail?.fromActionRule && trail.control !== 'review') return null;
+      if (!mail?.reviewed && !mail?.interactiveReview && !mail?.fromActionRule && trailBridge.actionControlForEvent(trail, event) !== 'review') return null;
       if (mail.reviewed) {
         const text = render(mail.text, values, mail.blocks);
         const final = compose(text, mail.blocks);

@@ -48,7 +48,7 @@ async function typesFor(lead) {
     const policy = policyByEvent.get(ev);
     if (policy?.migratedToTrailId) {
       const trail = trailById.get(String(policy.migratedToTrailId));
-      if (!trailBridge.isTrailActiveForAudience(trail, 'client')) off.add(ev);
+      if (!trailBridge.isTrailActiveForAudience(trail, 'client') || trailBridge.actionControlForEvent(trail, ev) === 'off') off.add(ev);
     } else if (policy?.mode === 'off') {
       off.add(ev);
     }

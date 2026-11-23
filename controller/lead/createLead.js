@@ -176,7 +176,7 @@ const createLeadController = async (req, res) => {
           let skipTrailId = req.body.emailReview?.trailId || null;
           if (!skipTrailId) {
             const { migrated, trail, audience } = await trailBridge.activeTrailForEvent('lead.created');
-            if (migrated && trailBridge.isTrailActiveForAudience(trail, audience) && trail.control === 'review') skipTrailId = trail._id;
+            if (migrated && trailBridge.isTrailActiveForAudience(trail, audience) && trailBridge.actionControlForEvent(trail, 'lead.created') === 'review') skipTrailId = trail._id;
           }
           if (skipTrailId) {
             const key = trailBridge.trailSyncKey(skipTrailId, req.body.emailReview?.trailAudience || 'client');
