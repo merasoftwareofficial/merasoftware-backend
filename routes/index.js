@@ -232,6 +232,7 @@ router.post('/integration/website-offers/invalidate', (req, res) => {
 router.get('/integration/plan-catalogue', require('../controller/order/servicePlanQuote').integrationCatalogue);
 router.patch('/integration/plan-catalogue/quote', require('../controller/order/servicePlanQuote').integrationQuote);
 router.patch('/integration/plan-request', require('../controller/lead/planRequest').integrationPlanRequest);
+router.patch('/integration/contact-request', require('../controller/lead/contactRequest').integrationContactRequest);
 router.post("/admin/clients/:customerId/documents", authToken, upload.any(), uploadClientDocumentController);
 router.get("/admin/clients/:customerId/documents", authToken, getAdminClientDocumentsController);
 router.get("/admin/clients/:customerId/credentials", authToken, getClientCredentialsController);
