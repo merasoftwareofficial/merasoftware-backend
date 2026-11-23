@@ -20,7 +20,7 @@ async function availability(draft) {
   }
   // Team mail to the admins: the numbers saved in Admin → Settings, and WhatsApp goes to every admin that has one
   // (an admin without a number still gets the email). Everyone else: each recipient must have a number.
-  const team = isAdminRun || isAdminRecipientEvent(draft.event);
+  const team = isAdminRun || draft.trailAudience === 'admin' || isAdminRecipientEvent(draft.event);
   if (team && emails.length) {
     const rows = (await Promise.all(emails.map(async address => await teamPhoneRows(draft, address, { forceTeam: team })
       || [{ email: address, phone: normalizePhone(await savedPhoneFor(address)) }]))).flat();
@@ -43,12 +43,16 @@ async function choicesFor(draft, { email, whatsapp: reachable, recipients: all }
       { id: 'both', label: 'Both', enabled: !!email && !!whatsapp, reason: !email ? 'A valid email address is missing.' : !whatsapp ? phoneReason : '' },
     ],
     // The review opens on the action's own "Send via"; the reviewer may change it for this message.
-    defaultChannel: draft.event ? await actionChannel(draft.event) : email && whatsapp ? 'both' : email ? 'email' : 'whatsapp',
+    defaultChannel: draft.event ? await actionChannel(draft.event, draft) : email && whatsapp ? 'both' : email ? 'email' : 'whatsapp',
     recipients: all,
   };
 }
 // The action's "Send via" (emailCatalog.js channelFor): every send without an explicit choice uses it.
-async function actionChannel(event) {
+async function actionChannel(event, draft = null) {
+  if (draft?.trailId) {
+    const trailChannel = await require('./trailReviewBridge').trailChannelForDraft(draft);
+    if (trailChannel) return trailChannel;
+  }
   if (process.env.ACTION_RULES_ENABLED === 'true' && process.env.ACTION_RULES_LEGACY_ENABLED === 'true' && event) {
     const ActionRule = require('../models/communicationActionRuleModel');
     const rule = await ActionRule.findOne({ migratedFrom: `template:${event}` }).select('steps.channel').lean();
@@ -63,14 +67,18 @@ function channelsFor(selection) {
 const selectionFor = channels => channels.length === 2 ? 'both' : channels[0];
 
 async function deliver({ draft, actor, decision, sendEmail, recordHistory, reviewedMail, validateContent }) {
-  const migratedRule = process.env.ACTION_RULES_ENABLED === 'true' && process.env.ACTION_RULES_LEGACY_ENABLED === 'true' && draft.event
-    ? await require('../models/communicationActionRuleModel').findOne({ migratedFrom: `template:${draft.event}` }).select('enabled control').lean()
-    : null;
-  if (migratedRule) {
-    if (!migratedRule.enabled || migratedRule.control === 'off') fail('Messages for this action are Off.');
-  } else if (draft.event !== 'reminder.automated') {
-    const policy = await EmailPolicy.findOne({ event: draft.event }).lean();
-    if (policy?.mode === 'off') fail('Messages for this action are Off.');
+  if (draft.trailId) {
+    await require('./trailReviewBridge').assertTrailEnabled(draft.trailId);
+  } else {
+    const migratedRule = process.env.ACTION_RULES_ENABLED === 'true' && process.env.ACTION_RULES_LEGACY_ENABLED === 'true' && draft.event
+      ? await require('../models/communicationActionRuleModel').findOne({ migratedFrom: `template:${draft.event}` }).select('enabled control').lean()
+      : null;
+    if (migratedRule) {
+      if (!migratedRule.enabled || migratedRule.control === 'off') fail('Messages for this action are Off.');
+    } else if (draft.event !== 'reminder.automated') {
+      const policy = await EmailPolicy.findOne({ event: draft.event }).lean();
+      if (policy?.mode === 'off') fail('Messages for this action are Off.');
+    }
   }
   if (draft.status === 'staged' || draft.status === 'skipped') fail('Draft is unavailable.');
   if (draft.event.startsWith('website.subscription.') && decision.channels !== 'email') fail('Subscription confirmation requires email.');
@@ -91,7 +99,11 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
       validateContent(decision.subject, decision.text);
       const { withRequiredLinks } = require('./emailMarkup');
       const frozen = reviewedMail(current, withRequiredLinks(decision.text, current.requiredLinks, current.values));
-      const selected = decision.templateId && decision.templateId !== 'current' ? await require('./emailTemplates').resolveTemplate(current.event, decision.templateId) : null;
+      const selected = decision.templateId && decision.templateId !== 'current'
+        ? (current.trailId
+          ? await require('./trailReviewBridge').resolveTrailTemplate(current.trailId, current.trailAudience, decision.templateId, current.event)
+          : await require('./emailTemplates').resolveTemplate(current.event, decision.templateId))
+        : null;
       await EmailDraft.updateOne({ _id: current._id, 'delivery.lockOwner': owner }, { $set: {
         subject: decision.subject, ...frozen,
         ...(selected ? { sourceTemplateId: selected._id, templateName: selected.name } : {}),

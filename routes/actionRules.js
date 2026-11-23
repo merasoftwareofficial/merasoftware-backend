@@ -6,6 +6,7 @@ const Lead = require('../models/leadModel');
 const { ACTIONS } = require('../helpers/actionEvents');
 const { createRule, updateRule, setRuleEnabled, deleteRule } = require('../helpers/actionRules');
 const { listTrails, createTrail, updateTrail, setTrailEnabled, deleteTrail } = require('../helpers/communicationTrails');
+const { getLegacyForTriggers, getLegacySummary } = require('../helpers/legacyMigrationBridge');
 const { enrollPendingInvoices } = require('../helpers/actionRuleWorker');
 const { migrateLegacyReminderRules, cleanupActionRules } = require('../helpers/migrateLegacyReminderRules');
 
@@ -15,6 +16,13 @@ const handle = fn => async (req, res) => {
   try { res.json({ success: true, data: await fn(req) }); }
   catch (error) { res.status(error.status || 400).json({ success: false, message: error.message }); }
 };
+
+router.get('/legacy-summary', handle(() => getLegacySummary()));
+router.get('/legacy-for-trigger', handle(req => {
+  const raw = String(req.query?.triggers || '');
+  const triggers = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return getLegacyForTriggers(triggers);
+}));
 
 router.get('/trails', handle(() => listTrails()));
 router.post('/trails', handle(req => createTrail(req.body || {}, req.userId)));

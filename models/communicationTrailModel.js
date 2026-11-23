@@ -12,9 +12,19 @@ const communicationTrailSchema = new Schema({
   triggers: { type: [String], required: true, default: [] },
   scope: { type: String, enum: ['all', 'monthly', 'onetime', 'include', 'exclude'], default: 'all' },
   selectedPackages: { type: [String], default: [] },
-  instant: { type: Schema.Types.Mixed, default: () => ({ audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } }) },
+  // Instant message supports Multiple Templates on client/admin (`templates: [{ id (24-hex ObjectId), name, channel, subject, text, isDefault }]`)
+  // while keeping top-level channel/subject/text synced to the default template for backward compatibility.
+  instant: {
+    type: Schema.Types.Mixed,
+    default: () => ({
+      audience: 'off',
+      client: { channel: 'whatsapp', subject: '', text: '', templates: [] },
+      admin: { channel: 'whatsapp', subject: '', text: '', templates: [] },
+    }),
+  },
   reminders: { type: [Schema.Types.Mixed], default: [] },
   stages: { type: [Schema.Types.Mixed], default: [] },
+  // Applies to Instant Auto Msg (`auto` vs `review`); scheduled Reminders always run `auto` while trail is enabled.
   control: { type: String, enum: ['auto', 'review', 'off'], default: 'auto' },
   enabled: { type: Boolean, default: true },
   activatedAt: { type: Date, default: null },

@@ -80,6 +80,21 @@ async function applyDefault(event, mail, values = {}) {
       return { ...mail, ...composeTemplate(template, values, mail.blocks, mail.requiredLinks) };
     }
   }
+  if (event && event !== 'reminder.automated') {
+    const trailBridge = require('./trailReviewBridge');
+    const { migrated, trail, audience } = await trailBridge.activeTrailForEvent(event);
+    if (migrated) {
+      if (!trailBridge.isTrailActiveForAudience(trail, audience)) return null;
+      if (!mail?.reviewed && !mail?.interactiveReview && !mail?.fromActionRule && trail.control !== 'review') return null;
+      if (mail.reviewed) {
+        const text = render(mail.text, values, mail.blocks);
+        const final = compose(text, mail.blocks);
+        return { ...mail, text, plain: final.text, html: final.html, trailId: trail._id, trailAudience: audience };
+      }
+      const template = await trailBridge.resolveTrailTemplate(trail._id, audience, null, event);
+      return { ...mail, ...composeTemplate(template, values, mail.blocks, mail.requiredLinks), trailId: trail._id, trailAudience: audience };
+    }
+  }
   const policy = event === 'reminder.automated' ? null : await EmailPolicy.findOne({ event }).lean();
   // Customer-started mail exists only while its action is On; it is Off until an admin turns it on.
   if (policy?.mode === 'off' || (isCustomerTriggered(event) && policy?.mode !== 'auto')) return null;
@@ -130,6 +145,16 @@ async function prepareMail(event, mail, extraValues) {
   if (!mail?.fromActionRule && await isTemplateMigratedAndActive(event)) {
     return { data: null, error: null, suppressed: true, handledByActionRule: true };
   }
+  if (!mail?.fromActionRule) {
+    const trailDecision = await require('./trailReviewBridge').resolveMailTrail(event, mail, scope);
+    if (trailDecision.migrated) {
+      if (trailDecision.action === 'worker') return { data: null, error: null, suppressed: true, handledByActionRule: true };
+      if (trailDecision.action === 'suppress') return suppressed();
+      if (trailDecision.action === 'stage' && trailDecision.syncKey) {
+        scope.syncReviewedTrails = [...new Set([...(scope.syncReviewedTrails || []), trailDecision.syncKey])];
+      }
+    }
+  }
   // Only events the catalog registers as system-triggered may send from a background scope.
   if (scope.system && byKey.get(event).trigger !== 'system') return suppressed();
   const publicIntake = scope.req.emailBridgeAccess === 'intake';
@@ -174,6 +199,8 @@ async function prepareMail(event, mail, extraValues) {
     headers: content.headers,
     reminderInvoice: content.reminderInvoice,
     reminderRunId: mail.reminderRunId,
+    trailId: mail.trailId || content.trailId || null,
+    trailAudience: mail.trailAudience || content.trailAudience || null,
     offerReminderContext: mail.offerReminderContext,
     leadId: mail.leadId,
     orderId: mail.orderId,
@@ -202,7 +229,7 @@ function withEvent(event, builder) {
     ? eventScope.run(event, () => builder(...args)) : Promise.resolve(false);
 }
 function requestMiddleware(req, res, next) {
-  const scope = { req, ids: [], closed: false, emittedActions: [], emittedEventKeys: [], syncReviewedTemplates: [] };
+  const scope = { req, ids: [], closed: false, emittedActions: [], emittedEventKeys: [], syncReviewedTemplates: [], syncReviewedTrails: [] };
   const json = res.json.bind(res);
   res.json = function(body) {
     scope.closed = true;
@@ -213,10 +240,13 @@ function requestMiddleware(req, res, next) {
           const { matchCatalogAction } = require('./communicationActions');
           const { emitAction } = require('./actionEvents');
           const Event = require('../models/communicationActionEventModel');
-          if (scope.syncReviewedTemplates?.length && scope.emittedEventKeys?.length) {
+          if ((scope.syncReviewedTemplates?.length || scope.syncReviewedTrails?.length) && scope.emittedEventKeys?.length) {
+            const setFields = {};
+            if (scope.syncReviewedTemplates?.length) setFields['details.syncReviewedTemplates'] = scope.syncReviewedTemplates;
+            if (scope.syncReviewedTrails?.length) setFields['details.syncReviewedTrails'] = scope.syncReviewedTrails;
             await Event.updateMany(
               { key: { $in: scope.emittedEventKeys } },
-              { $set: { 'details.syncReviewedTemplates': scope.syncReviewedTemplates } },
+              { $set: setFields },
             );
           }
           const matched = matchCatalogAction(req.method, req.originalUrl);
@@ -238,6 +268,7 @@ function requestMiddleware(req, res, next) {
                 originSurface: matched.surface,
                 actionId: matched.id,
                 ...(scope.syncReviewedTemplates?.length ? { syncReviewedTemplates: scope.syncReviewedTemplates } : {}),
+                ...(scope.syncReviewedTrails?.length ? { syncReviewedTrails: scope.syncReviewedTrails } : {}),
               },
             });
           }
@@ -324,14 +355,19 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   const policyDraft = await EmailDraft.findOne(query).lean();
   if (!policyDraft) throw new Error('Draft is unavailable');
   if (policyDraft.event.startsWith('website.subscription.') && !access.validatedWebsite) throw new Error('Review this subscription email from the website panel');
-  if (policyDraft.event !== 'reminder.automated') {
+  if (policyDraft.trailId) {
+    await require('./trailReviewBridge').assertTrailEnabled(policyDraft.trailId);
+  } else if (policyDraft.event !== 'reminder.automated') {
     const policy = await EmailPolicy.findOne({ event: policyDraft.event }).lean();
     if (policy?.mode === 'off') throw new Error('Email for this action is disabled');
   }
   const text = withRequiredLinks(decision.text, policyDraft.requiredLinks, policyDraft.values);
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
-    templateName = (await resolveTemplate(policyDraft.event, decision.templateId)).name;
+    const resolved = policyDraft.trailId
+      ? await require('./trailReviewBridge').resolveTrailTemplate(policyDraft.trailId, policyDraft.trailAudience, decision.templateId, policyDraft.event)
+      : await resolveTemplate(policyDraft.event, decision.templateId);
+    templateName = resolved.name;
   }
   const update = policyDraft.status === 'failed'
     ? { status: 'sending', failure: '' }
@@ -404,7 +440,7 @@ async function decideChannels(id, actor, decision, access) {
       // A retry repeats the channels its first attempt locked.
       let chosen = locked && decision.channels === undefined ? { ...decision, channels: delivery.selectionFor(draft.delivery.channels) } : decision;
       if (!locked && decision.channels === undefined) {
-        let channels = await delivery.actionChannel(draft.event);
+        let channels = await delivery.actionChannel(draft.event, draft);
         if (actor === null) {
           // Automatic mail (no reviewer to choose). Both: each part goes where it can, as the email +
           // WhatsApp copy always did (a team address usually has no phone). A single route that can't

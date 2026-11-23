@@ -3,11 +3,18 @@ async function buildReview(draft, isAdmin) {
   const { reviewWithDoc, templateOptions, editableReview } = require('./emailTemplates');
   const { availability } = require('./reviewDelivery');
   const { messageTypes } = require('./leadMessage');
+  const trailBridge = draft.trailId ? require('./trailReviewBridge') : null;
   // Template initialization can update its revision; finish it before reading editable metadata.
-  const options = isAdmin ? await templateOptions(draft.event) : undefined;
+  const options = isAdmin
+    ? (trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience) : await templateOptions(draft.event))
+    : undefined;
+  let trailTemplate;
+  if (isAdmin && trailBridge) {
+    trailTemplate = await trailBridge.resolveTrailTemplate(draft.trailId, draft.trailAudience, draft.sourceTemplateId || null, draft.event).catch(() => null);
+  }
   const [channels, editable, types] = await Promise.all([
     availability(draft),
-    isAdmin ? editableReview(draft) : undefined,
+    isAdmin ? editableReview(draft, trailTemplate || undefined) : undefined,
     isAdmin && draft.leadId ? messageTypes(draft.leadId) : undefined,
   ]);
   const channelEditable = (draft.status === 'pending' && !draft.attemptCount) || draft.delivery?.channels?.length;

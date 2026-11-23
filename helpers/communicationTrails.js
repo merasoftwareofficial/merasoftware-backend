@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Trail = require('../models/communicationTrailModel');
 const Rule = require('../models/communicationActionRuleModel');
 const Run = require('../models/communicationReminderRunModel');
@@ -5,11 +6,85 @@ const { ACTIONS } = require('./actionEvents');
 const { cleanRule } = require('./actionRules');
 
 const MAX_CHAIN_DEPTH = 6;
+const MAX_TEMPLATES_PER_AUDIENCE = 25;
+const HEX24_RE = /^[a-f\d]{24}$/i;
 const fail = (message, status = 400) => {
   const err = new Error(message);
   err.status = status;
   throw err;
 };
+
+function cleanChannel(ch) {
+  return ['whatsapp', 'email', 'both'].includes(ch) ? ch : 'whatsapp';
+}
+
+function normalizeMessageBlock(raw = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  let templates = [];
+  if (Array.isArray(src.templates) && src.templates.length > 0) {
+    const seenIds = new Set();
+    templates = src.templates.slice(0, MAX_TEMPLATES_PER_AUDIENCE).map((item, idx) => {
+      const t = item && typeof item === 'object' ? item : {};
+      let id = typeof t.id === 'string' && HEX24_RE.test(t.id.trim()) ? t.id.trim().toLowerCase() : '';
+      if (!id || seenIds.has(id)) id = new mongoose.Types.ObjectId().toString();
+      seenIds.add(id);
+      const name = String(t.name || '').trim().slice(0, 100) || (idx === 0 ? 'Default' : `Template ${idx + 1}`);
+      return {
+        id,
+        name,
+        channel: cleanChannel(t.channel),
+        subject: String(t.subject || '').trim().slice(0, 300),
+        text: String(t.text || '').trim(),
+        isDefault: Boolean(t.isDefault),
+      };
+    });
+  } else {
+    templates = [{
+      id: new mongoose.Types.ObjectId().toString(),
+      name: 'Default',
+      channel: cleanChannel(src.channel),
+      subject: String(src.subject || '').trim().slice(0, 300),
+      text: String(src.text || '').trim(),
+      isDefault: true,
+    }];
+  }
+
+  let defIdx = templates.findIndex(t => t.isDefault);
+  if (defIdx < 0) defIdx = 0;
+  templates = templates.map((t, idx) => ({ ...t, isDefault: idx === defIdx }));
+  const def = templates[defIdx];
+  return {
+    channel: def.channel,
+    subject: def.subject,
+    text: def.text,
+    templates,
+  };
+}
+
+function defaultTemplateOf(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  if (Array.isArray(msg.templates) && msg.templates.length) {
+    return msg.templates.find(t => t.isDefault) || msg.templates[0];
+  }
+  return {
+    id: '',
+    name: 'Default',
+    channel: cleanChannel(msg.channel),
+    subject: String(msg.subject || '').trim(),
+    text: String(msg.text || '').trim(),
+    isDefault: true,
+  };
+}
+
+function normalizeInstantBlock(raw = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const audience = ['off', 'client', 'admin', 'both'].includes(src.audience) ? src.audience : 'off';
+  return {
+    audience,
+    client: normalizeMessageBlock(src.client),
+    admin: normalizeMessageBlock(src.admin),
+  };
+}
 
 function mapScope(scopeMode, selectedPackages, actionsList) {
   const supportsScope = actionsList.some(a => ACTIONS[a]?.supportsScope);
@@ -55,10 +130,11 @@ function compileInstant(instant, actionsList, scopeObj, control, out) {
   const targets = instant.audience === 'both' ? ['client', 'admin'] : [instant.audience];
   for (const who of targets) {
     const msg = who === 'client' ? instant.client : instant.admin;
-    const text = String(msg?.text || '').trim();
+    const def = defaultTemplateOf(msg);
+    const text = String(def?.text || '').trim();
     if (!text) continue;
-    const channel = msg?.channel || 'whatsapp';
-    const subject = channel === 'whatsapp' ? '' : (String(msg?.subject || '').trim() || ACTIONS[actionsList[0]]?.label || 'Notification');
+    const channel = cleanChannel(def?.channel);
+    const subject = channel === 'whatsapp' ? '' : (String(def?.subject || '').trim() || ACTIONS[actionsList[0]]?.label || 'Notification');
     out.push(cleanRule({
       kind: 'template',
       actions: actionsList,
@@ -163,17 +239,18 @@ function validateAndCompileTrail(raw = {}) {
     : [];
   const control = ['auto', 'review', 'off'].includes(raw.control) ? raw.control : 'auto';
   const enabled = raw.enabled !== false && control !== 'off';
-  const instant = raw.instant && typeof raw.instant === 'object'
-    ? raw.instant
-    : { audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } };
+  const instantControl = enabled ? control : 'off';
+  // Scheduled Reminders always run `auto` while the Trail is enabled (never blocked by Instant `review` mode).
+  const reminderControl = enabled ? 'auto' : 'off';
+  const instant = normalizeInstantBlock(raw.instant);
   const reminders = Array.isArray(raw.reminders) ? raw.reminders : [];
   const rawStages = Array.isArray(raw.stages) ? raw.stages : [];
   if (rawStages.length > MAX_CHAIN_DEPTH) fail(`Maximum ${MAX_CHAIN_DEPTH} follow-up stages allowed.`);
 
   const compiled = [];
   const topScope = mapScope(scope, selectedPackages, triggers);
-  compileInstant(instant, triggers, topScope, control, compiled);
-  compileReminders(reminders, triggers, scope, selectedPackages, control, compiled, 0, new Set(triggers));
+  compileInstant(instant, triggers, topScope, instantControl, compiled);
+  compileReminders(reminders, triggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(triggers));
 
   const stages = [];
   for (let i = 0; i < rawStages.length; i++) {
@@ -183,14 +260,12 @@ function validateAndCompileTrail(raw = {}) {
       : (st.trigger ? [st.trigger] : []);
     const stageTriggers = [...new Set(rawStageTriggers.map(k => String(k || '').trim()).filter(k => ACTIONS[k]?.trigger))];
     if (!stageTriggers.length) fail(`Choose a valid trigger point for stage ${i + 2}.`);
-    const stageInstant = st.instant && typeof st.instant === 'object'
-      ? st.instant
-      : { audience: 'off', client: { channel: 'whatsapp', subject: '', text: '' }, admin: { channel: 'whatsapp', subject: '', text: '' } };
+    const stageInstant = normalizeInstantBlock(st.instant);
     const stageReminder = st.reminder && typeof st.reminder === 'object' ? st.reminder : null;
     const stageScope = mapScope(scope, selectedPackages, stageTriggers);
-    compileInstant(stageInstant, stageTriggers, stageScope, control, compiled);
+    compileInstant(stageInstant, stageTriggers, stageScope, instantControl, compiled);
     if (stageReminder) {
-      compileReminders([stageReminder], stageTriggers, scope, selectedPackages, control, compiled, 0, new Set(stageTriggers));
+      compileReminders([stageReminder], stageTriggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(stageTriggers));
     }
     stages.push({
       id: st.id || i + 1,
@@ -254,6 +329,9 @@ async function createTrail(raw, actorId) {
     createdBy: actorId,
   });
   await syncCompiledRules(trail, compiled, actorId);
+  if (raw?.migratedLegacy) {
+    await require('./legacyMigrationBridge').stampMigratedLegacy(trail._id, raw.migratedLegacy);
+  }
   return trail.toObject();
 }
 
@@ -273,6 +351,9 @@ async function updateTrail(id, raw, actorId) {
   existing.revision = (existing.revision || 1) + 1;
   await existing.save();
   await syncCompiledRules(existing, compiled, actorId || existing.createdBy);
+  if (raw?.migratedLegacy) {
+    await require('./legacyMigrationBridge').stampMigratedLegacy(existing._id, raw.migratedLegacy);
+  }
   return existing.toObject();
 }
 
@@ -286,10 +367,16 @@ async function setTrailEnabled(id, enabled) {
   if (!existing.enabled) {
     await cancelRunsForTrail(existing._id, 'Trail turned off by admin.');
   }
-  await Rule.updateMany(
-    { trailId: existing._id },
-    { $set: { enabled: existing.enabled, control: existing.control, activatedAt: existing.activatedAt } },
-  );
+  await Promise.all([
+    Rule.updateMany(
+      { trailId: existing._id, kind: 'template' },
+      { $set: { enabled: existing.enabled, control: existing.enabled ? existing.control : 'off', activatedAt: existing.activatedAt } },
+    ),
+    Rule.updateMany(
+      { trailId: existing._id, kind: 'reminder' },
+      { $set: { enabled: existing.enabled, control: existing.enabled ? 'auto' : 'off', activatedAt: existing.activatedAt } },
+    ),
+  ]);
   return existing.toObject();
 }
 
@@ -303,6 +390,9 @@ async function deleteTrail(id) {
 }
 
 module.exports = {
+  normalizeMessageBlock,
+  normalizeInstantBlock,
+  defaultTemplateOf,
   validateAndCompileTrail,
   listTrails,
   createTrail,

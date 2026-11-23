@@ -10,6 +10,7 @@ const templateSchema = new Schema({
   // The editable copy of an action's built-in wording (helpers/emailTemplates.js). One per
   // action; it can be reset to the original but never removed.
   system: { type: Boolean, default: false },
+  migratedToTrailId: { type: Schema.Types.ObjectId, ref: 'CommunicationTrail', default: null },
 }, { timestamps: true });
 templateSchema.index({ event: 1, system: 1 }, { unique: true, partialFilterExpression: { system: true } });
 const policySchema = new Schema({
@@ -19,6 +20,7 @@ const policySchema = new Schema({
   defaultTemplate: { type: Schema.Types.ObjectId, default: null },
   // "Send via" for this action; empty = emailCatalog.js defaultChannel. Read only through channelFor().
   channel: { type: String, enum: ['email', 'whatsapp', 'both'] },
+  migratedToTrailId: { type: Schema.Types.ObjectId, ref: 'CommunicationTrail', default: null },
 }, { timestamps: true });
 const draftSchema = new Schema({
   event: { type: String, required: true },
@@ -62,6 +64,9 @@ const draftSchema = new Schema({
   reminderInvoice: Schema.Types.ObjectId,
   // Only new configurable reminder drafts carry this; legacy messages are unchanged.
   reminderRunId: Schema.Types.ObjectId,
+  // Set when this draft belongs to an Automated Message System trail (SSOT review & template sync).
+  trailId: { type: Schema.Types.ObjectId, ref: 'CommunicationTrail', default: null },
+  trailAudience: { type: String, enum: ['client', 'admin'], default: null },
   offerReminderContext: { type: offerReminderContextSchema, default: undefined },
   // Set only by Send message on a lead's page (helpers/leadMessage.js).
   leadId: Schema.Types.ObjectId,

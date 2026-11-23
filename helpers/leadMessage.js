@@ -35,7 +35,24 @@ const TYPES = {
 };
 
 async function typesFor(lead) {
-  const off = new Set((await EmailPolicy.find({ event: { $in: Object.keys(TYPES) }, mode: 'off' }).select('event').lean()).map(row => row.event));
+  const keys = Object.keys(TYPES);
+  const policies = await EmailPolicy.find({ event: { $in: keys } }).select('event mode migratedToTrailId').lean();
+  const policyByEvent = new Map(policies.map(row => [row.event, row]));
+  const trailBridge = require('./trailReviewBridge');
+  const Trail = require('../models/communicationTrailModel');
+  const migratedIds = [...new Set(policies.map(p => p.migratedToTrailId).filter(Boolean).map(String))];
+  const trails = migratedIds.length ? await Trail.find({ _id: { $in: migratedIds } }).lean() : [];
+  const trailById = new Map(trails.map(t => [String(t._id), t]));
+  const off = new Set();
+  for (const ev of keys) {
+    const policy = policyByEvent.get(ev);
+    if (policy?.migratedToTrailId) {
+      const trail = trailById.get(String(policy.migratedToTrailId));
+      if (!trailBridge.isTrailActiveForAudience(trail, 'client')) off.add(ev);
+    } else if (policy?.mode === 'off') {
+      off.add(ev);
+    }
+  }
   return Object.entries(TYPES).filter(([, type]) => !type.fits || type.fits(lead)).map(([id, type]) => ({
     id, label: byKey.get(id).label, enabled: !off.has(id), ...(off.has(id) ? { reason: 'Off in Email Templates' } : {}), ...(type.note ? { note: type.note } : {}),
   }));
@@ -47,7 +64,7 @@ async function liveLead(leadId) {
 
 async function mailFor(event, lead) {
   const type = TYPES[event];
-  return { to: hasEmail(lead) ? [lead.email] : [], phone: lead.phone, leadId: lead._id, values: await type.values(lead), requiredLinks: type.requiredLinks?.(lead) };
+  return { to: hasEmail(lead) ? [lead.email] : [], phone: lead.phone, leadId: lead._id, interactiveReview: true, values: await type.values(lead), requiredLinks: type.requiredLinks?.(lead) };
 }
 
 /** The dropdown's list for this lead, read fresh each time. */
@@ -94,6 +111,7 @@ async function changeMessageType(draftId, event, actor) {
     event, values: mail.values, requiredLinks: mail.requiredLinks || [], to: mail.to, whatsappTo: normalizePhone(mail.phone),
     subject: content.subject, text: content.text, plain: content.plain, html: content.html,
     templateName: content.templateName, sourceTemplateId: content.sourceTemplateId,
+    trailId: content.trailId || null, trailAudience: content.trailAudience || null,
   } }, { new: true });
   if (!moved) fail('This message has already been decided.');
   await recordHistory(moved, actor);

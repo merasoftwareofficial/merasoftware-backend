@@ -151,19 +151,39 @@ const createLeadController = async (req, res) => {
     if ((cleanEmail || req.body.emailReview?.channels === 'whatsapp') && req.body.emailReview?.choice === 'send') {
       try {
         const { queueMail } = require('../../helpers/emailController');
-        const { reviewTextFromEditor, reviewSubjectFromEditor, resolveTemplate } = require('../../helpers/emailTemplates');
+        const { reviewTextFromEditor, reviewSubjectFromEditor } = require('../../helpers/emailTemplates');
+        const { resolveTemplateForEvent } = require('../../helpers/trailReviewBridge');
         // The popup sends the editor's document; the send decision after the response reads this text.
         const text = reviewTextFromEditor('lead.created', req.body.emailReview, { name: cleanName }, {});
         const subject = reviewSubjectFromEditor('lead.created', req.body.emailReview, { name: cleanName });
-        const original = req.body.emailReview.templateId && req.body.emailReview.templateId !== 'current' ? await resolveTemplate('lead.created', req.body.emailReview.templateId) : null;
+        const original = req.body.emailReview.templateId && req.body.emailReview.templateId !== 'current'
+          ? await resolveTemplateForEvent('lead.created', req.body.emailReview.templateId, req.body.emailReview.trailId, req.body.emailReview.trailAudience)
+          : null;
         req.body.emailReview = { ...req.body.emailReview, text, subject };
         await queueMail('lead.created', {
           to: cleanEmail ? [cleanEmail] : [], phone: cleanPhone, leadId: savedLead._id, subject, text, reviewed: true, sourceTemplateId: original?._id,
+          ...(req.body.emailReview.trailId ? { trailId: req.body.emailReview.trailId, trailAudience: req.body.emailReview.trailAudience || 'client' } : {}),
         }, { name: cleanName });
       } catch (mailError) {
         console.error('Lead saved; email draft unavailable:', mailError.message);
         req.emailPreparationFailed = true;
       }
+    } else if (req.body.emailReview?.choice === 'skip') {
+      try {
+        const scope = require('../../helpers/emailController').getActiveRequestScope?.();
+        const trailBridge = require('../../helpers/trailReviewBridge');
+        if (scope && !scope.system) {
+          let skipTrailId = req.body.emailReview?.trailId || null;
+          if (!skipTrailId) {
+            const { migrated, trail, audience } = await trailBridge.activeTrailForEvent('lead.created');
+            if (migrated && trailBridge.isTrailActiveForAudience(trail, audience) && trail.control === 'review') skipTrailId = trail._id;
+          }
+          if (skipTrailId) {
+            const key = trailBridge.trailSyncKey(skipTrailId, req.body.emailReview?.trailAudience || 'client');
+            scope.syncReviewedTrails = [...new Set([...(scope.syncReviewedTrails || []), key])];
+          }
+        }
+      } catch { /* ignore */ }
     }
 
     await require('../../helpers/actionEvents').leadCreated(savedLead).catch(err => console.error('[action lead.created]', err.message));

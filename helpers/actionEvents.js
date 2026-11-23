@@ -553,6 +553,9 @@ async function emitAction(action, { key, entityId, clientId = null, leadId = nul
     if (scope.syncReviewedTemplates?.length && !nextDetails.syncReviewedTemplates) {
       nextDetails.syncReviewedTemplates = [...scope.syncReviewedTemplates];
     }
+    if (scope.syncReviewedTrails?.length && !nextDetails.syncReviewedTrails) {
+      nextDetails.syncReviewedTrails = [...scope.syncReviewedTrails];
+    }
     if (Array.isArray(scope.emittedActions) && !scope.emittedActions.includes(action)) scope.emittedActions.push(action);
     if (Array.isArray(scope.emittedEventKeys) && !scope.emittedEventKeys.includes(key)) scope.emittedEventKeys.push(key);
   }

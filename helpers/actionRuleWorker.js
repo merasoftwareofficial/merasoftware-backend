@@ -287,9 +287,14 @@ async function handleEvent(event) {
   const needsUploadCheck = rules.some(r => r.condition === 'upload_pending');
   const ctx = await resolveEventContext(event, { needsPendingCheck, needsUploadCheck });
   const syncReviewed = Array.isArray(event.details?.syncReviewedTemplates) ? event.details.syncReviewedTemplates : [];
+  const syncReviewedTrails = Array.isArray(event.details?.syncReviewedTrails) ? event.details.syncReviewedTrails : [];
   for (const rule of rules) {
     if (DIRECT_TEMPLATE_MIGRATED.has(rule.migratedFrom)) continue;
     if (rule.migratedFrom && syncReviewed.includes(rule.migratedFrom)) continue;
+    if (rule.trailId && rule.kind === 'template') {
+      const trailKey = `${String(rule.trailId)}:${rule.audience || 'customer'}`;
+      if (syncReviewedTrails.includes(trailKey) || syncReviewedTrails.includes(String(rule.trailId))) continue;
+    }
     if (!event.clientId && !event.leadId && rule.audience !== 'admin') continue;
     if (!ruleMatchesContext(rule, ctx)) continue;
     for (const run of planRuns(rule, event, ctx.dueDate, ctx)) {
@@ -321,7 +326,7 @@ async function processEvents(limit = 200) {
 // stop action came through a path that records no event.
 async function stillValid(run) {
   const rule = await Rule.findOne({ _id: run.ruleId, ...activeRuleFilter(), enabled: true, control: { $in: ['auto', 'review'] } })
-    .select('_id condition minProgress minRemainingLimit maxRemainingLimit control scope repeat').lean();
+    .select('_id trailId kind condition minProgress minRemainingLimit maxRemainingLimit control scope repeat').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -430,9 +435,9 @@ async function stillValid(run) {
   if (run.audience === 'admin') {
     const contacts = await teamContacts();
     if (!contacts.length) return { ok: false, reason: 'No admin contact configured.' };
-    return { ok: true, control: rule.control, repeat: rule.repeat, client, lead, invoice, order, contacts };
+    return { ok: true, trailId: rule.trailId || null, ruleKind: rule.kind, control: rule.control, repeat: rule.repeat, client, lead, invoice, order, contacts };
   }
-  return { ok: true, control: rule.control, repeat: rule.repeat, client, lead, invoice, order };
+  return { ok: true, trailId: rule.trailId || null, ruleKind: rule.kind, control: rule.control, repeat: rule.repeat, client, lead, invoice, order };
 }
 
 // Same check for the email provider and WhatsApp handoff (communicationReminderEligibility.js),
@@ -585,6 +590,7 @@ async function dispatchRun(runId, now = new Date()) {
       text: normalizePlaceholders(run.text),
       values,
       reminderRunId: run._id,
+      ...(check.trailId && check.ruleKind === 'template' ? { trailId: check.trailId, trailAudience: isAdmin ? 'admin' : 'client' } : {}),
     };
     const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', {
       channel: run.channel,

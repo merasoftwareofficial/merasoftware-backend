@@ -149,9 +149,13 @@ function validateTemplate(event, body) {
 }
 router.get('/preferences/:event', handle(async (req, res) => {
   templateChoiceAllowed(req); allowedEvent(req, req.params.event);
+  const trailBridge = require('../helpers/trailReviewBridge');
   const saved = await EmailReviewPreference.findOne({ actor: req.userId, application: req.emailApplication, event: req.params.event }).lean();
-  const valid = saved?.templateId && await EmailTemplate.exists({ _id: saved.templateId, event: req.params.event });
-  const fallback = saved?.templateId && !valid ? await resolveTemplate(req.params.event) : null;
+  const valid = saved?.templateId && (
+    await trailBridge.hasTrailTemplate(req.params.event, saved.templateId)
+    || await EmailTemplate.exists({ _id: saved.templateId, event: req.params.event })
+  );
+  const fallback = saved?.templateId && !valid ? await trailBridge.resolveTemplateForEvent(req.params.event).catch(() => null) : null;
   res.json({ success: true, data: { templateId: valid ? String(saved.templateId) : fallback?._id ? String(fallback._id) : null, templateUnavailable: !!saved?.templateId && !valid } });
 }));
 // Only the reviewer's template choice is remembered. The route is the action's own "Send via"
@@ -159,7 +163,13 @@ router.get('/preferences/:event', handle(async (req, res) => {
 router.put('/preferences/:event', handle(async (req, res) => {
   templateChoiceAllowed(req); allowedEvent(req, req.params.event);
   if (req.body.templateId === undefined) throw new Error('Choose a template');
-  if (req.body.templateId !== null && (!mongoose.isValidObjectId(req.body.templateId) || !await EmailTemplate.exists({ _id: req.body.templateId, event: req.params.event }))) throw new Error('Choose a template for this action');
+  if (req.body.templateId !== null) {
+    const valid = mongoose.isValidObjectId(req.body.templateId) && (
+      await require('../helpers/trailReviewBridge').hasTrailTemplate(req.params.event, req.body.templateId)
+      || await EmailTemplate.exists({ _id: req.body.templateId, event: req.params.event })
+    );
+    if (!valid) throw new Error('Choose a template for this action');
+  }
   const fields = { templateId: req.body.templateId };
   const key = { actor: req.userId, application: req.emailApplication, event: req.params.event };
   let saved;
@@ -169,6 +179,17 @@ router.put('/preferences/:event', handle(async (req, res) => {
 }));
 router.patch('/templates/:id', handle(async (req, res) => {
   templateChoiceAllowed(req);
+  if (req.body.trailId) {
+    const updated = await require('../helpers/trailReviewBridge').renameTrailTemplate({
+      trailId: req.body.trailId,
+      trailAudience: req.body.trailAudience,
+      templateId: req.params.id,
+      event: req.body.event || 'reminder.automated',
+      name: req.body.name,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
+    });
+    return res.json({ success: true, data: updated });
+  }
   const current = await EmailTemplate.findById(req.params.id).lean();
   if (!current) throw new Error('Template not found');
   allowedEvent(req, current.event);
@@ -180,6 +201,16 @@ router.patch('/templates/:id', handle(async (req, res) => {
 }));
 router.delete('/templates/:id', handle(async (req, res) => {
   templateChoiceAllowed(req);
+  if (req.body.trailId) {
+    const deleted = await require('../helpers/trailReviewBridge').deleteTrailTemplate({
+      trailId: req.body.trailId,
+      trailAudience: req.body.trailAudience,
+      templateId: req.params.id,
+      replacementTemplateId: req.body.replacementTemplateId,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
+    });
+    return res.json({ success: true, data: deleted });
+  }
   const current = await EmailTemplate.findById(req.params.id).lean();
   if (!current) throw new Error('Template not found');
   allowedEvent(req, current.event);
@@ -196,6 +227,22 @@ router.delete('/templates/:id', handle(async (req, res) => {
 // Template bodies arrive as the editor's documents (or plain text from older clients).
 router.post('/templates', handle(async (req, res) => {
   adminOnly(req);
+  if (req.body.trailId) {
+    const event = req.body.event || 'reminder.automated';
+    if (byKey.has(event)) allowedEvent(req, event);
+    const fields = templateFromEditor(event, req.body);
+    validateContent(fields.subject, fields.text);
+    const created = await require('../helpers/trailReviewBridge').createTrailTemplate({
+      trailId: req.body.trailId,
+      trailAudience: req.body.trailAudience,
+      event,
+      sourceTemplateId: req.body.sourceTemplateId,
+      name: fields.name,
+      subject: fields.subject,
+      text: fields.text,
+    });
+    return res.json({ success: true, data: created });
+  }
   // Review saves create a custom copy. The source owns its action; clients cannot move it.
   let event = req.body.event;
   if (req.body.sourceTemplateId !== undefined) {
@@ -212,6 +259,23 @@ router.post('/templates', handle(async (req, res) => {
 }));
 router.put('/templates/:id', handle(async (req, res) => {
   adminOnly(req);
+  if (req.body.trailId) {
+    const event = req.body.event || 'reminder.automated';
+    if (byKey.has(event)) allowedEvent(req, event);
+    const fields = templateFromEditor(event, req.body);
+    validateContent(fields.subject, fields.text);
+    const updated = await require('../helpers/trailReviewBridge').updateTrailTemplate({
+      trailId: req.body.trailId,
+      trailAudience: req.body.trailAudience,
+      templateId: req.params.id,
+      event,
+      name: fields.name,
+      subject: fields.subject,
+      text: fields.text,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
+    });
+    return res.json({ success: true, data: updated });
+  }
   const current = await EmailTemplate.findById(req.params.id).lean();
   if (!current) throw new Error('Template not found');
   allowedEvent(req, current.event);
@@ -262,7 +326,9 @@ router.post('/drafts/:id/preview', handle(async (req, res) => {
     return res.json({ success: true, data: { subject, html: reviewedMail(draft, withRequiredLinks(text, draft.requiredLinks, draft.values)).html } });
   }
   templateChoiceAllowed(req);
-  const template = await resolveTemplate(draft.event, req.body.templateId);
+  const template = draft.trailId
+    ? await require('../helpers/trailReviewBridge').resolveTrailTemplate(draft.trailId, draft.trailAudience, req.body.templateId, draft.event)
+    : await resolveTemplate(draft.event, req.body.templateId);
   const mail = composeTemplate(template, draft.values || {}, draft.blocks, draft.requiredLinks);
   const { doc } = reviewWithDoc(draft.event, mail.text, draft.values, draft.blocks);
   res.json({ success: true, data: { subject: mail.subject, text: mail.text, doc, html: reviewedMail(draft, mail.text).html, ...await editableReview(draft, template) } });
@@ -282,23 +348,29 @@ router.post('/lead-preview', handle(async (req, res) => {
   const mail = await applyDefault('lead.created', {}, { name });
   if (!mail) return res.json({ success: true, data: null });
   const draft = { to: req.body.email ? [String(req.body.email)] : [], whatsappTo: require('../helpers/whatsappQueue').normalizePhone(req.body.phone), subject: mail.subject, text: mail.text,
-    event: 'lead.created', sourceTemplateId: mail.sourceTemplateId, values: { name }, blocks: {} };
+    event: 'lead.created', sourceTemplateId: mail.sourceTemplateId, values: { name }, blocks: {},
+    ...(mail.trailId ? { trailId: mail.trailId, trailAudience: mail.trailAudience || 'client' } : {}) };
+  const trailBridge = draft.trailId ? require('../helpers/trailReviewBridge') : null;
+  const trailTemplate = trailBridge
+    ? await trailBridge.resolveTrailTemplate(draft.trailId, draft.trailAudience, draft.sourceTemplateId || null, draft.event).catch(() => null)
+    : null;
   const channels = await availability(draft);
   // The unsaved lead's alternate number gets the copy too once it is saved (helpers/contactNumbers.js), so the popup shows it.
   const { altSendingEnabled, usableAlt } = require('../helpers/contactNumbers');
   const alt = draft.whatsappTo && altSendingEnabled() ? usableAlt(req.body.altPhone, draft.whatsappTo) : null;
   const { contactBlocks, numberBlock } = require('../helpers/leadContactBlock');
   const whatsappNumbers = draft.whatsappTo ? [{ phone: draft.whatsappTo, alt: false }, ...(alt && !numberBlock(alt, await contactBlocks()) ? [{ phone: alt, alt: true }] : [])] : [];
+  const options = trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience) : await templateOptions(draft.event);
   res.json({ success: true, data: { ...draft, whatsappNumbers, ...reviewWithDoc(draft.event, mail.text, draft.values, {}),
-    ...await editableReview(draft), templateOptions: await templateOptions(draft.event), channelOptions: channels.choices, defaultChannel: channels.defaultChannel } });
+    ...await editableReview(draft, trailTemplate || undefined), templateOptions: options, channelOptions: channels.choices, defaultChannel: channels.defaultChannel } });
 }));
 // Unsaved Add Lead and the existing phone-only proposal popup share original-template selection.
 // This endpoint only previews; final sending re-derives values/contacts from the saved business record.
 router.post('/review-preview', handle(async (req, res) => {
   adminOnly(req); allowedEvent(req, req.body.event);
   if (!['lead.created', 'lead.proposal'].includes(req.body.event)) throw new Error('Use the saved draft preview for this action.');
-  const template = await resolveTemplate(req.body.event, req.body.templateId);
-  const draft = { event: req.body.event, values: req.body.values || {}, blocks: {} };
+  const template = await require('../helpers/trailReviewBridge').resolveTemplateForEvent(req.body.event, req.body.templateId, req.body.trailId, req.body.trailAudience);
+  const draft = { event: req.body.event, values: req.body.values || {}, blocks: {}, ...(req.body.trailId ? { trailId: req.body.trailId, trailAudience: req.body.trailAudience || 'client' } : {}) };
   const mail = composeTemplate(req.body.doc ? { ...template, ...templateFromEditor(draft.event, { ...req.body, name: template.name }) } : template, draft.values, {});
   res.json({ success: true, data: { ...mail, ...await editableReview(draft, template) } });
 }));
