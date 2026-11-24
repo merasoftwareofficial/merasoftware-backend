@@ -180,9 +180,9 @@ function quotePackage(item, offers, now = Date.now()) {
   const quote = offer
     ? { ...calculateBenefit(item.regularPrice, offer, item.offerExtraPrice), regularPrice: item.regularPrice, offer, terms }
     : { discountAmount: 0, finalPrice: discountedPrice, regularPrice: discountedPrice, offer: null, terms };
-  // Where a package is shown does not change its price or scope, so pages stay out of the
-  // version key; moving a package between pages never invalidates an open project form.
-  const { pages, design, ...priced } = item;
+  // Where and in what order a package is shown does not change its price or scope, so pages,
+  // design and order stay out of the version key; moving or reordering a package never invalidates an open project form.
+  const { pages, design, order, ...priced } = item;
   // An offer's own quoteKey (website src/lib/offer-quote.ts) already signs everything commercial
   // about it and leaves out display/timing settings such as its reserve window, so the package
   // version follows that key, as service-plan quotes do (serviceOfferPolicy.js). An offer
@@ -426,6 +426,20 @@ async function transitionPackageStatus(id, status, offers, packagePages = []) {
   const raw = current.pricing ? { ...current, services: current.pricing.services.map(row => ({ featureId: row.featureId, quantity: row.quantity })) } : current;
   return savePackage({ ...raw, status }, false, offers, packagePages);
 }
+// Inline list priority/display-order update: atomic, does not touch updatedAt
+// so "Recently modified" sorting stays meaningful for real package edits.
+async function updatePackageOrder(id, order) {
+  if (!safeId(id)) fail('Choose a valid package');
+  if (!Number.isInteger(order) || order < 0 || order > 9999) fail('Enter a valid display order');
+  if (await Draft.exists({ packageId: id })) fail('This package has a draft in progress. Continue or discard the draft first.', 409);
+  const current = (await readPackages()).find(item => item.id === id);
+  if (!current) fail('Package not found', 404);
+  if (current.order === order) return current;
+  const path = `packages.${id}`;
+  const result = await Catalogue.updateOne({ _id: 'packages', [path]: { $exists: true } }, { $set: { [`${path}.order`]: order } });
+  if (result.modifiedCount !== 1) fail('Package changed; refresh the catalogue and try again', 409);
+  return { ...current, order };
+}
 function checkOfferFits(item, offer) {
   if (!offer || !offer.pricingRule || !offer.applicableCategories?.includes(item.category)) fail(`The offer is unavailable or does not match the category of ${item.name}`);
   calculateBenefit(item.regularPrice, offer, item.offerExtraPrice);
@@ -467,4 +481,4 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, reservedPackageIds, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deletePackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };
+module.exports = { money, fail, readPackages, reservedPackageIds, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };

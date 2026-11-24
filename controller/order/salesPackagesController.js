@@ -2,7 +2,7 @@ const User = require('../../models/userModel');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deletePackage, transitionPackageStatus, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories, categoryUsage } = require('../../helpers/projectCategories');
 const { FEATURE_UPGRADE_CATEGORY } = require('../../helpers/featureCatalogue');
 const drafts = require('../../helpers/packageDrafts');
@@ -60,6 +60,10 @@ const adminLifecycle = handle(async (req, res) => {
   await requireAdmin(req);
   const { offers, packagePages } = await fetchWebsiteCatalogue();
   res.json({ success: true, data: await transitionPackageStatus(req.body?.packageId, req.body?.action, offers, packagePages) });
+});
+const adminOrder = handle(async (req, res) => {
+  await requireAdmin(req);
+  res.json({ success: true, data: await updatePackageOrder(req.body?.packageId, req.body?.order) });
 });
 const adminLinkOffer = handle(async (req, res) => {
   await requireAdmin(req);
@@ -125,4 +129,4 @@ const adminQuote = handle(async (req, res) => {
   if (item.billing === 'monthly' || (item.billing && req.body?.choice?.paymentOption)) data.quote = quoteChoice(item, quoted, req.body?.choice || {});
   res.set('Cache-Control', 'no-store').json({ success: true, data });
 });
-module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };
+module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminOrder, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };

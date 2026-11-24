@@ -37,6 +37,8 @@ test('package version follows the offer quoteKey: display/timing settings do not
   assert.notEqual(quotePackage({ ...item, inclusions: ['Updated scope'] }, [signed]).quoteKey, initial.quoteKey);
   // Without a key the full offer is signed, as before.
   assert.notEqual(quotePackage(item, [{ ...live, reserveWindowHours: 48 }]).quoteKey, quotePackage(item, [live]).quoteKey);
+  // Display priority / card order never changes commercial price or scope, so quoteKey stays invariant.
+  assert.equal(quotePackage({ ...item, order: 42 }, [signed]).quoteKey, initial.quoteKey);
 });
 test('package has a main and a discounted price; an offer replaces the discount and is calculated from the main price', () => {
   const item = { ...STARTER_PACKAGES[0], regularPrice: 14000, discountedPrice: 12000, offerSlug: '' };

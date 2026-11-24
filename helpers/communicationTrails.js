@@ -104,6 +104,52 @@ function normalizeInstantBlock(raw = {}) {
   };
 }
 
+function normalizeReminderStep(raw = {}) {
+  const st = raw && typeof raw === 'object' ? raw : {};
+  const amount = Number(st.amount);
+  return {
+    amount: Number.isFinite(amount) ? Math.max(0, amount) : 3,
+    unit: st.unit === 'hours' ? 'hours' : 'days',
+    pos: st.pos === 'on' || st.pos === 'after' ? st.pos : 'before',
+    channel: cleanChannel(st.channel),
+    subject: String(st.subject || '').trim().slice(0, 300),
+    text: String(st.text || '').trim(),
+  };
+}
+
+function normalizeReminderBlock(raw = {}, fallbackId = 1) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const id = Number.isFinite(Number(r.id)) ? Number(r.id) : fallbackId;
+  const clientSteps = Array.isArray(r.clientSteps) && r.clientSteps.length
+    ? r.clientSteps.slice(0, 10).map(normalizeReminderStep)
+    : [normalizeReminderStep({})];
+  const adminSteps = Array.isArray(r.adminSteps) && r.adminSteps.length
+    ? r.adminSteps.slice(0, 10).map(normalizeReminderStep)
+    : [normalizeReminderStep({})];
+  const repeatForDays = Number(r.repeatForDays);
+  const repeatEveryDays = Number(r.repeatEveryDays);
+  const repeatPerDay = Number(r.repeatPerDay);
+  const conditionValue = Number(r.conditionValue);
+  return {
+    id,
+    startTrigger: typeof r.startTrigger === 'string' && r.startTrigger.trim() ? r.startTrigger.trim() : '__main__',
+    audience: ['client', 'admin', 'both'].includes(r.audience) ? r.audience : 'client',
+    clientMode: r.clientMode === 'universal' ? 'universal' : 'separate',
+    adminMode: r.adminMode === 'universal' ? 'universal' : 'separate',
+    clientSteps,
+    adminSteps,
+    repeatMode: ['off', 'permanent', 'limited'].includes(r.repeatMode) ? r.repeatMode : 'off',
+    repeatForDays: Number.isFinite(repeatForDays) ? Math.max(1, repeatForDays) : 7,
+    repeatEveryDays: Number.isFinite(repeatEveryDays) ? Math.max(1, repeatEveryDays) : 2,
+    repeatPerDay: Number.isFinite(repeatPerDay) ? Math.min(4, Math.max(1, repeatPerDay)) : 1,
+    countDaysFrom: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : 'due_date',
+    condition: typeof r.condition === 'string' && r.condition.trim() ? r.condition.trim() : 'any',
+    conditionValue: Number.isFinite(conditionValue) ? Math.max(0, conditionValue) : 50,
+    stopOn: [...new Set((Array.isArray(r.stopOn) ? r.stopOn : []).map(k => String(k || '').trim()).filter(Boolean))],
+    stopChains: {},
+  };
+}
+
 function mapScope(scopeMode, selectedPackages, actionsList) {
   const supportsScope = actionsList.some(a => ACTIONS[a]?.supportsScope);
   if (!supportsScope || !scopeMode || scopeMode === 'all') return { kind: 'all' };
@@ -274,7 +320,7 @@ function validateAndCompileTrail(raw = {}) {
   // Scheduled Reminders always run `auto` while the Trail is enabled (never blocked by Instant `review` mode).
   const reminderControl = enabled ? 'auto' : 'off';
   const instant = normalizeInstantBlock(raw.instant);
-  const reminders = Array.isArray(raw.reminders) ? raw.reminders : [];
+  const reminders = (Array.isArray(raw.reminders) ? raw.reminders : []).map((r, idx) => normalizeReminderBlock(r, idx + 1));
   const rawStages = Array.isArray(raw.stages) ? raw.stages : [];
   if (rawStages.length > MAX_CHAIN_DEPTH) fail(`Maximum ${MAX_CHAIN_DEPTH} follow-up stages allowed.`);
 
@@ -292,7 +338,7 @@ function validateAndCompileTrail(raw = {}) {
     const stageTriggers = [...new Set(rawStageTriggers.map(k => String(k || '').trim()).filter(k => ACTIONS[k]?.trigger))];
     if (!stageTriggers.length) fail(`Choose a valid trigger point for stage ${i + 2}.`);
     const stageInstant = normalizeInstantBlock(st.instant);
-    const stageReminder = st.reminder && typeof st.reminder === 'object' ? st.reminder : null;
+    const stageReminder = st.reminder && typeof st.reminder === 'object' ? normalizeReminderBlock(st.reminder, i + 1) : null;
     const stageScope = mapScope(scope, selectedPackages, stageTriggers);
     compileInstant(stageInstant, stageTriggers, stageScope, actionControls, compiled);
     if (stageReminder) {
@@ -376,6 +422,9 @@ async function updateTrail(id, raw, actorId) {
   existing.instant = trailFields.instant;
   existing.reminders = trailFields.reminders;
   existing.stages = trailFields.stages;
+  existing.markModified('instant');
+  existing.markModified('reminders');
+  existing.markModified('stages');
   existing.control = trailFields.control;
   existing.adminActionControl = trailFields.adminActionControl;
   existing.userActionControl = trailFields.userActionControl;
@@ -435,6 +484,8 @@ module.exports = {
   resolveActionControls,
   normalizeMessageBlock,
   normalizeInstantBlock,
+  normalizeReminderStep,
+  normalizeReminderBlock,
   defaultTemplateOf,
   validateAndCompileTrail,
   listTrails,

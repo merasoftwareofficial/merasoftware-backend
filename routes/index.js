@@ -213,6 +213,7 @@ router.get('/admin/sales-packages', authToken, require('../controller/order/sale
 router.patch('/admin/sales-packages', authToken, require('../controller/order/salesPackagesController').adminSave);
 router.patch('/admin/sales-packages/delete', authToken, require('../controller/order/salesPackagesController').adminDelete);
 router.patch('/admin/sales-packages/lifecycle', authToken, require('../controller/order/salesPackagesController').adminLifecycle);
+router.patch('/admin/sales-packages/order', authToken, require('../controller/order/salesPackagesController').adminOrder);
 router.patch('/admin/sales-packages/drafts', authToken, require('../controller/order/salesPackagesController').adminDraft);
 router.patch('/admin/sales-packages/offer-links', authToken, require('../controller/order/salesPackagesController').adminLinkOffer);
 router.patch('/admin/sales-packages/page-unlink', authToken, require('../controller/order/salesPackagesController').adminUnlinkPage);
