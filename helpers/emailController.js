@@ -84,7 +84,7 @@ async function applyDefault(event, mail, values = {}) {
     const trailBridge = require('./trailReviewBridge');
     const { migrated, trail, audience } = await trailBridge.activeTrailForEvent(event);
     if (migrated) {
-      if (!trailBridge.isTrailActiveForAudience(trail, audience)) return null;
+      if (!trailBridge.isTrailActiveForAudience(trail, audience, event)) return null;
       if (!mail?.reviewed && !mail?.interactiveReview && !mail?.fromActionRule && trailBridge.actionControlForEvent(trail, event) !== 'review') return null;
       if (mail.reviewed) {
         const text = render(mail.text, values, mail.blocks);
@@ -201,6 +201,7 @@ async function prepareMail(event, mail, extraValues) {
     reminderRunId: mail.reminderRunId,
     trailId: mail.trailId || content.trailId || null,
     trailAudience: mail.trailAudience || content.trailAudience || null,
+    trailTrigger: mail.trailTrigger || content.trailTrigger || null,
     offerReminderContext: mail.offerReminderContext,
     leadId: mail.leadId,
     orderId: mail.orderId,
@@ -365,7 +366,7 @@ async function decideEmail(id, actor, decision, access = {}, options = {}) {
   let templateName = policyDraft.templateName;
   if (policyDraft.status === 'pending' && decision.templateId !== undefined && decision.templateId !== 'current') {
     const resolved = policyDraft.trailId
-      ? await require('./trailReviewBridge').resolveTrailTemplate(policyDraft.trailId, policyDraft.trailAudience, decision.templateId, policyDraft.event)
+      ? await require('./trailReviewBridge').resolveTrailTemplate(policyDraft.trailId, policyDraft.trailAudience, decision.templateId, policyDraft.event, policyDraft.trailTrigger)
       : await resolveTemplate(policyDraft.event, decision.templateId);
     templateName = resolved.name;
   }

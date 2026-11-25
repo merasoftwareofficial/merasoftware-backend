@@ -67,6 +67,7 @@ const draftSchema = new Schema({
   // Set when this draft belongs to an Automated Message System trail (SSOT review & template sync).
   trailId: { type: Schema.Types.ObjectId, ref: 'CommunicationTrail', default: null },
   trailAudience: { type: String, enum: ['client', 'admin'], default: null },
+  trailTrigger: { type: String, default: null },
   offerReminderContext: { type: offerReminderContextSchema, default: undefined },
   // Set only by Send message on a lead's page (helpers/leadMessage.js).
   leadId: Schema.Types.ObjectId,

@@ -183,6 +183,7 @@ router.patch('/templates/:id', handle(async (req, res) => {
     const updated = await require('../helpers/trailReviewBridge').renameTrailTemplate({
       trailId: req.body.trailId,
       trailAudience: req.body.trailAudience,
+      trailTrigger: req.body.trailTrigger,
       templateId: req.params.id,
       event: req.body.event || 'reminder.automated',
       name: req.body.name,
@@ -205,6 +206,8 @@ router.delete('/templates/:id', handle(async (req, res) => {
     const deleted = await require('../helpers/trailReviewBridge').deleteTrailTemplate({
       trailId: req.body.trailId,
       trailAudience: req.body.trailAudience,
+      trailTrigger: req.body.trailTrigger,
+      event: req.body.event,
       templateId: req.params.id,
       replacementTemplateId: req.body.replacementTemplateId,
       expectedUpdatedAt: req.body.expectedUpdatedAt,
@@ -235,6 +238,7 @@ router.post('/templates', handle(async (req, res) => {
     const created = await require('../helpers/trailReviewBridge').createTrailTemplate({
       trailId: req.body.trailId,
       trailAudience: req.body.trailAudience,
+      trailTrigger: req.body.trailTrigger,
       event,
       sourceTemplateId: req.body.sourceTemplateId,
       name: fields.name,
@@ -267,6 +271,7 @@ router.put('/templates/:id', handle(async (req, res) => {
     const updated = await require('../helpers/trailReviewBridge').updateTrailTemplate({
       trailId: req.body.trailId,
       trailAudience: req.body.trailAudience,
+      trailTrigger: req.body.trailTrigger,
       templateId: req.params.id,
       event,
       name: fields.name,
@@ -327,7 +332,7 @@ router.post('/drafts/:id/preview', handle(async (req, res) => {
   }
   templateChoiceAllowed(req);
   const template = draft.trailId
-    ? await require('../helpers/trailReviewBridge').resolveTrailTemplate(draft.trailId, draft.trailAudience, req.body.templateId, draft.event)
+    ? await require('../helpers/trailReviewBridge').resolveTrailTemplate(draft.trailId, draft.trailAudience, req.body.templateId, draft.event, draft.trailTrigger)
     : await resolveTemplate(draft.event, req.body.templateId);
   const mail = composeTemplate(template, draft.values || {}, draft.blocks, draft.requiredLinks);
   const { doc } = reviewWithDoc(draft.event, mail.text, draft.values, draft.blocks);
@@ -360,7 +365,7 @@ router.post('/lead-preview', handle(async (req, res) => {
   const alt = draft.whatsappTo && altSendingEnabled() ? usableAlt(req.body.altPhone, draft.whatsappTo) : null;
   const { contactBlocks, numberBlock } = require('../helpers/leadContactBlock');
   const whatsappNumbers = draft.whatsappTo ? [{ phone: draft.whatsappTo, alt: false }, ...(alt && !numberBlock(alt, await contactBlocks()) ? [{ phone: alt, alt: true }] : [])] : [];
-  const options = trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience) : await templateOptions(draft.event);
+  const options = trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience, draft.event, draft.trailTrigger) : await templateOptions(draft.event);
   res.json({ success: true, data: { ...draft, whatsappNumbers, ...reviewWithDoc(draft.event, mail.text, draft.values, {}),
     ...await editableReview(draft, trailTemplate || undefined), templateOptions: options, channelOptions: channels.choices, defaultChannel: channels.defaultChannel } });
 }));

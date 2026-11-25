@@ -6,11 +6,11 @@ async function buildReview(draft, isAdmin) {
   const trailBridge = draft.trailId ? require('./trailReviewBridge') : null;
   // Template initialization can update its revision; finish it before reading editable metadata.
   const options = isAdmin
-    ? (trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience) : await templateOptions(draft.event))
+    ? (trailBridge ? await trailBridge.trailTemplateOptions(draft.trailId, draft.trailAudience, draft.event, draft.trailTrigger) : await templateOptions(draft.event))
     : undefined;
   let trailTemplate;
   if (isAdmin && trailBridge) {
-    trailTemplate = await trailBridge.resolveTrailTemplate(draft.trailId, draft.trailAudience, draft.sourceTemplateId || null, draft.event).catch(() => null);
+    trailTemplate = await trailBridge.resolveTrailTemplate(draft.trailId, draft.trailAudience, draft.sourceTemplateId || null, draft.event, draft.trailTrigger).catch(() => null);
   }
   const [channels, editable, types] = await Promise.all([
     availability(draft),

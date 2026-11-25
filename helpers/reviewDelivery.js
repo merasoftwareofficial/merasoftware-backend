@@ -101,7 +101,7 @@ async function deliver({ draft, actor, decision, sendEmail, recordHistory, revie
       const frozen = reviewedMail(current, withRequiredLinks(decision.text, current.requiredLinks, current.values));
       const selected = decision.templateId && decision.templateId !== 'current'
         ? (current.trailId
-          ? await require('./trailReviewBridge').resolveTrailTemplate(current.trailId, current.trailAudience, decision.templateId, current.event)
+          ? await require('./trailReviewBridge').resolveTrailTemplate(current.trailId, current.trailAudience, decision.templateId, current.event, current.trailTrigger)
           : await require('./emailTemplates').resolveTemplate(current.event, decision.templateId))
         : null;
       await EmailDraft.updateOne({ _id: current._id, 'delivery.lockOwner': owner }, { $set: {

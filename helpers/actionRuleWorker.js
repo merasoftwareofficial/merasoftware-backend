@@ -593,7 +593,7 @@ async function dispatchRun(runId, now = new Date()) {
       text: normalizePlaceholders(run.text),
       values,
       reminderRunId: run._id,
-      ...(check.trailId && check.ruleKind === 'template' ? { trailId: check.trailId, trailAudience: isAdmin ? 'admin' : 'client' } : {}),
+      ...(check.trailId && check.ruleKind === 'template' ? { trailId: check.trailId, trailAudience: isAdmin ? 'admin' : 'client', trailTrigger: run.action || null } : {}),
     };
     const result = await require('./emailController').sendSystemMail('reminder.automated', mail, key, '/action-rules', {
       channel: run.channel,
