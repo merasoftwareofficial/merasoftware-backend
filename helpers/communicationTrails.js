@@ -4,6 +4,7 @@ const Rule = require('../models/communicationActionRuleModel');
 const Run = require('../models/communicationReminderRunModel');
 const { ACTIONS } = require('./actionEvents');
 const { cleanRule } = require('./actionRules');
+const { SYSTEM_ACTION_KEYS } = require('./automationCatalog');
 
 const MAX_CHAIN_DEPTH = 6;
 const MAX_TEMPLATES_PER_AUDIENCE = 25;
@@ -117,7 +118,34 @@ function normalizeReminderStep(raw = {}) {
   };
 }
 
-function normalizeReminderBlock(raw = {}, fallbackId = 1) {
+function normalizeSystemActions(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw.slice(0, 5)) {
+    const key = String(item?.key || '').trim();
+    if (!key || !SYSTEM_ACTION_KEYS.has(key)) continue;
+    const config = item?.config && typeof item.config === 'object' ? { ...item.config } : {};
+    out.push({ key, config });
+  }
+  return out;
+}
+
+function normalizeTimeoutBlock(raw, fallbackDays = 5) {
+  const t = raw && typeof raw === 'object' ? raw : {};
+  const afterDays = Number(t.afterDays);
+  const condVal = Number(t.conditionValue);
+  const nextStageId = Number(t.nextStageId);
+  return {
+    enabled: Boolean(t.enabled),
+    afterDays: Number.isFinite(afterDays) ? Math.max(0, Math.min(365, Math.round(afterDays))) : Math.max(0, fallbackDays),
+    condition: typeof t.condition === 'string' && t.condition.trim() ? t.condition.trim() : 'not_stopped',
+    conditionValue: Number.isFinite(condVal) ? Math.max(0, condVal) : 50,
+    actions: normalizeSystemActions(t.actions),
+    nextStageId: Number.isFinite(nextStageId) && nextStageId > 0 ? Math.round(nextStageId) : null,
+  };
+}
+
+function normalizeReminderBlock(raw = {}, fallbackId = 1, defaultBaseDate = 'due_date') {
   const r = raw && typeof raw === 'object' ? raw : {};
   const id = Number.isFinite(Number(r.id)) ? Number(r.id) : fallbackId;
   const clientSteps = Array.isArray(r.clientSteps) && r.clientSteps.length
@@ -130,6 +158,7 @@ function normalizeReminderBlock(raw = {}, fallbackId = 1) {
   const repeatEveryDays = Number(r.repeatEveryDays);
   const repeatPerDay = Number(r.repeatPerDay);
   const conditionValue = Number(r.conditionValue);
+  const safeForDays = Number.isFinite(repeatForDays) ? Math.max(1, repeatForDays) : 7;
   return {
     id,
     startTrigger: typeof r.startTrigger === 'string' && r.startTrigger.trim() ? r.startTrigger.trim() : '__main__',
@@ -139,13 +168,14 @@ function normalizeReminderBlock(raw = {}, fallbackId = 1) {
     clientSteps,
     adminSteps,
     repeatMode: ['off', 'permanent', 'limited'].includes(r.repeatMode) ? r.repeatMode : 'off',
-    repeatForDays: Number.isFinite(repeatForDays) ? Math.max(1, repeatForDays) : 7,
+    repeatForDays: safeForDays,
     repeatEveryDays: Number.isFinite(repeatEveryDays) ? Math.max(1, repeatEveryDays) : 2,
     repeatPerDay: Number.isFinite(repeatPerDay) ? Math.min(4, Math.max(1, repeatPerDay)) : 1,
-    countDaysFrom: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : 'due_date',
+    countDaysFrom: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : defaultBaseDate,
     condition: typeof r.condition === 'string' && r.condition.trim() ? r.condition.trim() : 'any',
     conditionValue: Number.isFinite(conditionValue) ? Math.max(0, conditionValue) : 50,
     stopOn: [...new Set((Array.isArray(r.stopOn) ? r.stopOn : []).map(k => String(k || '').trim()).filter(Boolean))],
+    onTimeout: normalizeTimeoutBlock(r.onTimeout, safeForDays),
     stopChains: {},
   };
 }
@@ -180,16 +210,17 @@ function mapStep(step = {}, baseDate = 'due_date') {
 }
 
 function mapCondition(condition, value) {
-  if (condition === 'progress_min') return { condition: 'anytime', minProgress: Math.min(100, Math.max(0, Number(value || 0))), minRemainingLimit: null, maxRemainingLimit: null };
-  if (condition === 'limit_min') return { condition: 'anytime', minProgress: 0, minRemainingLimit: Math.min(1000, Math.max(0, Number(value || 0))), maxRemainingLimit: null };
-  if (condition === 'limit_max') return { condition: 'anytime', minProgress: 0, minRemainingLimit: null, maxRemainingLimit: Math.min(1000, Math.max(0, Number(value || 0))) };
-  if (['unpaid', 'pending_approval', 'installment_due', 'upload_pending', 'paid'].includes(condition)) {
-    return { condition, minProgress: 0, minRemainingLimit: null, maxRemainingLimit: null };
+  if (condition === 'progress_min') return { condition: 'anytime', minProgress: Math.min(100, Math.max(0, Number(value || 0))), maxProgress: null, minRemainingLimit: null, maxRemainingLimit: null };
+  if (condition === 'progress_max') return { condition: 'anytime', minProgress: 0, maxProgress: Math.min(100, Math.max(0, Number(value || 0))), minRemainingLimit: null, maxRemainingLimit: null };
+  if (condition === 'limit_min') return { condition: 'anytime', minProgress: 0, maxProgress: null, minRemainingLimit: Math.min(1000, Math.max(0, Number(value || 0))), maxRemainingLimit: null };
+  if (condition === 'limit_max') return { condition: 'anytime', minProgress: 0, maxProgress: null, minRemainingLimit: null, maxRemainingLimit: Math.min(1000, Math.max(0, Number(value || 0))) };
+  if (['not_stopped', 'unpaid', 'pending_approval', 'installment_due', 'upload_pending', 'paid'].includes(condition)) {
+    return { condition, minProgress: 0, maxProgress: null, minRemainingLimit: null, maxRemainingLimit: null };
   }
-  return { condition: 'anytime', minProgress: 0, minRemainingLimit: null, maxRemainingLimit: null };
+  return { condition: 'anytime', minProgress: 0, maxProgress: null, minRemainingLimit: null, maxRemainingLimit: null };
 }
 
-function compileInstant(instant, actionsList, scopeObj, actionControls, out) {
+function compileInstant(instant, actionsList, scopeObj, actionControls, out, stageMeta = { stageId: 0, startMode: 'event' }) {
   if (!instant || instant.audience === 'off') return;
   const ctrls = typeof actionControls === 'string'
     ? { admin: actionControls, user: actionControls }
@@ -212,6 +243,8 @@ function compileInstant(instant, actionsList, scopeObj, actionControls, out) {
     for (const variant of variants) {
       out.push(cleanRule({
         kind: 'template',
+        stageId: stageMeta.stageId,
+        startMode: stageMeta.startMode,
         actions: actionsList,
         action: actionsList[0],
         audience: who === 'admin' ? 'admin' : 'customer',
@@ -227,7 +260,7 @@ function compileInstant(instant, actionsList, scopeObj, actionControls, out) {
   }
 }
 
-function compileReminders(reminders, parentActions, trailScopeMode, trailPackages, control, out, depth = 0, branchSeen = new Set()) {
+function compileReminders(reminders, parentActions, trailScopeMode, trailPackages, control, out, depth = 0, branchSeen = new Set(), stageMeta = { stageId: 0, startMode: 'event' }) {
   if (!Array.isArray(reminders) || !reminders.length) return;
   if (depth > MAX_CHAIN_DEPTH) fail(`Maximum stop-trigger chain depth (${MAX_CHAIN_DEPTH}) exceeded.`);
 
@@ -251,6 +284,7 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
 
     const audiences = rem.audience === 'both' ? ['client', 'admin'] : [rem.audience === 'admin' ? 'admin' : 'client'];
     const rawClientSteps = Array.isArray(rem.clientSteps) ? rem.clientSteps : [];
+    let anchorStep = null;
 
     for (const who of audiences) {
       const isAdmin = who === 'admin';
@@ -269,16 +303,21 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
       }
 
       if (!builtSteps.length) continue;
+      if (!anchorStep) {
+        const last = builtSteps[builtSteps.length - 1];
+        anchorStep = { timingRef: last.timingRef, unit: last.unit, days: last.days, hours: last.hours };
+      }
 
       const normalizedSteps = builtSteps.map(st => ({
         ...st,
         subject: st.channel === 'whatsapp' ? '' : (st.subject || ACTIONS[startActions[0]]?.label || 'Reminder'),
       }));
 
-      // If multiple steps or permanent repeat without stop trigger, require at least one stop trigger.
       const effectiveStopOn = stopOn;
       out.push(cleanRule({
         kind: 'reminder',
+        stageId: stageMeta.stageId,
+        startMode: stageMeta.startMode,
         actions: startActions,
         action: startActions[0],
         audience: isAdmin ? 'admin' : 'customer',
@@ -292,6 +331,38 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
       }));
     }
 
+    // Compile optional Escalation / On-Timeout rule (Condition -> System Actions or Continue to Next Stage).
+    const onTimeout = rem.onTimeout && typeof rem.onTimeout === 'object' ? rem.onTimeout : null;
+    if (onTimeout?.enabled) {
+      const rawActions = Array.isArray(onTimeout.actions) ? onTimeout.actions : [];
+      const hasStageContinue = rawActions.some(a => a.key === 'stage.continue') || Boolean(onTimeout.nextStageId);
+      const nonContinueActions = rawActions.filter(a => a.key !== 'stage.continue');
+      const targetNextStageId = hasStageContinue && onTimeout.nextStageId ? Number(onTimeout.nextStageId) : null;
+      if (targetNextStageId || nonContinueActions.length > 0) {
+        const timeoutCond = mapCondition(onTimeout.condition || 'not_stopped', onTimeout.conditionValue);
+        const fallbackAnchor = anchorStep || { timingRef: 'after_action', unit: 'days', days: 0, hours: 0 };
+        out.push(cleanRule({
+          kind: targetNextStageId ? 'stage_handoff' : 'system_action',
+          stageId: stageMeta.stageId,
+          startMode: stageMeta.startMode,
+          nextStageId: targetNextStageId,
+          actions: startActions,
+          action: startActions[0],
+          audience: 'customer',
+          ...timeoutCond,
+          baseDate,
+          timeoutAfterDays: Number(onTimeout.afterDays ?? rem.repeatForDays ?? 0),
+          anchorStep: fallbackAnchor,
+          systemActions: nonContinueActions,
+          scope: scopeObj,
+          steps: [],
+          repeat: { mode: 'off', times: 0, perDay: 1 },
+          stopOn,
+          control,
+        }));
+      }
+    }
+
     // Recurse into Stop-Trigger "+" chains with cycle protection along this branch.
     const chains = rem.stopChains && typeof rem.stopChains === 'object' ? rem.stopChains : {};
     for (const stopKey of stopOn) {
@@ -301,10 +372,31 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
       const nextSeen = new Set(branchSeen);
       nextSeen.add(stopKey);
       const chainScope = mapScope(trailScopeMode, trailPackages, [stopKey]);
-      compileInstant(chain.instant, [stopKey], chainScope, control, out);
-      compileReminders(chain.reminders, [stopKey], trailScopeMode, trailPackages, control, out, depth + 1, nextSeen);
+      compileInstant(chain.instant, [stopKey], chainScope, control, out, stageMeta);
+      compileReminders(chain.reminders, [stopKey], trailScopeMode, trailPackages, control, out, depth + 1, nextSeen, stageMeta);
     }
   }
+}
+
+function outPushStartActions(out, { stageMeta, stageTriggers, stageScope, onStartActions, stopOn, control }) {
+  out.push(cleanRule({
+    kind: 'system_action',
+    stageId: stageMeta.stageId,
+    startMode: stageMeta.startMode,
+    actions: stageTriggers,
+    action: stageTriggers[0],
+    audience: 'customer',
+    condition: 'anytime',
+    baseDate: 'trigger_date',
+    timeoutAfterDays: 0,
+    anchorStep: { timingRef: 'after_action', unit: 'days', days: 0, hours: 0 },
+    systemActions: onStartActions,
+    scope: stageScope,
+    steps: [],
+    repeat: { mode: 'off', times: 0, perDay: 1 },
+    stopOn,
+    control,
+  }));
 }
 
 function validateAndCompileTrail(raw = {}) {
@@ -330,24 +422,49 @@ function validateAndCompileTrail(raw = {}) {
   compileReminders(reminders, triggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(triggers));
 
   const stages = [];
+  const stageTriggersById = new Map([[0, triggers]]);
   for (let i = 0; i < rawStages.length; i++) {
     const st = rawStages[i] && typeof rawStages[i] === 'object' ? rawStages[i] : {};
+    const stageId = Number.isFinite(Number(st.id)) && Number(st.id) > 0 ? Math.round(Number(st.id)) : (i + 1);
+    const source = st.source === 'previous_timeout' ? 'previous_timeout' : 'trigger';
+    const parentStageId = Number.isFinite(Number(st.parentStageId)) && Number(st.parentStageId) >= 0 ? Math.round(Number(st.parentStageId)) : 0;
     const rawStageTriggers = Array.isArray(st.triggers) && st.triggers.length
       ? st.triggers
       : (st.trigger ? [st.trigger] : []);
-    const stageTriggers = [...new Set(rawStageTriggers.map(k => String(k || '').trim()).filter(k => ACTIONS[k]?.trigger))];
+    let stageTriggers = [...new Set(rawStageTriggers.map(k => String(k || '').trim()).filter(k => ACTIONS[k]?.trigger))];
+    if (source === 'previous_timeout' && !stageTriggers.length) {
+      stageTriggers = stageTriggersById.get(parentStageId) || triggers;
+    }
     if (!stageTriggers.length) fail(`Choose a valid trigger point for stage ${i + 2}.`);
+    stageTriggersById.set(stageId, stageTriggers);
+    const stageMeta = { stageId, startMode: source === 'previous_timeout' ? 'timeout_handoff' : 'event' };
     const stageInstant = normalizeInstantBlock(st.instant);
-    const stageReminder = st.reminder && typeof st.reminder === 'object' ? normalizeReminderBlock(st.reminder, i + 1) : null;
+    const defaultBase = source === 'previous_timeout' ? 'trigger_date' : 'due_date';
+    const stageReminder = st.reminder && typeof st.reminder === 'object' ? normalizeReminderBlock(st.reminder, i + 1, defaultBase) : null;
+    const onStartActions = normalizeSystemActions(st.onStartActions).filter(a => a.key !== 'stage.continue');
     const stageScope = mapScope(scope, selectedPackages, stageTriggers);
-    compileInstant(stageInstant, stageTriggers, stageScope, actionControls, compiled);
+    if (onStartActions.length > 0) {
+      const startStopOn = stageReminder ? stageReminder.stopOn.filter(k => Boolean(ACTIONS[k])) : [];
+      outPushStartActions(compiled, {
+        stageMeta,
+        stageTriggers,
+        stageScope,
+        onStartActions,
+        stopOn: startStopOn,
+        control: reminderControl,
+      });
+    }
+    compileInstant(stageInstant, stageTriggers, stageScope, actionControls, compiled, stageMeta);
     if (stageReminder) {
-      compileReminders([stageReminder], stageTriggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(stageTriggers));
+      compileReminders([stageReminder], stageTriggers, scope, selectedPackages, reminderControl, compiled, 0, new Set(stageTriggers), stageMeta);
     }
     stages.push({
-      id: st.id || i + 1,
+      id: stageId,
+      source,
+      parentStageId,
       triggers: stageTriggers,
       trigger: stageTriggers[0],
+      onStartActions,
       instant: stageInstant,
       reminder: stageReminder,
     });
@@ -464,7 +581,7 @@ async function setTrailEnabled(id, enabled) {
       { $set: { enabled: existing.enabled, control: controls.user, activatedAt: existing.activatedAt } },
     ),
     Rule.updateMany(
-      { trailId: existing._id, kind: 'reminder' },
+      { trailId: existing._id, kind: { $in: ['reminder', 'system_action', 'stage_handoff'] } },
       { $set: { enabled: existing.enabled, control: existing.enabled ? 'auto' : 'off', activatedAt: existing.activatedAt } },
     ),
   ]);

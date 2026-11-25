@@ -57,7 +57,7 @@ function orderRemainingLimit(order) {
   return null;
 }
 
-const ORDER_CONTEXT_SELECT = 'userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments paymentPolicy expectedCompletionDate';
+const ORDER_CONTEXT_SELECT = 'userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments paymentPolicy expectedCompletionDate deactivationCountdown automationPause';
 
 async function orderHasPendingApproval(order) {
   if (!order?._id) return false;
@@ -139,6 +139,7 @@ function ruleMatchesContext(rule, ctx) {
   if (rule.condition === 'installment_due' && (!ctx.isInstallmentDue || ctx.isPendingApproval)) return false;
   if (rule.condition === 'upload_pending' && ctx.hasUploaded) return false;
   if (Number(rule.minProgress || 0) > 0 && Number(ctx.progress || 0) < Number(rule.minProgress)) return false;
+  if (rule.maxProgress !== null && rule.maxProgress !== undefined && Number(ctx.progress || 0) > Number(rule.maxProgress)) return false;
   if (rule.minRemainingLimit !== null && rule.minRemainingLimit !== undefined) {
     if (ctx.remainingLimit === null || ctx.remainingLimit === undefined || ctx.remainingLimit < Number(rule.minRemainingLimit)) return false;
   }
@@ -185,8 +186,40 @@ function stepDueAt(step, occurredAt, dueDate) {
 
 // Steps first, then repeats after the last step.
 function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = null) {
-  const sends = [];
   const effectiveBase = resolveBaseDate(rule, event.occurredAt, dueDate, ctx);
+  const isMultiAction = Array.isArray(rule.actions) && rule.actions.length > 1;
+  const occurrenceKey = (rule.trailId && isMultiAction && !String(event.key || '').includes(':st'))
+    ? `trail:${String(rule.trailId)}:entity:${String(event.orderId || event.entityId)}`
+    : event.key;
+  if (rule.kind === 'system_action' || rule.kind === 'stage_handoff') {
+    const anchorDue = (rule.anchorStep ? stepDueAt(rule.anchorStep, event.occurredAt, effectiveBase) : null) || new Date(event.occurredAt);
+    const timeoutMs = Math.max(0, Number(rule.timeoutAfterDays || 0)) * DAY;
+    const dueAt = new Date(+anchorDue + timeoutMs);
+    return [{
+      ruleId: rule._id,
+      ruleRevision: rule.revision,
+      source: 'action',
+      action: event.action,
+      audience: rule.audience || 'customer',
+      runKind: rule.kind === 'stage_handoff' ? 'stage_handoff' : 'system_action',
+      systemActions: Array.isArray(rule.systemActions) ? rule.systemActions : [],
+      nextStageId: rule.nextStageId || null,
+      occurrenceKey,
+      step: 0,
+      entityId: event.entityId,
+      clientId: event.clientId || null,
+      leadId: event.leadId || null,
+      dueAt,
+      channel: 'system',
+      subject: rule.name || ACTIONS[event.action]?.label || 'System Action',
+      text: '',
+      stopOn: rule.stopOn,
+      doAlso: [],
+      matchKeys: event.matchKeys,
+      status: 'scheduled',
+    }];
+  }
+  const sends = [];
   if (rule.scope?.kind === 'offer_payment' && ctx?.offerOffsets?.length && effectiveBase && rule.steps?.length) {
     const baseStep = rule.steps[0];
     const baseMs = +new Date(effectiveBase);
@@ -225,16 +258,13 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
     }
   }
   // Entity-level dedupe for multi-action trail rules so overlapping events never double-send.
-  const isMultiAction = Array.isArray(rule.actions) && rule.actions.length > 1;
-  const occurrenceKey = (rule.trailId && isMultiAction)
-    ? `trail:${String(rule.trailId)}:entity:${String(event.orderId || event.entityId)}`
-    : event.key;
   return sends.map((send, step) => ({
     ruleId: rule._id,
     ruleRevision: rule.revision,
     source: 'action',
     action: event.action,
     audience: rule.audience || 'customer',
+    runKind: 'message',
     occurrenceKey,
     step,
     entityId: event.entityId,
@@ -277,9 +307,37 @@ async function handleEvent(event) {
         { $set: { status: 'cancelled', lastError: stopReason, expiresAt: finishedExpiry(new Date()) } },
       );
     }
+    // Auto-recover active deactivation countdowns / automation pauses when a matching stop trigger occurs.
+    const orderIds = [
+      ...(event.orderId ? [String(event.orderId)] : []),
+      ...keys.filter(k => String(k).startsWith('order:')).map(k => String(k).slice(6)),
+    ].filter(Boolean);
+    const uniqueOrderIds = [...new Set(orderIds)];
+    if (uniqueOrderIds.length) {
+      await Order.updateMany(
+        {
+          _id: { $in: uniqueOrderIds },
+          'deactivationCountdown.active': true,
+          'deactivationCountdown.autoRecoverOnStop': { $ne: false },
+          'deactivationCountdown.stopOn': event.action,
+        },
+        { $set: { 'deactivationCountdown.active': false } },
+      );
+      await Order.updateMany(
+        {
+          _id: { $in: uniqueOrderIds },
+          servicePlanStatus: 'paused',
+          'automationPause.active': true,
+          'automationPause.autoRecoverOnStop': { $ne: false },
+          'automationPause.stopOn': event.action,
+        },
+        { $set: { servicePlanStatus: 'active', 'automationPause.active': false } },
+      );
+    }
   }
   const rules = await Rule.find({
     ...activeRuleFilter(),
+    startMode: { $in: [null, 'event'] },
     $or: [{ action: event.action }, { actions: event.action }],
     enabled: true,
     control: { $in: ['auto', 'review'] },
@@ -329,7 +387,7 @@ async function processEvents(limit = 200) {
 // stop action came through a path that records no event.
 async function stillValid(run) {
   const rule = await Rule.findOne({ _id: run.ruleId, ...activeRuleFilter(), enabled: true, control: { $in: ['auto', 'review'] } })
-    .select('_id trailId kind condition minProgress minRemainingLimit maxRemainingLimit control scope repeat').lean();
+    .select('_id trailId kind startMode stageId nextStageId condition minProgress maxProgress minRemainingLimit maxRemainingLimit control scope repeat').lean();
   if (!rule) return { ok: false, reason: 'Rule is off.' };
   let client = null;
   let lead = run.leadId ? await Lead.findById(run.leadId).select('name email phone status convertedToUserId deletedAt').lean() : null;
@@ -398,10 +456,10 @@ async function stillValid(run) {
       if (!invoice || invoice.status === 'cancelled') return { ok: false, reason: 'Invoice is unavailable.' };
       if (rule.scope?.kind === 'offer_payment' && invoice.offerRemindersPaused) return { ok: false, reason: 'Offer reminders are paused for this invoice.' };
       if (waitsForPayment && !OPEN.includes(invoice.status)) return { ok: false, reason: 'Invoice is already paid.' };
-      order = invoice.orderId ? await Order.findById(invoice.orderId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments').lean() : null;
+      order = invoice.orderId ? await Order.findById(invoice.orderId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments deactivationCountdown automationPause').lean() : null;
     }
   } else {
-    order = await Order.findById(run.entityId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments').lean();
+    order = await Order.findById(run.entityId).select('userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments deactivationCountdown automationPause').lean();
     if (!order || order.orderVisibility === 'cancelled' || order.status === 'cancelled') return { ok: false, reason: 'Project or plan is unavailable.' };
     if (rule.condition === 'installment_due') {
       const dueInst = require('./projectDuePayment').dueInstallment(order);
@@ -422,6 +480,9 @@ async function stillValid(run) {
   }
   if (Number(rule.minProgress || 0) > 0 && order && Number(order.projectProgress || 0) < Number(rule.minProgress)) {
     return { ok: false, reason: 'Project progress is below rule threshold.' };
+  }
+  if (rule.maxProgress !== null && rule.maxProgress !== undefined && order && Number(order.projectProgress || 0) > Number(rule.maxProgress)) {
+    return { ok: false, reason: 'Project progress is above rule threshold.' };
   }
   if (rule.minRemainingLimit !== null && rule.minRemainingLimit !== undefined && order) {
     const rem = orderRemainingLimit(order);
@@ -489,6 +550,7 @@ const websiteLink = path => safeUrl(process.env.PORTFOLIO_WEBSITE_URL, path);
 const KNOWN_PLACEHOLDERS = new Set([
   'name', 'amount', 'dueDate', 'invoiceLink', 'projectLink', 'packageLink', 'planLink', 'portalLink',
   'project', 'planName', 'package', 'duration', 'email', 'phone', 'progress', 'remainingLimit',
+  'deactivationDays', 'deactivationDate',
 ]);
 function normalizePlaceholders(text) {
   return String(text || '').replace(/(?<!\{)\{(\w+)\}(?!\})/g, (m, key) => (KNOWN_PLACEHOLDERS.has(key) ? `{{${key}}}` : m));
@@ -539,6 +601,186 @@ async function executeDoAlso(run, check, values, render) {
   }
 }
 
+async function executeSystemActions(run, check, values, render, now = new Date()) {
+  const actions = Array.isArray(run.systemActions) ? run.systemActions : [];
+  if (!actions.length) return [];
+  const summary = [];
+  const order = check.order || null;
+  let lead = check.lead && !check.lead.deletedAt ? check.lead : null;
+  if (!lead && run.clientId) {
+    lead = await Lead.findOne({ convertedToUserId: run.clientId, deletedAt: null }).select('_id status convertedToUserId').lean();
+  }
+  let leadStatus = lead?.status || 'Contacted';
+
+  for (const item of actions) {
+    const key = item?.key;
+    const cfg = item?.config && typeof item.config === 'object' ? item.config : {};
+    if (key === 'plan.deactivation_countdown') {
+      if (!order?._id || order.orderVisibility === 'cancelled' || order.servicePlanStatus === 'cancelled' || order.servicePlanStatus === 'expired') continue;
+      const graceDays = Math.max(1, Math.min(90, Math.round(Number(cfg.graceDays || 3))));
+      const finalStatus = cfg.finalStatus === 'paused' ? 'paused' : 'expired';
+      const showPortalBanner = cfg.showPortalBanner !== false;
+      const autoRecoverOnStop = cfg.autoRecoverOnStop !== false;
+      const endsAt = new Date(+now + graceDays * DAY);
+      const stopOn = Array.isArray(run.stopOn) ? run.stopOn : [];
+      await Order.updateOne(
+        { _id: order._id },
+        {
+          $set: {
+            deactivationCountdown: {
+              active: true,
+              startedAt: now,
+              endsAt,
+              finalStatus,
+              showPortalBanner,
+              autoRecoverOnStop,
+              stopOn,
+              ruleId: run.ruleId,
+              occurrenceKey: run.occurrenceKey,
+            },
+          },
+        },
+      );
+      const endActionKey = finalStatus === 'paused' ? 'plan.pause' : 'plan.expire';
+      const endOccurrenceKey = `${run.occurrenceKey}:deact_end`;
+      await Run.updateOne(
+        { ruleId: run.ruleId, ruleRevision: run.ruleRevision, occurrenceKey: endOccurrenceKey, step: 0 },
+        {
+          $setOnInsert: {
+            ruleId: run.ruleId,
+            ruleRevision: run.ruleRevision,
+            source: 'action',
+            action: run.action,
+            audience: 'customer',
+            runKind: 'system_action',
+            systemActions: [{ key: endActionKey, config: { autoRecoverOnStop } }],
+            nextStageId: null,
+            occurrenceKey: endOccurrenceKey,
+            step: 0,
+            entityId: run.entityId,
+            clientId: run.clientId || null,
+            leadId: run.leadId || null,
+            dueAt: endsAt,
+            channel: 'system',
+            subject: `Deactivation countdown end (${finalStatus})`,
+            text: '',
+            stopOn,
+            doAlso: [],
+            matchKeys: run.matchKeys,
+            status: 'scheduled',
+          },
+        },
+        { upsert: true },
+      );
+      summary.push(`Deactivation countdown started (${graceDays}d -> ${finalStatus})`);
+    } else if (key === 'plan.pause') {
+      if (!order?._id || order.orderVisibility === 'cancelled' || order.servicePlanStatus === 'cancelled' || order.servicePlanStatus === 'expired') continue;
+      const autoRecoverOnStop = cfg.autoRecoverOnStop !== false;
+      await Order.updateOne(
+        { _id: order._id },
+        {
+          $set: {
+            servicePlanStatus: 'paused',
+            'deactivationCountdown.active': false,
+            automationPause: {
+              active: true,
+              pausedAt: now,
+              autoRecoverOnStop,
+              stopOn: Array.isArray(run.stopOn) ? run.stopOn : [],
+              ruleId: run.ruleId,
+              occurrenceKey: run.occurrenceKey,
+            },
+          },
+        },
+      );
+      summary.push('Plan paused');
+    } else if (key === 'plan.expire') {
+      if (!order?._id || order.orderVisibility === 'cancelled' || order.servicePlanStatus === 'cancelled' || order.servicePlanStatus === 'expired') continue;
+      const updated = await Order.findOneAndUpdate(
+        { _id: order._id, orderVisibility: { $ne: 'cancelled' }, servicePlanStatus: { $nin: ['expired', 'cancelled'] } },
+        {
+          $set: {
+            servicePlanStatus: 'expired',
+            'deactivationCountdown.active': false,
+            'automationPause.active': false,
+          },
+        },
+        { new: true },
+      ).lean();
+      if (updated) {
+        const { planExpired } = require('./actionEvents');
+        await planExpired(updated).catch(() => {});
+        summary.push('Plan expired');
+      }
+    } else if (key === 'plan.stop_renewal') {
+      if (!order?._id || !order.isServicePlan || !order.userId) continue;
+      try {
+        const { stopServiceRenewal } = require('./serviceLifecycle');
+        await stopServiceRenewal({ serviceOrderId: order._id, userId: order.userId, now });
+        summary.push('Auto-renewal stopped');
+      } catch (err) {
+        if (!/already stopped|Only active/i.test(String(err?.message || ''))) throw err;
+      }
+    } else if (key === 'lead.create') {
+      const phone = String(check.client?.phone || '').trim();
+      const email = String(check.client?.email || '').trim().toLowerCase();
+      const orChecks = [
+        ...(run.clientId ? [{ convertedToUserId: run.clientId }] : []),
+        ...(phone ? [{ phone }] : []),
+        ...(email ? [{ email }] : []),
+      ];
+      const existingLead = lead || (orChecks.length ? await Lead.findOne({ deletedAt: null, $or: orChecks }).select('_id status').lean() : null);
+      if (!existingLead) {
+        const stage = SELECTABLE_LEAD_STATUSES.includes(cfg.stage) ? cfg.stage : 'Contacted';
+        const noteText = render(String(cfg.note || ''), values, {}, { plain: true }).trim();
+        const created = await Lead.create({
+          name: String(check.client?.name || 'Customer').trim() || 'Customer',
+          phone,
+          email,
+          status: stage,
+          source: 'automation',
+          followUps: noteText ? [{ note: noteText, badge: stage, date: now, createdAt: now }] : [],
+        });
+        lead = created.toObject();
+        leadStatus = stage;
+        summary.push(`Lead created (${stage})`);
+      }
+    } else if (key === 'lead.change_stage') {
+      const stage = String(cfg.stage || '').trim();
+      if (lead && !lead.convertedToUserId && leadStatus !== WON && SELECTABLE_LEAD_STATUSES.includes(stage)) {
+        await Lead.updateOne(
+          { _id: lead._id },
+          { $set: { status: stage }, $push: { followUps: { note: 'Stage updated automatically by System Action.', badge: stage, date: now, createdAt: now } } },
+        );
+        leadStatus = stage;
+        summary.push(`Lead stage -> ${stage}`);
+      }
+    } else if (key === 'lead.add_note') {
+      const note = render(String(cfg.note || ''), values, {}, { plain: true }).trim();
+      if (lead && note) {
+        await Lead.updateOne(
+          { _id: lead._id },
+          { $push: { followUps: { note, badge: leadStatus, date: now, createdAt: now } } },
+        );
+        summary.push('Lead note added');
+      }
+    } else if (key === 'reminders.stop_all') {
+      const targets = [
+        ...(run.clientId ? [{ clientId: run.clientId }] : []),
+        ...(run.leadId ? [{ leadId: run.leadId }] : []),
+      ];
+      if (targets.length) {
+        await Run.updateMany(
+          { _id: { $ne: run._id }, source: 'action', status: 'scheduled', $or: targets },
+          { $set: { status: 'cancelled', reason: 'Stopped automatically by System Action.' } },
+        );
+        summary.push('Other reminders stopped');
+      }
+    }
+  }
+  return summary;
+}
+
 async function dispatchRun(runId, now = new Date()) {
   const owner = randomUUID();
   const run = await Run.findOneAndUpdate({ _id: runId, source: 'action', dueAt: { $lte: now }, $or: [{ status: 'scheduled' }, { status: 'preparing', lockUntil: { $lte: now } }] },
@@ -561,6 +803,11 @@ async function dispatchRun(runId, now = new Date()) {
       ? (run.action === 'payment.received' ? Number(invoice.amount || 0) : Number(invoice.amount - (invoice.amountPaid || 0)))
       : (dueInst ? Number(dueInst.amount || 0) : 0);
     const remLimit = orderRemainingLimit(order);
+    const cd = order?.deactivationCountdown;
+    const deactivationDays = (cd?.active && cd?.endsAt)
+      ? String(Math.max(0, Math.ceil((+new Date(cd.endsAt) - +now) / DAY)))
+      : '';
+    const deactivationDate = (cd?.active && cd?.endsAt) ? day(cd.endsAt) : '';
     const values = {
       name: client.name || 'Customer',
       email: client.email || '',
@@ -571,6 +818,8 @@ async function dispatchRun(runId, now = new Date()) {
       duration,
       progress: order ? `${Number(order.projectProgress || 0)}%` : '',
       remainingLimit: remLimit !== null ? String(remLimit) : '',
+      deactivationDays,
+      deactivationDate,
       amount: (invoice || dueInst) ? `₹${invoiceAmount.toLocaleString('en-IN')}` : '',
       dueDate: day(invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate),
       invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : (order?._id ? portalLink(`/project-details/${order._id}`) : ''),
@@ -579,8 +828,43 @@ async function dispatchRun(runId, now = new Date()) {
       packageLink: packageSlug ? websiteLink(`/package/${encodeURIComponent(packageSlug)}`) : '',
       portalLink: portalLink('/'),
     };
-    const key = `action-rule:${run._id}`;
     const { render } = require('./emailMarkup');
+    if (run.runKind === 'system_action' || run.runKind === 'stage_handoff') {
+      const renderPlain = (tmpl, vals, blks, opts) => render(normalizePlaceholders(tmpl), vals, blks, opts);
+      const summary = await executeSystemActions(run, check, values, renderPlain, now);
+      if (run.runKind === 'stage_handoff' && run.nextStageId && check.trailId) {
+        const nextRules = await Rule.find({
+          trailId: check.trailId,
+          stageId: run.nextStageId,
+          startMode: 'timeout_handoff',
+          enabled: true,
+          control: { $in: ['auto', 'review'] },
+        }).lean();
+        const handoffEvent = {
+          action: run.action,
+          key: `${run.occurrenceKey}:st${run.nextStageId}`,
+          entityId: run.entityId,
+          orderId: order?._id || null,
+          clientId: run.clientId || null,
+          leadId: run.leadId || null,
+          occurredAt: now,
+          matchKeys: Array.isArray(run.matchKeys) ? run.matchKeys : [],
+          details: { dueDate: invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate || null },
+        };
+        const ctx = await resolveEventContext(handoffEvent, { needsPendingCheck: true, needsUploadCheck: true });
+        for (const nextRule of nextRules) {
+          if (!ruleMatchesContext(nextRule, ctx)) continue;
+          for (const nextRun of planRuns(nextRule, handoffEvent, ctx.dueDate, ctx)) {
+            const id = { ruleId: nextRun.ruleId, ruleRevision: nextRun.ruleRevision, occurrenceKey: nextRun.occurrenceKey, step: nextRun.step };
+            await Run.updateOne(id, { $setOnInsert: nextRun }, { upsert: true });
+          }
+        }
+        summary.push(`Handed off to Stage ${run.nextStageId + 1}`);
+      }
+      await finish('sent', { sentAt: now, reason: summary.join('; ') || 'System action completed.' });
+      return 'sent';
+    }
+    const key = `action-rule:${run._id}`;
     const isAdmin = run.audience === 'admin';
     const to = isAdmin ? (contacts || []).map(c => c.email).filter(Boolean) : (client.email ? [client.email] : []);
     const phone = isAdmin ? ((contacts || []).flatMap(c => c.numbers)[0] || '') : client.phone;
@@ -650,17 +934,23 @@ async function dispatchRun(runId, now = new Date()) {
 }
 
 // When the worker was down, several steps of one occurrence can be due at once: send only the
-// latest and mark the older ones skipped, so a customer never gets a burst.
+// latest message step and mark older message steps skipped, so a customer never gets a burst.
+// Non-message runs (`system_action`, `stage_handoff`) always run in deterministic order after messages.
 async function dispatchDue(now = new Date(), limit = 100) {
   const due = await Run.find({ source: 'action', status: 'scheduled', dueAt: { $lte: now } }).sort({ dueAt: 1 }).limit(limit).lean();
+  const messageRuns = due.filter(r => !r.runKind || r.runKind === 'message');
+  const systemActionRuns = due.filter(r => r.runKind === 'system_action');
+  const handoffRuns = due.filter(r => r.runKind === 'stage_handoff');
   const latest = new Map();
-  for (const run of due) latest.set(`${run.ruleId}:${run.occurrenceKey}`, run);
+  for (const run of messageRuns) latest.set(`${run.ruleId}:${run.occurrenceKey}`, run);
   let sent = 0;
-  for (const run of due) {
+  for (const run of messageRuns) {
     if (latest.get(`${run.ruleId}:${run.occurrenceKey}`)._id.equals(run._id)) continue;
     await Run.updateOne({ _id: run._id, status: 'scheduled' }, { $set: { status: 'skipped', reason: 'A later message of this reminder was due at the same time.' } });
   }
   for (const run of latest.values()) { await dispatchRun(run._id, now); sent++; }
+  for (const run of systemActionRuns) { await dispatchRun(run._id, now); sent++; }
+  for (const run of handoffRuns) { await dispatchRun(run._id, now); sent++; }
   return sent;
 }
 
@@ -669,6 +959,7 @@ async function planProjectedMonthlyRuns() {
   const projectedActions = ['invoice.created', 'plan.started', 'package.purchased'];
   const rules = await Rule.find({
     ...activeRuleFilter(),
+    startMode: { $in: [null, 'event'] },
     $or: [{ action: { $in: projectedActions } }, { actions: { $in: projectedActions } }],
     kind: 'reminder',
     enabled: true,
@@ -821,4 +1112,4 @@ async function enrollPendingInvoices(ruleId, { dryRun = true } = {}) {
   return { dryRun, count, enrolled, samples };
 }
 
-module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, normalizePlaceholders, hasActiveActionRule, enrollPendingInvoices };
+module.exports = { processActionRules, processEvents, planProjectedMonthlyRuns, dispatchDue, dispatchRun, planRuns, stillValid, actionEligibility, resolveEventContext, ruleMatchesContext, executeDoAlso, executeSystemActions, normalizePlaceholders, hasActiveActionRule, enrollPendingInvoices };

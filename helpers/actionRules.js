@@ -1,14 +1,16 @@
 const Rule = require('../models/communicationActionRuleModel');
 const { ACTIONS } = require('./actionEvents');
 const { SELECTABLE_LEAD_STATUSES } = require('./leadStatuses');
+const { SYSTEM_ACTION_KEYS } = require('./automationCatalog');
 
 const MAX_SENDS = 60;
 const TIMING_REFS = ['after_action', 'before_due', 'on_due', 'after_due'];
-const CONDITIONS = ['anytime', 'unpaid', 'pending_approval', 'paid', 'installment_due', 'upload_pending'];
+const CONDITIONS = ['anytime', 'not_stopped', 'unpaid', 'pending_approval', 'paid', 'installment_due', 'upload_pending'];
 const BASE_DATES = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'];
 const ORIGIN_SURFACES = ['Admin', 'Client', 'Website', 'System'];
 const SCOPE_KINDS = ['all', 'monthly', 'one_time', 'package', 'include', 'exclude', 'offer_payment'];
 const DO_ALSO_TYPES = ['change_lead_stage', 'add_lead_note', 'stop_reminders'];
+const RULE_KINDS = ['template', 'reminder', 'system_action', 'stage_handoff'];
 const fail = message => { const error = new Error(message); error.status = 400; throw error; };
 const int = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 
@@ -47,15 +49,30 @@ function cleanRule(raw = {}) {
   if (!actionsList.length) fail('Choose the action that starts this message.');
   const primaryAction = actionsList[0];
   const actionMeta = ACTIONS[primaryAction];
-  const kind = raw.kind === 'template' ? 'template' : 'reminder';
+  const kind = RULE_KINDS.includes(raw.kind) ? raw.kind : 'reminder';
+  const isNonMessage = kind === 'system_action' || kind === 'stage_handoff';
+  const startMode = raw.startMode === 'timeout_handoff' ? 'timeout_handoff' : 'event';
+  const stageId = Number.isInteger(Number(raw.stageId)) && Number(raw.stageId) >= 0 ? Number(raw.stageId) : 0;
+  const nextStageId = raw.nextStageId !== undefined && raw.nextStageId !== null && raw.nextStageId !== ''
+    ? (Number.isInteger(Number(raw.nextStageId)) && Number(raw.nextStageId) > 0 ? Number(raw.nextStageId) : null)
+    : null;
   const audience = raw.audience === 'admin' ? 'admin' : 'customer';
-  const allowedConditions = [...new Set(actionsList.flatMap(a => (ACTIONS[a]?.conditions || [{ key: 'anytime' }]).map(c => c.key)))];
+  const allowedConditions = [
+    ...new Set([
+      ...actionsList.flatMap(a => (ACTIONS[a]?.conditions || [{ key: 'anytime' }]).map(c => c.key)),
+      ...(isNonMessage ? ['not_stopped'] : []),
+    ]),
+  ];
   const condition = raw.condition || 'anytime';
   if (!CONDITIONS.includes(condition) || !allowedConditions.includes(condition)) fail('Choose a valid condition for this action.');
   const minProgress = raw.minProgress !== undefined && raw.minProgress !== null && raw.minProgress !== ''
     ? Number(raw.minProgress)
     : 0;
   if (!int(minProgress, 0, 100)) fail('Minimum progress must be a whole number from 0 to 100%.');
+  const maxProgress = raw.maxProgress !== undefined && raw.maxProgress !== null && raw.maxProgress !== ''
+    ? Number(raw.maxProgress)
+    : null;
+  if (maxProgress !== null && !int(maxProgress, 0, 100)) fail('Maximum progress must be a whole number from 0 to 100%.');
   const minRemainingLimit = raw.minRemainingLimit !== undefined && raw.minRemainingLimit !== null && raw.minRemainingLimit !== ''
     ? Number(raw.minRemainingLimit)
     : null;
@@ -65,6 +82,26 @@ function cleanRule(raw = {}) {
     : null;
   if (maxRemainingLimit !== null && !int(maxRemainingLimit, 0, 1000)) fail('Remaining limit threshold must be a whole number from 0 to 1000.');
   const baseDate = BASE_DATES.includes(raw.baseDate) ? raw.baseDate : 'due_date';
+  const timeoutAfterDays = isNonMessage && raw.timeoutAfterDays !== undefined && raw.timeoutAfterDays !== null && raw.timeoutAfterDays !== ''
+    ? Number(raw.timeoutAfterDays)
+    : 0;
+  if (!int(timeoutAfterDays, 0, 365)) fail('Timeout days must be a whole number from 0 to 365.');
+  const anchorStep = isNonMessage && raw.anchorStep && typeof raw.anchorStep === 'object'
+    ? {
+        timingRef: TIMING_REFS.includes(raw.anchorStep.timingRef) ? raw.anchorStep.timingRef : 'after_action',
+        unit: raw.anchorStep.unit === 'hours' ? 'hours' : 'days',
+        days: Math.max(0, Math.min(365, Number(raw.anchorStep.days || 0))),
+        hours: Math.max(0, Math.min(720, Number(raw.anchorStep.hours || 0))),
+      }
+    : null;
+  const rawSystemActions = Array.isArray(raw.systemActions) ? raw.systemActions : [];
+  if (rawSystemActions.length > 5) fail('At most 5 system actions per rule.');
+  const systemActions = rawSystemActions.map((item, idx) => {
+    const key = String(item?.key || '').trim();
+    if (!SYSTEM_ACTION_KEYS.has(key)) fail(`System action ${idx + 1}: invalid action key.`);
+    const config = item?.config && typeof item.config === 'object' ? { ...item.config } : {};
+    return { key, config };
+  });
   const supportsScope = actionsList.some(a => ACTIONS[a]?.supportsScope);
   const scopeKind = SCOPE_KINDS.includes(raw.scope?.kind) ? raw.scope.kind : 'all';
   if (scopeKind !== 'all' && !supportsScope) fail('Package/plan scope is not available for this action.');
@@ -78,22 +115,24 @@ function cleanRule(raw = {}) {
     : [];
 
   const steps = Array.isArray(raw.steps) ? raw.steps : [];
-  if (!steps.length || steps.length > 10) fail('Add 1 to 10 messages.');
+  if (!isNonMessage && (!steps.length || steps.length > 10)) fail('Add 1 to 10 messages.');
   const isTemplate = kind === 'template';
-  const clean = (isTemplate ? [steps[0]] : steps).map((step, index) => normalizeStep(step, index, isTemplate));
-  if (!isTemplate) {
+  const clean = isNonMessage
+    ? []
+    : (isTemplate ? [steps[0]] : steps).map((step, index) => normalizeStep(step, index, isTemplate));
+  if (!isTemplate && !isNonMessage) {
     const hoursOf = st => (st.unit === 'hours' ? (st.hours || 0) : (st.days || 0) * 24);
     const rank = st => (st.timingRef === 'after_action' ? hoursOf(st) : st.timingRef === 'before_due' ? 100000 - hoursOf(st) : st.timingRef === 'on_due' ? 100000 : 100000 + hoursOf(st));
     clean.sort((a, b) => rank(a) - rank(b));
   }
 
   const rawRepeatMode = raw.repeat?.mode;
-  const repeatMode = isTemplate ? 'off'
+  const repeatMode = (isTemplate || isNonMessage) ? 'off'
     : (['off', 'permanent', 'limited'].includes(rawRepeatMode) ? rawRepeatMode : ((raw.repeat?.times || 0) > 0 ? 'limited' : 'off'));
   const everyDays = repeatMode !== 'off' ? Number(raw.repeat?.everyDays || 1) : 1;
   const perDay = repeatMode !== 'off' ? Number(raw.repeat?.perDay ?? 1) : 1;
   const forDays = repeatMode === 'limited' ? Number(raw.repeat?.forDays || 0) : 0;
-  const times = isTemplate || repeatMode === 'off' ? 0
+  const times = (isTemplate || isNonMessage) || repeatMode === 'off' ? 0
     : repeatMode === 'permanent' ? 0
       : (raw.repeat?.times !== undefined ? Number(raw.repeat.times) : Math.min(60, Math.max(1, Math.floor((forDays || 1) / Math.max(1, everyDays)))));
   if (repeatMode === 'limited' && !int(times, 0, 60)) fail('Repeat can be 0 to 60 times.');
@@ -103,7 +142,7 @@ function cleanRule(raw = {}) {
 
   const stopOn = isTemplate ? [] : [...new Set(Array.isArray(raw.stopOn) ? raw.stopOn : [])];
   if (stopOn.some(key => !ACTIONS[key])) fail('Choose a valid stop action.');
-  if (!isTemplate && (repeatMode === 'permanent' || clean.length + times > 1) && !stopOn.length) fail('A reminder needs a stop action.');
+  if (!isTemplate && !isNonMessage && (repeatMode === 'permanent' || clean.length + times > 1) && !stopOn.length) fail('A reminder needs a stop action.');
 
   const rawDoAlso = Array.isArray(raw.doAlso) ? raw.doAlso : [];
   if (rawDoAlso.length > 5) fail('At most 5 automatic steps per rule.');
@@ -129,6 +168,9 @@ function cleanRule(raw = {}) {
   return {
     purpose,
     kind,
+    startMode,
+    stageId,
+    nextStageId,
     action: primaryAction,
     actions: actionsList,
     actionId: String(raw.actionId || '').trim(),
@@ -136,9 +178,13 @@ function cleanRule(raw = {}) {
     audience,
     condition,
     minProgress,
+    maxProgress,
     minRemainingLimit,
     maxRemainingLimit,
     baseDate,
+    timeoutAfterDays,
+    anchorStep,
+    systemActions,
     scope: { kind: scopeKind, packageSlug, includedPackages, excludedPackages },
     steps: clean,
     repeat: repeatMode === 'permanent'
@@ -154,6 +200,7 @@ function cleanRule(raw = {}) {
 
 const stepLabel = (step, kind) => {
   if (kind === 'template') return 'now';
+  if (!step) return 'now';
   const isHours = step.unit === 'hours';
   const val = isHours ? (step.hours ?? 0) : (step.days ?? step.afterDays ?? 0);
   const unitShort = isHours ? 'h' : 'd';
@@ -164,9 +211,12 @@ const stepLabel = (step, kind) => {
 };
 
 const autoName = rule => {
-  const first = rule.steps[0];
-  const who = rule.audience === 'admin' ? 'Admin' : 'Customer';
-  const when = stepLabel(first, rule.kind);
+  const first = rule.steps?.[0] || null;
+  const isNonMessage = rule.kind === 'system_action' || rule.kind === 'stage_handoff';
+  const who = isNonMessage ? 'System' : (rule.audience === 'admin' ? 'Admin' : 'Customer');
+  const when = isNonMessage
+    ? (rule.timeoutAfterDays ? `after ${rule.timeoutAfterDays}d` : 'immediately')
+    : stepLabel(first, rule.kind);
   const cond = rule.condition === 'unpaid' ? ' · if unpaid'
     : rule.condition === 'paid' ? ' · if paid'
       : rule.condition === 'upload_pending' ? ' · if upload pending' : '';

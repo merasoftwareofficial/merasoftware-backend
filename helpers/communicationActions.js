@@ -3,6 +3,7 @@ const ActionRule = require('../models/communicationActionRuleModel');
 const { EmailPolicy } = require('../models/emailControlModel');
 const { ACTIONS: ACTION_CATALOG, SURFACES } = require('./communicationActionCatalog');
 const { ACTIONS: TRIGGER_ACTIONS, FOLDERS, STOP_CHOICES } = require('./actionEvents');
+const { getAutomationCatalog } = require('./automationCatalog');
 const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
 const { byKey: EMAIL_BY_KEY, isCustomerTriggered } = require('./emailCatalog');
@@ -359,7 +360,8 @@ async function list(options = {}) {
         origins: [],
       });
     }
-    return { triggers, folders: FOLDERS, packages };
+    const { conditions, systemActions } = getAutomationCatalog();
+    return { triggers, folders: FOLDERS, packages, conditions, systemActions };
   }
   const [overrides, allRules, catalogue, policies] = await Promise.all([
     Override.find().lean(),
@@ -389,7 +391,8 @@ async function list(options = {}) {
     .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
   const actions = ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents));
   const triggers = buildTriggers(actions, allRules);
-  return { actions, triggers, folders: FOLDERS, stopChoices: STOP_CHOICES, surfaces: SURFACES, categories, packages };
+  const { conditions, systemActions } = getAutomationCatalog();
+  return { actions, triggers, folders: FOLDERS, stopChoices: STOP_CHOICES, surfaces: SURFACES, categories, packages, conditions, systemActions };
 }
 
 // Cross-flow & system origins that fire a trigger alongside its primary catalog mapping (SSOT).

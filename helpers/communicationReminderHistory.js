@@ -19,7 +19,7 @@ async function reminderHistory({ page = 1, pageSize = 20, view = 'all', source =
   if (source !== 'all') filter.source = source;
   const [rows, total] = await Promise.all([
     Run.find(filter).sort({ dueAt: view === 'upcoming' ? 1 : -1, _id: view === 'upcoming' ? 1 : -1 }).skip((page - 1) * pageSize).limit(pageSize)
-      .select('ruleId clientId leadId audience source cycle step dueAt sentAt status reason channel channelOutcomes').lean(),
+      .select('ruleId clientId leadId audience source runKind cycle step dueAt sentAt status reason channel channelOutcomes').lean(),
     Run.countDocuments(filter),
   ]);
   const userIds = rows.filter(row => row.source !== 'broadcast' && row.clientId).map(row => row.clientId);

@@ -231,7 +231,7 @@ const derivePlanStatus = (order) => {
 // serviceLifecycle.js / cancelProjectOrder.js / the renewal cron. Unlike `status` and
 // `currentPhase`, that column IS maintained by every path that changes a service, so it is read
 // rather than re-derived — but only after the order-level terminal states, which outrank it.
-const deriveServiceStatus = (order) => {
+const deriveServiceStatus = (order, now = Date.now()) => {
   if (order?.orderVisibility === "cancelled" || order?.servicePlanStatus === "cancelled") {
     return { code: STATUS.CANCELLED, label: "Cancelled", tone: TONE.NEUTRAL };
   }
@@ -248,13 +248,27 @@ const deriveServiceStatus = (order) => {
     return { code: STATUS.PLAN_CLOSED, label: "Paused", tone: TONE.WARNING };
   }
   if (isApprovedVisibility(order)) {
+    const cd = order?.deactivationCountdown;
+    if (cd?.active && cd?.endsAt) {
+      const msLeft = new Date(cd.endsAt).getTime() - (+new Date(now));
+      const daysRemaining = Math.max(0, Math.ceil(msLeft / 86400000));
+      return {
+        code: STATUS.PLAN_ACTIVE,
+        label: "Active",
+        tone: TONE.WARNING,
+        deactivationDaysRemaining: daysRemaining,
+        deactivationEndsAt: cd.endsAt,
+        deactivationFinalStatus: cd.finalStatus || "expired",
+        showDeactivationBanner: cd.showPortalBanner !== false,
+      };
+    }
     return { code: STATUS.PLAN_ACTIVE, label: "Active", tone: TONE.POSITIVE };
   }
   return { code: STATUS.PROCESSING, label: "Processing", tone: TONE.NEUTRAL };
 };
 
 // ── Public entry point ────────────────────────────────────────────────────────────────────
-const getOrderState = (order) => {
+const getOrderState = (order, now = Date.now()) => {
   if (!order) {
     return {
       code: STATUS.PROCESSING,
@@ -269,7 +283,7 @@ const getOrderState = (order) => {
   // Service first: a service order can also satisfy isPlanOrder() through its category, and its
   // own lifecycle column is the more specific answer.
   const status = isServiceOrder(order)
-    ? deriveServiceStatus(order)
+    ? deriveServiceStatus(order, now)
     : isPlanOrder(order)
       ? derivePlanStatus(order)
       : deriveProjectStatus(order);
@@ -283,6 +297,12 @@ const getOrderState = (order) => {
     phase,
     phaseLabel: PHASE_LABEL[phase],
     progress: isProjectOrder(order) ? getProgress(order) : null,
+    ...(status.deactivationDaysRemaining !== undefined ? {
+      deactivationDaysRemaining: status.deactivationDaysRemaining,
+      deactivationEndsAt: status.deactivationEndsAt,
+      deactivationFinalStatus: status.deactivationFinalStatus,
+      showDeactivationBanner: status.showDeactivationBanner,
+    } : {}),
   };
 };
 

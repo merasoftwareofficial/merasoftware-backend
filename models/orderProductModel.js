@@ -875,6 +875,25 @@ const orderSchema = new mongoose.Schema({
         type: String,
         enum: ['pending_activation', 'active', 'paused', 'expired', 'inactive', 'cancelled'],
         default: 'active'
+    },
+    deactivationCountdown: {
+        active: { type: Boolean, default: false },
+        startedAt: { type: Date, default: null },
+        endsAt: { type: Date, default: null },
+        finalStatus: { type: String, enum: ['expired', 'paused'], default: 'expired' },
+        showPortalBanner: { type: Boolean, default: true },
+        autoRecoverOnStop: { type: Boolean, default: true },
+        stopOn: { type: [String], default: [] },
+        ruleId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        occurrenceKey: { type: String, default: '' },
+    },
+    automationPause: {
+        active: { type: Boolean, default: false },
+        pausedAt: { type: Date, default: null },
+        autoRecoverOnStop: { type: Boolean, default: true },
+        stopOn: { type: [String], default: [] },
+        ruleId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        occurrenceKey: { type: String, default: '' },
     }
 }, {
     timestamps: true
