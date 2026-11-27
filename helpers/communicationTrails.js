@@ -159,6 +159,11 @@ function normalizeReminderBlock(raw = {}, fallbackId = 1, defaultBaseDate = 'due
   const repeatPerDay = Number(r.repeatPerDay);
   const conditionValue = Number(r.conditionValue);
   const safeForDays = Number.isFinite(repeatForDays) ? Math.max(1, repeatForDays) : 7;
+  const countDaysFrom = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : defaultBaseDate;
+  const repeatMode = ['off', 'permanent', 'limited'].includes(r.repeatMode)
+    ? r.repeatMode
+    : (r.repeatMode === 'until_due' && countDaysFrom !== 'trigger_date' ? 'until_due' : 'off');
+  const timeoutFallback = countDaysFrom === 'trigger_date' ? safeForDays : 0;
   return {
     id,
     startTrigger: typeof r.startTrigger === 'string' && r.startTrigger.trim() ? r.startTrigger.trim() : '__main__',
@@ -167,15 +172,15 @@ function normalizeReminderBlock(raw = {}, fallbackId = 1, defaultBaseDate = 'due
     adminMode: r.adminMode === 'universal' ? 'universal' : 'separate',
     clientSteps,
     adminSteps,
-    repeatMode: ['off', 'permanent', 'limited'].includes(r.repeatMode) ? r.repeatMode : 'off',
+    repeatMode,
     repeatForDays: safeForDays,
     repeatEveryDays: Number.isFinite(repeatEveryDays) ? Math.max(1, repeatEveryDays) : 2,
     repeatPerDay: Number.isFinite(repeatPerDay) ? Math.min(4, Math.max(1, repeatPerDay)) : 1,
-    countDaysFrom: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : defaultBaseDate,
+    countDaysFrom,
     condition: typeof r.condition === 'string' && r.condition.trim() ? r.condition.trim() : 'any',
     conditionValue: Number.isFinite(conditionValue) ? Math.max(0, conditionValue) : 50,
     stopOn: [...new Set((Array.isArray(r.stopOn) ? r.stopOn : []).map(k => String(k || '').trim()).filter(Boolean))],
-    onTimeout: normalizeTimeoutBlock(r.onTimeout, safeForDays),
+    onTimeout: normalizeTimeoutBlock(r.onTimeout, timeoutFallback),
     stopChains: {},
   };
 }
@@ -272,7 +277,9 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
     const condFields = mapCondition(rem.condition, rem.conditionValue);
     const baseDate = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(rem.countDaysFrom) ? rem.countDaysFrom : 'due_date';
     const stopOn = [...new Set((Array.isArray(rem.stopOn) ? rem.stopOn : []).filter(k => Boolean(ACTIONS[k])))];
-    const repeatMode = ['off', 'permanent', 'limited'].includes(rem.repeatMode) ? rem.repeatMode : 'off';
+    const repeatMode = ['off', 'permanent', 'limited'].includes(rem.repeatMode)
+      ? rem.repeatMode
+      : (rem.repeatMode === 'until_due' && baseDate !== 'trigger_date' ? 'until_due' : 'off');
     const repeat = repeatMode === 'off'
       ? { mode: 'off', forDays: 0, times: 0, perDay: 1 }
       : {
@@ -333,7 +340,7 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
 
     // Compile optional Escalation / On-Timeout rule (Condition -> System Actions or Continue to Next Stage).
     const onTimeout = rem.onTimeout && typeof rem.onTimeout === 'object' ? rem.onTimeout : null;
-    if (onTimeout?.enabled) {
+    if (onTimeout?.enabled && repeatMode !== 'permanent') {
       const rawActions = Array.isArray(onTimeout.actions) ? onTimeout.actions : [];
       const hasStageContinue = rawActions.some(a => a.key === 'stage.continue') || Boolean(onTimeout.nextStageId);
       const nonContinueActions = rawActions.filter(a => a.key !== 'stage.continue');
@@ -341,6 +348,7 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
       if (targetNextStageId || nonContinueActions.length > 0) {
         const timeoutCond = mapCondition(onTimeout.condition || 'not_stopped', onTimeout.conditionValue);
         const fallbackAnchor = anchorStep || { timingRef: 'after_action', unit: 'days', days: 0, hours: 0 };
+        const defaultTimeoutDays = baseDate === 'trigger_date' ? (rem.repeatForDays ?? 0) : 0;
         out.push(cleanRule({
           kind: targetNextStageId ? 'stage_handoff' : 'system_action',
           stageId: stageMeta.stageId,
@@ -351,7 +359,7 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
           audience: 'customer',
           ...timeoutCond,
           baseDate,
-          timeoutAfterDays: Number(onTimeout.afterDays ?? rem.repeatForDays ?? 0),
+          timeoutAfterDays: Number(onTimeout.afterDays ?? defaultTimeoutDays),
           anchorStep: fallbackAnchor,
           systemActions: nonContinueActions,
           scope: scopeObj,

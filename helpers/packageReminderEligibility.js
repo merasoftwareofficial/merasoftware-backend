@@ -1,4 +1,5 @@
 const { isFinalCycle, getNextCycleNumber, resolveServiceRenewalPrice } = require('./serviceBillingSchedule');
+const { resolvePaymentDueDate } = require('./paymentDueDate');
 
 // No writes or sends. A candidate identifies one cycle whether its invoice has
 // been created yet or not. Legacy offer-policy orders are deliberately excluded
@@ -14,8 +15,9 @@ function packageReminderCandidate(order, invoice = null) {
     return { orderId: String(order._id), cycle, due, amount, invoiceId: String(invoice._id), projected: false };
   }
   if (order.servicePlanStatus !== 'active' || order.serviceAutoRenewalStoppedAt || isFinalCycle(order, order.serviceCurrentCycleNumber)) return null;
-  const cycle = getNextCycleNumber(order), due = new Date(order.serviceNextBillingDate), amount = resolveServiceRenewalPrice(order);
-  if (!order.serviceNextBillingDate || !Number.isInteger(cycle) || cycle < 2 || !Number.isFinite(+due) || !(amount > 0)) return null;
+  const cycle = getNextCycleNumber(order), amount = resolveServiceRenewalPrice(order);
+  const due = order.serviceNextBillingDate ? resolvePaymentDueDate({ order, invoiceDate: new Date(order.serviceNextBillingDate), cycleNumber: cycle }) : null;
+  if (!order.serviceNextBillingDate || !Number.isInteger(cycle) || cycle < 2 || !due || !Number.isFinite(+due) || !(amount > 0)) return null;
   return { orderId: String(order._id), cycle, due, amount, invoiceId: null, projected: true };
 }
 module.exports = { packageReminderCandidate };

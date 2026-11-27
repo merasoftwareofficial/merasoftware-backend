@@ -203,7 +203,9 @@ const createProjectInvoice = async ({
   invoiceType = "project",
   session = null,
   paymentPolicyKey,
+  isBackdated = false,
 }) => {
+  const { isBackdatedDate } = require("./paymentDueDate");
   const invoiceNumber = await generateInvoiceNumber({ session });
   const data = {
     userId: customerId,
@@ -221,7 +223,8 @@ const createProjectInvoice = async ({
   };
   const invoice = session ? (await invoiceModel.create([data], { session }))[0] : await invoiceModel.create(data);
   // Action rules (Reminder.md §4): "Invoice created", in the same session as the invoice.
-  if (Number(amount) > 0) await require("./actionEvents").invoiceCreated(invoice, session);
+  const backdated = Boolean(isBackdated) || isBackdatedDate(invoiceDate);
+  if (Number(amount) > 0) await require("./actionEvents").invoiceCreated(invoice, session, { isBackdated: backdated });
   return invoice;
 };
 

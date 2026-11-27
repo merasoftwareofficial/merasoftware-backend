@@ -9,7 +9,8 @@ const settleServiceCycle = async ({ orderId, invoice, now = new Date(), skipNoti
   if (invoice.status !== "paid") return service;
 
   const cycleNumber = Number(invoice.serviceCycleNumber || service.serviceCurrentCycleNumber || 1);
-  const preservesActiveCycle = !!service.paymentPolicy && cycleNumber <= Number(service.serviceCurrentCycleNumber || 1);
+  const preservesActiveCycle = (Boolean(service.paymentPolicy) || Number(service.servicePlanSnapshot?.paymentDueDays || 0) > 0)
+    && cycleNumber <= Number(service.serviceCurrentCycleNumber || 1);
   const awaitingActivation = service.servicePlanStatus === "pending_activation";
   const cycle = preservesActiveCycle ? { start: service.serviceCurrentCycleStart, end: service.serviceCurrentCycleEnd } : getCycleDates(service, cycleNumber, now);
   const history = Array.isArray(service.serviceCycleHistory) ? service.serviceCycleHistory : [];

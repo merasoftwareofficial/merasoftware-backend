@@ -27,11 +27,14 @@ async function orderFullyPaid(orderId) {
 }
 
 function packageSlugOf(order) {
-  return String(
+  const pkgSlug = String(
     order?.salesPackage?.packageSlug || order?.salesPackage?.slug || order?.salesPackage?.packageId ||
     order?.salesPackage?.package?.id || order?.projectSnapshot?.salesAgreement?.package?.id ||
     order?.servicePlanSnapshot?.packageSlug || '',
   ).trim();
+  if (pkgSlug) return pkgSlug;
+  if (order?.isServicePlan && order?.productId) return `plan:${String(order.productId)}`;
+  return '';
 }
 
 async function orderHasUpload(order) {
@@ -57,7 +60,7 @@ function orderRemainingLimit(order) {
   return null;
 }
 
-const ORDER_CONTEXT_SELECT = 'userId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments paymentPolicy expectedCompletionDate deactivationCountdown automationPause';
+const ORDER_CONTEXT_SELECT = 'userId productId orderItems servicePlanSnapshot salesPackage projectSnapshot orderVisibility status servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleStartDate isServicePlan createdAt currentMonthUpdatesRemaining demoMode projectProgress isPartialPayment currentInstallment installments paymentPolicy expectedCompletionDate deactivationCountdown automationPause';
 
 async function orderHasPendingApproval(order) {
   if (!order?._id) return false;
@@ -192,9 +195,16 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
     ? `trail:${String(rule.trailId)}:entity:${String(event.orderId || event.entityId)}`
     : event.key;
   if (rule.kind === 'system_action' || rule.kind === 'stage_handoff') {
-    const anchorDue = (rule.anchorStep ? stepDueAt(rule.anchorStep, event.occurredAt, effectiveBase) : null) || new Date(event.occurredAt);
+    const isDueAnchored = (rule.baseDate || 'due_date') !== 'trigger_date' && Boolean(effectiveBase);
+    const anchorDue = isDueAnchored
+      ? new Date(effectiveBase)
+      : ((rule.anchorStep ? stepDueAt(rule.anchorStep, event.occurredAt, effectiveBase) : null) || new Date(event.occurredAt));
     const timeoutMs = Math.max(0, Number(rule.timeoutAfterDays || 0)) * DAY;
     const dueAt = new Date(+anchorDue + timeoutMs);
+    // Back-date guard: never auto-expire/escalate a back-dated unpaid order immediately on creation.
+    if (event.details?.isBackdated === true && +dueAt <= Date.now()) {
+      return [];
+    }
     return [{
       ruleId: rule._id,
       ruleRevision: rule.revision,
@@ -237,7 +247,9 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
   const last = sends[sends.length - 1];
   const repeatMode = rule.repeat?.mode === 'permanent'
     ? 'permanent'
-    : ((rule.repeat?.mode === 'limited' || (rule.repeat?.times || 0) > 0) ? 'limited' : 'off');
+    : rule.repeat?.mode === 'until_due'
+      ? 'until_due'
+      : ((rule.repeat?.mode === 'limited' || (rule.repeat?.times || 0) > 0) ? 'limited' : 'off');
   const everyDays = Math.max(1, Number(rule.repeat?.everyDays || 1));
   const perDay = Math.max(1, Number(rule.repeat?.perDay || 1));
   if (repeatMode === 'permanent') {
@@ -246,6 +258,15 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
     for (let slot = 0; slot < perDay; slot++) {
       const offsetMs = Math.round((slot * DAY) / perDay);
       sends.push({ ...last, dueAt: new Date(dayBase + offsetMs) });
+    }
+  } else if (repeatMode === 'until_due' && effectiveBase) {
+    const endMs = +new Date(effectiveBase);
+    for (let dayBase = +last.dueAt + everyDays * DAY; dayBase <= endMs && sends.length < 60; dayBase += everyDays * DAY) {
+      for (let slot = 0; slot < perDay && sends.length < 60; slot++) {
+        const offsetMs = Math.round((slot * DAY) / perDay);
+        const at = dayBase + offsetMs;
+        if (at <= endMs) sends.push({ ...last, dueAt: new Date(at) });
+      }
     }
   } else if (repeatMode === 'limited') {
     const repeatTimes = Number(rule.repeat?.times || 0) || Math.min(60, Math.max(1, Math.floor(Number(rule.repeat?.forDays || 0) / everyDays)));
@@ -288,6 +309,14 @@ const DIRECT_TEMPLATE_MIGRATED = new Set([
 ]);
 
 async function handleEvent(event) {
+  // Replace projected pre-renewal runs once the real plan_renewal invoice exists so reminders never double-send.
+  if (event.action === 'invoice.created' && event.details?.invoiceType === 'plan_renewal' && event.orderId && event.details?.serviceCycleNumber) {
+    const projKey = `pkg-proj:${String(event.orderId)}:cycle:${Number(event.details.serviceCycleNumber)}`;
+    await Run.updateMany(
+      { source: 'action', occurrenceKey: projKey, status: 'scheduled' },
+      { $set: { status: 'cancelled', reason: 'Replaced by real renewal invoice.' } },
+    );
+  }
   let keys = event.matchKeys || [];
   if (event.action === 'payment.received' && await orderFullyPaid(event.orderId)) keys = [...keys, `order:${event.orderId}`];
   if (keys.length) {
@@ -1034,6 +1063,7 @@ async function processActionRules(now = new Date(), { plan = true } = {}) {
   if (!enabled()) return { enabled: false };
   const events = await processEvents();
   const projected = plan ? await planProjectedMonthlyRuns() : 0;
+  await require('../cron/servicePlanRenewalCron').pauseOverdueServicePlans(now).catch(() => 0);
   const dispatched = await dispatchDue(now);
   return { enabled: true, events, projected, dispatched };
 }

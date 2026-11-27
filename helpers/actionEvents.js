@@ -579,7 +579,7 @@ async function emitAction(action, { key, entityId, clientId = null, leadId = nul
 const id = value => (value ? String(value) : '');
 const invoiceKeys = invoice => [`invoice:${id(invoice._id)}`, ...(invoice.orderId ? [`order:${id(invoice.orderId)}`] : [])];
 
-const invoiceCreated = (invoice, session) => emitAction('invoice.created', {
+const invoiceCreated = (invoice, session, { isBackdated = false } = {}) => emitAction('invoice.created', {
   key: `invoice.created:${id(invoice._id)}`, entityId: invoice._id, clientId: invoice.userId, orderId: invoice.orderId,
   matchKeys: invoiceKeys(invoice), occurredAt: invoice.createdAt || new Date(),
   details: {
@@ -587,6 +587,8 @@ const invoiceCreated = (invoice, session) => emitAction('invoice.created', {
     amount: invoice.amount,
     dueDate: invoice.dueDate,
     invoiceNumber: invoice.invoiceNumber,
+    ...(invoice.serviceCycleNumber ? { serviceCycleNumber: invoice.serviceCycleNumber } : {}),
+    ...(isBackdated ? { isBackdated: true } : {}),
     ...(invoice.invoiceType === 'plan_renewal' ? { originSurface: 'System' } : {}),
   },
 }, { session });

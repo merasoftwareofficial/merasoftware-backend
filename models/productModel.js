@@ -347,6 +347,12 @@ const productSchema = new mongoose.Schema({
       min: 1,
       max: 12
     },
+    paymentDueDays: {
+      type: Number,
+      min: 0,
+      max: 365,
+      default: 0
+    },
     releaseMode: {
       type: String,
       enum: ['all_at_once', 'monthly']

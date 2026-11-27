@@ -3,6 +3,7 @@ const invoiceModel = require("../../models/invoiceModel");
 const mongoose = require('mongoose');
 const { applyOrderSummary, ORDER_SUMMARY_FIELDS, attachOrderState } = require("../../helpers/orderSummary");
 const { getDueUnpaidInvoiceFilter, dueInstallment } = require("../../helpers/projectDuePayment");
+const { loadBeforeDueRules, buildPaymentDueAlert } = require("../../helpers/paymentDueRibbon");
 
 const getUserOrders = async (req, res) => {
     try {
@@ -37,13 +38,40 @@ const getUserOrders = async (req, res) => {
         // Plan orders (monthlyInvoiceModel-based) never have installments and fall through
         // getDueUnpaidInvoiceFilter's plain orderId+status match unchanged.
         const projectOrders = orders.filter((order) => order.isWebsiteProject);
-        const unpaidInvoices = projectOrders.length
-            ? await invoiceModel
-                .find({ $or: projectOrders.map((order) => getDueUnpaidInvoiceFilter(order)) })
-                .select('orderId')
-                .lean()
-            : [];
-        const unpaidOrderIds = new Set(unpaidInvoices.map((invoice) => String(invoice.orderId)));
+        const serviceOrders = orders.filter((order) => order.isServicePlan);
+        const invoiceFilters = [
+            ...projectOrders.map((order) => getDueUnpaidInvoiceFilter(order)),
+            ...(serviceOrders.length
+                ? [{
+                    orderId: { $in: serviceOrders.map((o) => o._id) },
+                    invoiceType: { $in: ['project', 'plan_renewal'] },
+                    status: { $in: ['unpaid', 'partially_paid', 'overdue'] },
+                }]
+                : []),
+        ];
+        const [unpaidInvoices, beforeDueRules] = await Promise.all([
+            invoiceFilters.length
+                ? invoiceModel
+                    .find({ $or: invoiceFilters })
+                    .select('_id orderId invoiceNumber invoiceType status amount amountPaid dueDate installmentNumber createdAt')
+                    .sort({ dueDate: 1, createdAt: 1 })
+                    .lean()
+                : [],
+            orders.length ? loadBeforeDueRules() : [],
+        ]);
+        const projectOrderIdSet = new Set(projectOrders.map((o) => String(o._id)));
+        const unpaidOrderIds = new Set(
+            unpaidInvoices
+                .filter((inv) => projectOrderIdSet.has(String(inv.orderId)))
+                .map((invoice) => String(invoice.orderId))
+        );
+        const earliestOpenInvoiceByOrder = new Map();
+        for (const inv of unpaidInvoices) {
+            const oid = String(inv.orderId);
+            if (!earliestOpenInvoiceByOrder.has(oid) && Number(inv.amount || 0) > Number(inv.amountPaid || 0)) {
+                earliestOpenInvoiceByOrder.set(oid, inv);
+            }
+        }
         orders.forEach((order) => {
             // A due, unpaid installment counts even before its invoice exists (projectDuePayment.js).
             order.hasUnpaidInvoice = unpaidOrderIds.has(String(order._id)) || (order.isWebsiteProject && Boolean(dueInstallment(order)));
@@ -51,6 +79,11 @@ const getUserOrders = async (req, res) => {
             // existed — and "Payment Pending" is derived from that flag. Recompute now that the
             // real value is known, so the badge this endpoint feeds is not one state behind.
             attachOrderState(order);
+            order.paymentDueAlert = buildPaymentDueAlert({
+                order,
+                invoice: earliestOpenInvoiceByOrder.get(String(order._id)) || null,
+                rules: beforeDueRules,
+            });
         });
 
         console.log('Total projects found:', orders.length);

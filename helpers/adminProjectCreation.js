@@ -4,7 +4,7 @@ const User = require('../models/userModel');
 const { initializeProjectTimeline } = require('./projectNodeService');
 const { createProjectInvoice, buildLineItemsFromOrder } = require('./paymentRecording');
 const { syncProjectFinalInvoice } = require('./projectFinalInvoice');
-const { paymentDueDate } = require('./offerPaymentPolicy');
+const { resolvePaymentDueDate } = require('./paymentDueDate');
 const { recordAdminProjectPaymentInSession } = require('./projectPaymentSettlement');
 
 // External catalogue reads/validation happen before this short financial commit.
@@ -16,7 +16,7 @@ const { recordAdminProjectPaymentInSession } = require('./projectPaymentSettleme
 // `startDate` (optional): an admin's back-dated project (adminCreateProjectOrder.js billingDate). The order's
 // createdAt, its first timeline step, the first invoice's date and due date, and a payment recorded with it
 // are all set to that date; omitted = now, as before.
-async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId, clientPurchase = false, purchasePayment = null, beforeCreate = null, startDate = null }) {
+async function persistAdminProject({ orderData, startingNodeTitle, actorId, recordPayment, preparedEvidence, sourceOffer, sourceReservationId, clientPurchase = false, purchasePayment = null, beforeCreate = null, startDate = null, explicitDueDate = null }) {
   const projectId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -41,12 +41,12 @@ async function persistAdminProject({ orderData, startingNodeTitle, actorId, reco
     await order.save({ session });
     const installment = order.isPartialPayment ? order.installments[0] : null;
     const invoiceDate = startDate ? new Date(startDate) : new Date();
-    const dueDate = order.paymentPolicy ? paymentDueDate(order.paymentPolicy, invoiceDate) : installment?.dueDate || invoiceDate;
+    const dueDate = resolvePaymentDueDate({ explicitDueDate, order, installmentDueDate: installment?.dueDate, invoiceDate, cycleNumber: 1 });
     if (installment) installment.dueDate = dueDate;
     const invoice = await createProjectInvoice({ customerId: order.userId, orderId: order._id,
       amount: installment ? installment.amount : order.totalAmount,
       lineItems: buildLineItemsFromOrder(order), installmentNumber: installment?.installmentNumber,
-      invoiceDate, dueDate, session });
+      invoiceDate, dueDate, isBackdated: Boolean(startDate), session });
     if (order.paymentComplete && Number(order.totalAmount) === 0) {
       invoice.status = 'paid'; invoice.paidDate = invoiceDate;
       await invoice.save({ session });

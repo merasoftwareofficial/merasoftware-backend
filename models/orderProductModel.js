@@ -737,6 +737,7 @@ const orderSchema = new mongoose.Schema({
         updatesPerMonth: Number,
         releaseMode: String,
         oneTimeValidityDays: Number,
+        paymentDueDays: Number,
         priceBreakdown: {
             updatePrice: Number,
             perMonthPrice: Number,

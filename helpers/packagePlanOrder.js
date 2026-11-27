@@ -5,7 +5,7 @@ const { monthlyPlanShape } = require('./salesPackages');
 const { buildServicePlanOrderData } = require('./servicePlanPurchase');
 const { createProjectInvoice, markProjectInvoicePaid } = require('./paymentRecording');
 const { createPaymentTransaction, deductWalletInstant } = require('./transactionService');
-const { paymentDueDate } = require('./offerPaymentPolicy');
+const { resolvePaymentDueDate } = require('./paymentDueDate');
 
 // A monthly package runs as a plan (src/docs/monthlypackage.md, owner decisions 11 Nov 2026): the order is a
 // service-plan order built by the plan engine (servicePlanPurchase.js buildServicePlanOrderData), so the
@@ -48,7 +48,7 @@ function buildPackagePlanOrderData({ userId, item, commercial, startDate = new D
 // `startDate` (optional): an admin's back-dated monthly package; build the order data with the same date
 // (buildPackagePlanOrderData startDate), so the plan's cycles run from it. The order's createdAt, the first
 // cycle's invoice date and an admin-recorded payment are set to it; omitted = now, as before.
-async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = false, sourceOffer = null, sourceReservationId = null, payment = null, beforeCreate = null, startDate = null }) {
+async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = false, sourceOffer = null, sourceReservationId = null, payment = null, beforeCreate = null, startDate = null, explicitDueDate = null }) {
   const orderId = new mongoose.Types.ObjectId();
   return mongoose.connection.transaction(async session => {
     const actor = await User.findById(actorId).session(session);
@@ -76,7 +76,7 @@ async function persistPackagePlanOrder({ orderData, actorId, clientPurchase = fa
     // The first bill as a plan's (customerCreateServicePlanOrder.js); renewals add "Cycle n" bills (servicePlanRenewalCron.js).
     let invoice = await createProjectInvoice({ customerId: order.userId, orderId: order._id, amount: due / 100,
       lineItems: [{ name: order.orderItems[0].name, price: due / 100 }], serviceCycleNumber: 1, invoiceDate,
-      dueDate: order.paymentPolicy ? paymentDueDate(order.paymentPolicy, invoiceDate) : invoiceDate, session });
+      dueDate: resolvePaymentDueDate({ explicitDueDate, order, invoiceDate, cycleNumber: 1 }), isBackdated: Boolean(startDate), session });
 
     let walletPaid = 0, upiPending = 0;
     if (payment?.kind === 'customer') {

@@ -4,6 +4,7 @@ const transactionModel = require("../../models/transactionModel");
 const { getDueUnpaidInvoiceFilter, dueInstallment } = require("../../helpers/projectDuePayment");
 const { projectAllowsUploads } = require("../../helpers/projectUploadGate");
 const { getOrderState } = require("../../helpers/orderStatusEngine");
+const { loadBeforeDueRules, buildPaymentDueAlert } = require("../../helpers/paymentDueRibbon");
 const { uploadAllowanceNow } = require("../../helpers/serviceAllowance");
 const { buildLifecycleTimeline, getCurrentStateSince } = require("../../helpers/orderLifecycleLog");
 const { getPaymentAccess } = require("../../helpers/offerPaymentPolicy");
@@ -170,7 +171,7 @@ const getOrderDetails = async (req, res) => {
 
         // These reads do not depend on each other, so they run together: one round to the
         // database instead of one per read. The filters above read order fields before populate.
-        const [, earliestUnpaidInvoice, serviceInvoices, linkedServices, pendingPaymentTransaction, paymentAccess, newUploadsCount, complimentaryUpgrades] = await Promise.all([
+        const [, earliestUnpaidInvoice, serviceInvoices, linkedServices, pendingPaymentTransaction, paymentAccess, newUploadsCount, complimentaryUpgrades, beforeDueRules] = await Promise.all([
             order.populate([
                 { path: 'userId', select: 'name email address' },
                 { path: 'productId', select: 'serviceName category totalPages validityPeriod updateCount isWebsiteUpdate price sellingPrice isMonthlyLimitedPlan isMonthlyRenewablePlan monthlyUpdateLimit yearlyPlanDuration monthlyRenewalPrice monthlyRenewalCost isServicePlan servicePlan formattedDescriptions' },
@@ -183,6 +184,7 @@ const getOrderDetails = async (req, res) => {
             order.paymentPolicy ? getPaymentAccess(order) : null,
             newUploadsCountRead,
             complimentaryUpgradesRead,
+            loadBeforeDueRules(),
         ]);
 
         // Payment Pending: a due, unpaid installment counts even before its invoice exists
@@ -218,9 +220,22 @@ const getOrderDetails = async (req, res) => {
         // one more thing that can disagree with itself) and everything arrives in time order.
         const lifecycleTimeline = buildLifecycleTimeline(orderData);
 
+        const openServiceInvoice = Array.isArray(serviceInvoices)
+            ? [...serviceInvoices]
+                .filter((inv) => ['unpaid', 'partially_paid', 'overdue'].includes(inv?.status) && Number(inv.amount || 0) > Number(inv.amountPaid || 0))
+                .sort((a, b) => new Date(a.dueDate || a.createdAt || 0) - new Date(b.dueDate || b.createdAt || 0))[0] || null
+            : null;
+        const paymentDueAlert = buildPaymentDueAlert({
+            order: { ...orderData, orderState },
+            invoice: earliestUnpaidInvoice || openServiceInvoice,
+            rules: beforeDueRules,
+            hasPendingPayment: Boolean(pendingPaymentTransaction),
+        });
+
         const responseData = {
             ...orderData,
             paymentAccess,
+            paymentDueAlert,
             orderState,
             lifecycleTimeline,
             // When the order reached the state it is in now — powers the "since" on a status badge.

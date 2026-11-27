@@ -8,6 +8,25 @@ const { TEXT_BY_ID } = require('./communicationActionText');
 const { CATEGORIES } = require('./communicationCategories');
 const { byKey: EMAIL_BY_KEY, isCustomerTriggered } = require('./emailCatalog');
 const { readPackages } = require('./salesPackages');
+const Product = require('../models/productModel');
+
+async function loadScopePackages() {
+  const [catalogue, plans] = await Promise.all([
+    readPackages().catch(() => []),
+    Product.find({ category: 'service_plan', isServicePlan: true, retiredAt: null, archivedAt: null })
+      .select('_id serviceName')
+      .sort({ serviceName: 1 })
+      .lean()
+      .catch(() => []),
+  ]);
+  const pkgItems = (Array.isArray(catalogue) ? catalogue : [])
+    .filter(p => p && (p.slug || p.id))
+    .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
+  const planItems = (Array.isArray(plans) ? plans : [])
+    .filter(p => p && p._id)
+    .map(p => ({ slug: `plan:${String(p._id)}`, name: `Plan: ${p.serviceName || String(p._id)}` }));
+  return [...pkgItems, ...planItems];
+}
 
 // Maps Actions-list IDs (Reminder-mapping.md §A) to built-in templates and legacy reminders/automations.
 // Template labels and portal/website app routing come from emailCatalog (SSOT).
@@ -338,10 +357,7 @@ function validatePatch(body = {}) {
 
 async function list(options = {}) {
   if (options?.view === 'catalog') {
-    const catalogue = await readPackages().catch(() => []);
-    const packages = (Array.isArray(catalogue) ? catalogue : [])
-      .filter(p => p && (p.slug || p.id))
-      .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
+    const packages = await loadScopePackages();
     const triggers = [];
     for (const [triggerKey, meta] of Object.entries(TRIGGER_ACTIONS)) {
       if (!meta?.trigger) continue;
@@ -363,10 +379,10 @@ async function list(options = {}) {
     const { conditions, systemActions } = getAutomationCatalog();
     return { triggers, folders: FOLDERS, packages, conditions, systemActions };
   }
-  const [overrides, allRules, catalogue, policies] = await Promise.all([
+  const [overrides, allRules, packages, policies] = await Promise.all([
     Override.find().lean(),
     ActionRule.find().sort({ createdAt: 1 }).lean(),
-    readPackages().catch(() => []),
+    loadScopePackages(),
     EmailPolicy.find().select('event mode').lean().catch(() => []),
   ]);
   const policyByEvent = new Map(policies.map(p => [p.event, p.mode]));
@@ -386,9 +402,6 @@ async function list(options = {}) {
       (triggerKey && r.action === triggerKey && (!r.actionId || String(r.migratedFrom || '').startsWith('template:'))),
     );
   };
-  const packages = (Array.isArray(catalogue) ? catalogue : [])
-    .filter(p => p && (p.slug || p.id))
-    .map(p => ({ slug: p.slug || p.id, name: p.name || p.slug || p.id }));
   const actions = ACTION_CATALOG.map(base => merge(base, byId.get(base.id), rulesFor(base.id), policyByEvent, migratedTemplateEvents));
   const triggers = buildTriggers(actions, allRules);
   const { conditions, systemActions } = getAutomationCatalog();

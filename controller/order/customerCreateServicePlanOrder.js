@@ -237,8 +237,8 @@ const customerCreateServicePlanOrder = async (req, res) => {
       orderId: order._id,
       amount: finalPrice,
       lineItems: [{ name: plan.serviceName, price: finalPrice }],
-      invoiceDate: new Date(),
-      dueDate: paymentPolicy ? require('../../helpers/offerPaymentPolicy').paymentDueDate(paymentPolicy, startDate) : undefined,
+      invoiceDate: startDate,
+      dueDate: require('../../helpers/paymentDueDate').resolvePaymentDueDate({ order, paymentPolicy, planOrPackageDueDays: servicePlan.paymentDueDays, invoiceDate: startDate, cycleNumber: 1 }),
       serviceCycleNumber: 1,
     };
     let invoice;

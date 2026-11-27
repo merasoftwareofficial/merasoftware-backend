@@ -215,6 +215,7 @@ const buildServicePlanOrderData = ({
       updatesPerMonth,
       releaseMode: quote?.releaseMode,
       oneTimeValidityDays: oneTimeValidityDays || undefined,
+      paymentDueDays: Number(servicePlan.paymentDueDays || 0),
       priceBreakdown: quote ? {
         updatePrice: quote.updatePrice ?? undefined,
         perMonthPrice: quote.perMonthPrice ?? undefined,

@@ -201,7 +201,12 @@ const canonical = (value) => {
   }
   return value === null ? undefined : value;
 };
-const planSettings = (plan) => canonical(JSON.parse(JSON.stringify(plan.servicePlan || {}))) || {};
+const planSettings = (plan) => {
+  const raw = JSON.parse(JSON.stringify(plan.servicePlan || {}));
+  // Editing paymentDueDays must never invalidate in-flight customer plan/offer quote keys.
+  delete raw.paymentDueDays;
+  return canonical(raw) || {};
+};
 
 // Proof that a quote is still current: the plan, its settings and price, the customer's choices
 // and the amount. The purchase refuses a key that no longer matches ("price changed, refresh").

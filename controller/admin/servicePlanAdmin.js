@@ -77,9 +77,13 @@ const startPlanForClient = handle('Failed to start the plan', async (req, res) =
   let invoice;
   await mongoose.connection.transaction(async (session) => {
     [order] = await Order.create([orderData], { session });
+    const invoiceDate = new Date();
     const created = await createProjectInvoice({
       customerId: customer._id, orderId: order._id, amount: finalPrice,
-      lineItems: [{ name: plan.serviceName, price: finalPrice }], serviceCycleNumber: 1, session,
+      lineItems: [{ name: plan.serviceName, price: finalPrice }], serviceCycleNumber: 1,
+      invoiceDate,
+      dueDate: require('../../helpers/paymentDueDate').resolvePaymentDueDate({ order, planOrPackageDueDays: servicePlan.paymentDueDays, invoiceDate, cycleNumber: 1 }),
+      session,
     });
     let existingTransaction = null;
     if (payment.mode === 'wallet') {

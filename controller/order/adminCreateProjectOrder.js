@@ -92,6 +92,12 @@ const adminCreateProjectOrderController = async (req, res) => {
       if (picked.getTime() < now - 2 * 60 * 1000) startDate = picked;
       if (startDate && req.body.offerReservationId) return res.status(400).json({ message: "A reserved offer starts today; it cannot be back-dated", error: true, success: false });
     }
+    let explicitDueDate = null;
+    if (req.body.dueDate) {
+      const parsedDue = new Date(req.body.dueDate);
+      if (!Number.isFinite(parsedDue.getTime())) return res.status(400).json({ message: "Enter a valid payment due date", error: true, success: false });
+      explicitDueDate = parsedDue;
+    }
 
     // Active category from the SSOT (helpers/projectCategories.js); an archived or unknown one is refused.
     const categoryEntry = await requireCategoryForNewProject(category);
@@ -192,7 +198,7 @@ const adminCreateProjectOrderController = async (req, res) => {
       if (!shouldRecordPayment && require('../../helpers/offerPaymentPolicy').allowsDeferredPayment(commercial.paymentPolicy)) orderData.orderVisibility = 'approved';
       const { order, invoice, reused } = await persistPackagePlanOrder({
         orderData, actorId: req.userId, sourceOffer: commercial.sourceOffer, sourceReservationId: commercial.sourceReservationId,
-        payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null, startDate,
+        payment: shouldRecordPayment ? { kind: 'admin', recordPayment, preparedEvidence } : null, startDate, explicitDueDate,
       });
       const reviewStart = !reused && require('../../helpers/emailController').hasActiveRequestScope();
       const saved = reused ? order : await startPaidPackagePlan({ order, invoice, reviewStart });
@@ -255,7 +261,7 @@ const adminCreateProjectOrderController = async (req, res) => {
     const { order, invoice, reused } = await persistAdminProject({
       orderData, startingNodeTitle: resolvedStartingNodeTitle, actorId: req.userId,
       recordPayment: shouldRecordPayment ? recordPayment : null, preparedEvidence,
-      sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId, startDate,
+      sourceOffer: commercial?.sourceOffer, sourceReservationId: commercial?.sourceReservationId, startDate, explicitDueDate,
     });
     // Keep request-scoped review drafts outside the retryable financial transaction.
     if (!reused) {

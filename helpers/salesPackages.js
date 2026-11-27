@@ -7,6 +7,7 @@ const { KEY_PATTERN, getProjectCategory } = require('./projectCategories');
 const { sellableFeatureFilter, featureLines } = require('./featureCatalogue');
 const { MAX_PROJECT_FILES_PER_UPLOAD } = require('../config/uploadLimits');
 const { buildInstallments, buildAdvanceInstallments } = require('./projectInstallments');
+const { parsePaymentDueDays } = require('./paymentDueDate');
 
 const safeId = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 80 && !['constructor', 'prototype', '__proto__'].includes(value);
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -65,6 +66,7 @@ function monthlyPlanShape(item, unitPrice) {
   const servicePlan = {
     pricingMode: 'fixed', purchaseType: 'recurring', monthlyReferencePrice: unitPrice,
     billingOptions: monthly.billingOptions, maxTenureMonths: monthly.maxTenureMonths,
+    paymentDueDays: parsePaymentDueDays(item.paymentDueDays),
     capability: uploads ? 'upload_data' : 'send_reminders', serviceBehavior: uploads ? 'portal_access_control' : 'reminder_only',
     dependency: 'standalone_only', timing: 'during',
     ...(uploads ? { filesLimit: MAX_PROJECT_FILES_PER_UPLOAD, limitScope: count ? 'per_month' : 'unlimited', portalAccessCount: count || undefined,
@@ -142,12 +144,14 @@ function validatePackage(raw) {
   if (discountedPrice > regularPrice) fail('Discounted price cannot be more than the main price');
   const design = validateDesign(raw.design);
   const purchase = validatePurchase(raw);
+  const paymentDueDays = parsePaymentDueDays(raw.paymentDueDays);
   return {
     id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 500, 'description'),
     category: raw.category, status: raw.status, regularPrice, discountedPrice,
     offerExtraPrice: amount(raw.offerExtraPrice, 'offer extras price'), offerSlug: raw.offerSlug || '',
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
     linkedPlanIds: [...new Set(raw.linkedPlanIds)], order: raw.order, pages: [...new Set(pages)],
+    ...(raw.paymentDueDays !== undefined && raw.paymentDueDays !== null && raw.paymentDueDays !== '' ? { paymentDueDays } : {}),
     ...(design ? { design } : {}),
     ...(purchase || {}),
   };
@@ -181,8 +185,8 @@ function quotePackage(item, offers, now = Date.now()) {
     ? { ...calculateBenefit(item.regularPrice, offer, item.offerExtraPrice), regularPrice: item.regularPrice, offer, terms }
     : { discountAmount: 0, finalPrice: discountedPrice, regularPrice: discountedPrice, offer: null, terms };
   // Where and in what order a package is shown does not change its price or scope, so pages,
-  // design and order stay out of the version key; moving or reordering a package never invalidates an open project form.
-  const { pages, design, order, ...priced } = item;
+  // design, order and paymentDueDays stay out of the version key; moving, reordering or updating due days never invalidates an open project form.
+  const { pages, design, order, paymentDueDays, ...priced } = item;
   // An offer's own quoteKey (website src/lib/offer-quote.ts) already signs everything commercial
   // about it and leaves out display/timing settings such as its reserve window, so the package
   // version follows that key, as service-plan quotes do (serviceOfferPolicy.js). An offer

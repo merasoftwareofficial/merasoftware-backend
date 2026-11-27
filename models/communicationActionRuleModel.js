@@ -62,7 +62,7 @@ const rule = new Schema({
   },
   steps: { type: [step], default: [] },
   repeat: {
-    mode: { type: String, enum: ['off', 'permanent', 'limited'], default: 'off' },
+    mode: { type: String, enum: ['off', 'permanent', 'limited', 'until_due'], default: 'off' },
     forDays: { type: Number, min: 0, max: 180, default: 0 },
     everyDays: { type: Number, min: 1, max: 90 },
     times: { type: Number, min: 0, max: 60, default: 0 },

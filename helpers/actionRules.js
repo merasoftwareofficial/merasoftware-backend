@@ -128,12 +128,12 @@ function cleanRule(raw = {}) {
 
   const rawRepeatMode = raw.repeat?.mode;
   const repeatMode = (isTemplate || isNonMessage) ? 'off'
-    : (['off', 'permanent', 'limited'].includes(rawRepeatMode) ? rawRepeatMode : ((raw.repeat?.times || 0) > 0 ? 'limited' : 'off'));
+    : (['off', 'permanent', 'limited', 'until_due'].includes(rawRepeatMode) ? rawRepeatMode : ((raw.repeat?.times || 0) > 0 ? 'limited' : 'off'));
   const everyDays = repeatMode !== 'off' ? Number(raw.repeat?.everyDays || 1) : 1;
   const perDay = repeatMode !== 'off' ? Number(raw.repeat?.perDay ?? 1) : 1;
   const forDays = repeatMode === 'limited' ? Number(raw.repeat?.forDays || 0) : 0;
   const times = (isTemplate || isNonMessage) || repeatMode === 'off' ? 0
-    : repeatMode === 'permanent' ? 0
+    : (repeatMode === 'permanent' || repeatMode === 'until_due') ? 0
       : (raw.repeat?.times !== undefined ? Number(raw.repeat.times) : Math.min(60, Math.max(1, Math.floor((forDays || 1) / Math.max(1, everyDays)))));
   if (repeatMode === 'limited' && !int(times, 0, 60)) fail('Repeat can be 0 to 60 times.');
   if (repeatMode !== 'off' && !int(everyDays, 1, 90)) fail('Repeat every 1 to 90 days.');
@@ -142,7 +142,7 @@ function cleanRule(raw = {}) {
 
   const stopOn = isTemplate ? [] : [...new Set(Array.isArray(raw.stopOn) ? raw.stopOn : [])];
   if (stopOn.some(key => !ACTIONS[key])) fail('Choose a valid stop action.');
-  if (!isTemplate && !isNonMessage && (repeatMode === 'permanent' || clean.length + times > 1) && !stopOn.length) fail('A reminder needs a stop action.');
+  if (!isTemplate && !isNonMessage && (repeatMode === 'permanent' || repeatMode === 'until_due' || clean.length + times > 1) && !stopOn.length) fail('A reminder needs a stop action.');
 
   const rawDoAlso = Array.isArray(raw.doAlso) ? raw.doAlso : [];
   if (rawDoAlso.length > 5) fail('At most 5 automatic steps per rule.');
@@ -187,8 +187,8 @@ function cleanRule(raw = {}) {
     systemActions,
     scope: { kind: scopeKind, packageSlug, includedPackages, excludedPackages },
     steps: clean,
-    repeat: repeatMode === 'permanent'
-      ? { mode: 'permanent', forDays: 0, everyDays, times: 0, perDay }
+    repeat: (repeatMode === 'permanent' || repeatMode === 'until_due')
+      ? { mode: repeatMode, forDays: 0, everyDays, times: 0, perDay }
       : times
         ? (rawRepeatMode ? { mode: 'limited', forDays, everyDays, times, perDay } : { everyDays, times, perDay })
         : { times: 0, perDay: 1 },

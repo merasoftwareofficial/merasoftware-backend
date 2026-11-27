@@ -13,6 +13,7 @@ const { MAX_SERVICE_FILES_PER_UPLOAD } = require('../config/uploadLimits');
 const { requireActivePlanCategory, listPlanCategories } = require('./planCategories');
 const { CYCLE_MONTHS, assertPricingConfig, cyclePriceFromMonthly, priceRange, rupees } = require('./servicePlanPricing');
 const { assertCanBeOnSale, canBeOnSale } = require('./servicePlanLifecycle');
+const { parsePaymentDueDays } = require('./paymentDueDate');
 
 const PLAN_TYPES = ['website_updates', 'digital_marketing', 'google_business_setup', 'social_media_marketing', 'other'];
 const LIMIT_SCOPES = ['per_day', 'per_week', 'per_month', 'per_quarter', 'per_6_month', 'per_year', 'per_plan', 'unlimited', 'manual'];
@@ -102,6 +103,7 @@ async function planFieldsFrom(body, existing, { requireCategory }) {
     serviceBehavior: isUpload ? 'portal_access_control' : 'reminder_only',
     oneTimeValidityDays: wholeOrUndefined(body.oneTimeValidityDays, 'One-time validity'),
     maxTenureMonths: wholeOrUndefined(body.maxTenureMonths, 'Maximum length'),
+    paymentDueDays: parsePaymentDueDays(body.paymentDueDays),
     releaseMode: given(body.releaseMode) ? body.releaseMode : undefined,
     customerCanChooseRelease: body.customerCanChooseRelease === true,
   };
