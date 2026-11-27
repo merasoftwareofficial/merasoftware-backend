@@ -36,21 +36,34 @@ function resolveDueDaysFromOrder(order) {
   return Number.isFinite(num) && num > 0 ? Math.min(365, Math.round(num)) : 0;
 }
 
+function parseGraceEndAction(value) {
+  return value === 'auto_cancel' ? 'auto_cancel' : 'keep_open';
+}
+
+function resolveGraceEndAction(order) {
+  const raw =
+    order?.salesPackage?.package?.graceEndAction ??
+    order?.projectSnapshot?.salesAgreement?.package?.graceEndAction ??
+    'keep_open';
+  return parseGraceEndAction(raw);
+}
+
 /**
  * Single Source of Truth (SSOT) for invoice due date resolution.
+ * Due date is NEVER shifted by unpaid grace days (paymentDueDays):
+ *   - Monthly plans / packages: dueDate = Billing Cycle Date (invoiceDate)
+ *   - One-time projects / packages: explicit admin dueDate -> Offer dueDays -> installment dueDate -> invoiceDate
  * Priority order:
  *   1. Explicit admin dueDate override (manual project / admin form)
  *   2. Offer paymentPolicy.dueDays (when active for this cycle)
  *   3. Installment dueDate (when explicitly set on installment)
- *   4. Plan / Package paymentDueDays (0..365)
- *   5. Fallback: invoiceDate (0 days — 100% backward compatible)
+ *   4. Fallback: invoiceDate (0 days — Billing Cycle / Start Date)
  */
 function resolvePaymentDueDate({
   explicitDueDate = null,
   order = null,
   paymentPolicy = null,
   installmentDueDate = null,
-  planOrPackageDueDays = undefined,
   invoiceDate = new Date(),
   cycleNumber = 1,
 } = {}) {
@@ -70,16 +83,29 @@ function resolvePaymentDueDate({
   const instDue = validDateOrNull(installmentDueDate);
   if (instDue) return instDue;
 
-  const dueDays =
-    planOrPackageDueDays !== undefined && planOrPackageDueDays !== null
-      ? Math.max(0, Math.min(365, Number(planOrPackageDueDays) || 0))
-      : resolveDueDaysFromOrder(order);
-
-  if (dueDays > 0) {
-    return new Date(base.getTime() + dueDays * DAY);
-  }
-
   return new Date(base.getTime());
+}
+
+/**
+ * Single Source of Truth (SSOT) for the unpaid grace cutoff (auto-pause / optional auto-cancel).
+ * graceEndDate = dueDate + graceDays (when protectBackdated is true, anchored to max(dueDate, order.createdAt)).
+ */
+function resolveGraceCutoff({
+  order = null,
+  invoice = null,
+  dueDate = null,
+  graceDays = undefined,
+  protectBackdated = false,
+} = {}) {
+  const baseDue = validDateOrNull(dueDate) || validDateOrNull(invoice?.dueDate) || null;
+  if (!baseDue) return null;
+  const days =
+    graceDays !== undefined && graceDays !== null
+      ? Math.max(0, Math.min(365, Math.round(Number(graceDays) || 0)))
+      : resolveDueDaysFromOrder(order);
+  const created = protectBackdated ? validDateOrNull(order?.createdAt) : null;
+  const anchorMs = created ? Math.max(baseDue.getTime(), created.getTime()) : baseDue.getTime();
+  return new Date(anchorMs + days * DAY);
 }
 
 function isBackdatedDate(date, now = Date.now()) {
@@ -91,8 +117,11 @@ function isBackdatedDate(date, now = Date.now()) {
 module.exports = {
   DAY,
   parsePaymentDueDays,
+  parseGraceEndAction,
   offerPolicyAppliesToCycle,
   resolveDueDaysFromOrder,
+  resolveGraceEndAction,
   resolvePaymentDueDate,
+  resolveGraceCutoff,
   isBackdatedDate,
 };

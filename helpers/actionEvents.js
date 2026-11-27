@@ -1,17 +1,41 @@
 const Event = require('../models/communicationActionEventModel');
 
-const PAYMENT_CONDITIONS = [
-  { key: 'anytime', label: 'Anytime (always)' },
+const ALWAYS_ONLY = [{ key: 'anytime', label: 'Anytime (always)' }];
+const INVOICE_DUE_CONDITIONS = [
+  ...ALWAYS_ONLY,
   { key: 'unpaid', label: 'Only if payment is still unpaid' },
-  { key: 'pending_approval', label: 'Only if UPI is submitted (waiting for admin approval)' },
-  { key: 'paid', label: 'Only if already paid' },
   { key: 'installment_due', label: 'Only if current installment is due (unpaid)' },
 ];
-const PACKAGE_CONDITIONS = [
-  ...PAYMENT_CONDITIONS,
+const UPI_PENDING_CONDITIONS = [
+  ...ALWAYS_ONLY,
+  { key: 'pending_approval', label: 'Only if UPI is submitted (waiting for admin approval)' },
+];
+const UNPAID_ONLY_CONDITIONS = [
+  ...ALWAYS_ONLY,
+  { key: 'unpaid', label: 'Only if payment is still unpaid' },
+];
+const PROJECT_CONDITIONS = [
+  ...ALWAYS_ONLY,
+  { key: 'unpaid', label: 'Only if payment is still unpaid' },
+  { key: 'installment_due', label: 'Only if current installment is due (unpaid)' },
+];
+const PLAN_ACTIVE_CONDITIONS = [
+  ...ALWAYS_ONLY,
+  { key: 'unpaid', label: 'Only if payment is still unpaid' },
   { key: 'upload_pending', label: 'Only if data upload is pending' },
 ];
-const ALWAYS_ONLY = [{ key: 'anytime', label: 'Anytime (always)' }];
+const PLAN_PURCHASE_CONDITIONS = [
+  ...ALWAYS_ONLY,
+  { key: 'unpaid', label: 'Only if payment is still unpaid' },
+  { key: 'pending_approval', label: 'Only if UPI is submitted (waiting for admin approval)' },
+  { key: 'upload_pending', label: 'Only if data upload is pending' },
+];
+
+const FLOW_ONLY_ACTIONS = ['stage.continue', 'reminders.stop_all'];
+const CRM_FLOW_ACTIONS = ['stage.continue', 'reminders.stop_all', 'lead.create', 'lead.change_stage', 'lead.add_note'];
+const PAYMENT_ACTIONS = [...CRM_FLOW_ACTIONS, 'plan.deactivation_countdown', 'plan.expire', 'plan.stop_renewal'];
+const PLAN_ACTIONS = [...CRM_FLOW_ACTIONS, 'plan.deactivation_countdown', 'plan.pause', 'plan.expire', 'plan.stop_renewal'];
+const PLAN_EXPIRED_ACTIONS = [...CRM_FLOW_ACTIONS, 'plan.stop_renewal'];
 
 const FOLDERS = [
   'Payments & Invoices',
@@ -35,8 +59,9 @@ const ACTIONS = {
     entityType: 'invoice',
     trigger: true,
     supportsScope: true,
-    supportsLimit: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['due_date', 'grace_end_date', 'trigger_date'],
+    conditions: INVOICE_DUE_CONDITIONS,
+    systemActions: PAYMENT_ACTIONS,
     defaultStopOn: ['payment.received', 'order.upi_pending'],
   },
   'payment.received': {
@@ -47,7 +72,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'order.upi_pending': {
     label: 'Payment Submitted by Client (Approval Pending)',
@@ -57,7 +84,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
-    conditions: PAYMENT_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date'],
+    conditions: UPI_PENDING_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['payment.received', 'plan.payment_rejected'],
   },
   'plan.payment_rejected': {
@@ -68,7 +97,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
-    conditions: ALWAYS_ONLY,
+    baseDates: ['trigger_date', 'due_date'],
+    conditions: UNPAID_ONLY_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'wallet.recharged': {
     label: 'Wallet recharged',
@@ -77,7 +108,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'invoice.resent': {
     label: 'Invoice resent',
@@ -86,7 +119,9 @@ const ACTIONS = {
     entityType: 'invoice',
     trigger: true,
     supportsScope: false,
-    conditions: ALWAYS_ONLY,
+    baseDates: ['trigger_date', 'due_date'],
+    conditions: UNPAID_ONLY_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'invoice.manual_reminder': {
     label: 'Manual payment reminder',
@@ -95,7 +130,9 @@ const ACTIONS = {
     entityType: 'invoice',
     trigger: true,
     supportsScope: false,
-    conditions: ALWAYS_ONLY,
+    baseDates: ['trigger_date', 'due_date'],
+    conditions: UNPAID_ONLY_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'bank.account_updated': {
     label: 'Bank account added, updated or deleted',
@@ -104,7 +141,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
 
   // 2. Projects & Previews
@@ -117,7 +156,9 @@ const ACTIONS = {
     canStop: true,
     supportsScope: true,
     supportsProgress: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date', 'deadline_date'],
+    conditions: PROJECT_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['payment.received'],
   },
   'project.step_updated': {
@@ -128,7 +169,9 @@ const ACTIONS = {
     trigger: true,
     supportsScope: true,
     supportsProgress: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'deadline_date', 'due_date'],
+    conditions: PROJECT_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['payment.received', 'project.completed'],
   },
   'project.completed': {
@@ -139,8 +182,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
-    supportsProgress: true,
-    conditions: PAYMENT_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date'],
+    conditions: PROJECT_CONDITIONS,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['payment.received'],
   },
   'project.cancelled': {
@@ -151,7 +195,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'project.upgraded': {
     label: 'Project complimentary upgrade',
@@ -160,7 +206,9 @@ const ACTIONS = {
     entityType: 'order',
     trigger: true,
     supportsScope: true,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'preview.updated': {
     label: 'Website preview updated or shared',
@@ -169,7 +217,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
 
   // 3. Plans & Packages
@@ -182,7 +232,9 @@ const ACTIONS = {
     canStop: true,
     supportsScope: true,
     supportsLimit: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date'],
+    conditions: PLAN_ACTIVE_CONDITIONS,
+    systemActions: PLAN_ACTIONS,
     defaultStopOn: ['upload.completed', 'payment.received'],
   },
   'plan.purchased': {
@@ -193,7 +245,9 @@ const ACTIONS = {
     trigger: true,
     supportsScope: true,
     supportsLimit: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date'],
+    conditions: PLAN_PURCHASE_CONDITIONS,
+    systemActions: PLAN_ACTIONS,
     defaultStopOn: ['payment.received'],
   },
   'package.purchased': {
@@ -204,7 +258,9 @@ const ACTIONS = {
     trigger: true,
     supportsScope: true,
     supportsLimit: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date'],
+    conditions: PLAN_PURCHASE_CONDITIONS,
+    systemActions: PLAN_ACTIONS,
     defaultStopOn: ['upload.completed', 'payment.received'],
   },
   'plan.requested': {
@@ -214,7 +270,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'plan.work_updated': {
     label: 'Plan work update added',
@@ -224,7 +282,9 @@ const ACTIONS = {
     trigger: true,
     supportsScope: true,
     supportsLimit: true,
+    baseDates: ['trigger_date', 'expiry_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: PLAN_ACTIONS,
   },
   'plan.closed': {
     label: 'Plan closed / renewal stopped',
@@ -234,7 +294,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
+    baseDates: ['trigger_date', 'expiry_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'package.start_requested': {
     label: 'Package start requested',
@@ -243,7 +305,9 @@ const ACTIONS = {
     entityType: 'package_start',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['start_request.closed', 'project.created'],
   },
   'start_request.closed': {
@@ -254,7 +318,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'catalogue.plan_updated': {
     label: 'Plan or sales package catalogue updated',
@@ -263,7 +329,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
 
   // 4. Data Uploads & Documents
@@ -275,7 +343,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: true,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'plan.upload_updated': {
     label: 'Plan upload status changed',
@@ -285,7 +355,9 @@ const ACTIONS = {
     trigger: true,
     supportsScope: true,
     supportsLimit: true,
+    baseDates: ['trigger_date', 'expiry_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: PLAN_ACTIONS,
   },
 
   // 5. Leads, Offers & Reservations
@@ -343,7 +415,9 @@ const ACTIONS = {
     entityType: 'reservation',
     trigger: true,
     supportsScope: false,
+    baseDates: ['due_date', 'trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['payment.received', 'reservation.start_requested', 'reservation.expired'],
   },
   'reservation.extended': {
@@ -353,7 +427,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'reservation.start_requested': {
     label: 'Reservation start requested',
@@ -363,7 +439,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: false,
+    baseDates: ['trigger_date', 'due_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['start_request.closed', 'project.created'],
   },
   'reservation.expired': {
@@ -441,7 +519,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
   'product.updated': {
     label: 'Store product or category changed',
@@ -450,7 +530,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
   'broadcast.sent': {
     label: 'Broadcast sent',
@@ -459,7 +541,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
     defaultStopOn: ['whatsapp.ad_received'],
   },
   'whatsapp.ad_received': {
@@ -470,7 +554,9 @@ const ACTIONS = {
     trigger: true,
     canStop: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'subscription.updated': {
     label: 'Website subscription confirmation or management',
@@ -479,7 +565,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: CRM_FLOW_ACTIONS,
   },
   'trash.updated': {
     label: 'Record moved to trash, restored or deleted',
@@ -488,7 +576,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
   'settings.updated': {
     label: 'Admin, invoice or communication settings changed',
@@ -497,7 +587,9 @@ const ACTIONS = {
     entityType: 'none',
     trigger: true,
     supportsScope: false,
+    baseDates: ['trigger_date'],
     conditions: ALWAYS_ONLY,
+    systemActions: FLOW_ONLY_ACTIONS,
   },
   'plan.expired': {
     label: 'Plan / Package Expired',
@@ -508,7 +600,9 @@ const ACTIONS = {
     canStop: true,
     supportsScope: true,
     supportsLimit: true,
-    conditions: PACKAGE_CONDITIONS,
+    baseDates: ['trigger_date', 'expiry_date'],
+    conditions: PLAN_ACTIVE_CONDITIONS,
+    systemActions: PLAN_EXPIRED_ACTIONS,
     defaultStopOn: ['payment.received'],
   },
   'comment.posted': {

@@ -498,6 +498,8 @@ function buildTriggers(actions, allRules) {
       canStop: !!meta.canStop,
       defaultStopOn: meta.defaultStopOn || [],
       conditions: meta.conditions || [{ key: 'anytime', label: 'Anytime (always)' }],
+      baseDates: meta.baseDates || ['trigger_date'],
+      systemActions: meta.systemActions || null,
       origins,
       rules: allRules.filter(r => r.action === triggerKey),
       builtIn: { templates, reminders: [] },

@@ -9,6 +9,7 @@ const Lead = require('../models/leadModel');
 const { ACTIONS, enabled } = require('./actionEvents');
 const { SELECTABLE_LEAD_STATUSES, WON } = require('./leadStatuses');
 const { teamContacts, teamRecipients } = require('./teamContacts');
+const { resolveGraceCutoff, resolveDueDaysFromOrder } = require('./paymentDueDate');
 
 // Action rules (Reminder.md §4). Every minute (index.js, ACTION_RULES_ENABLED):
 // 1. each new action event stops matching scheduled runs, then plans runs for its enabled rules;
@@ -126,9 +127,10 @@ async function resolveEventContext(event, { needsPendingCheck = true, needsUploa
   const packageSlug = packageSlugOf(order);
   const hasUploaded = (needsUploadCheck && order) ? await orderHasUpload(order) : false;
   const dueDate = invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate || event.details?.dueDate || null;
+  const graceEndDate = resolveGraceCutoff({ order, invoice, dueDate }) || dueDate;
   const expiryDate = order?.serviceNextBillingDate || dueDate;
   const deadlineDate = order?.expectedCompletionDate || dueDate;
-  return { invoice, order, isPaid, isPendingApproval, isInstallmentDue, progress, remainingLimit, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate, expiryDate, deadlineDate };
+  return { invoice, order, isPaid, isPendingApproval, isInstallmentDue, progress, remainingLimit, isMonthly, isOfferPayment, offerOffsets, packageSlug, hasUploaded, originSurface, dueDate, graceEndDate, expiryDate, deadlineDate };
 }
 
 function ruleMatchesContext(rule, ctx) {
@@ -168,6 +170,7 @@ function ruleMatchesContext(rule, ctx) {
 function resolveBaseDate(rule, occurredAt, dueDate, ctx) {
   const mode = rule.baseDate || 'due_date';
   if (mode === 'trigger_date') return occurredAt;
+  if (mode === 'grace_end_date') return ctx?.graceEndDate || dueDate;
   if (mode === 'expiry_date') return ctx?.expiryDate || dueDate;
   if (mode === 'deadline_date') return ctx?.deadlineDate || dueDate;
   return dueDate;
@@ -238,9 +241,14 @@ function planRuns(rule, event, dueDate = event.details?.dueDate || null, ctx = n
       sends.push({ ...baseStep, dueAt: new Date(baseMs + offsetDays * DAY) });
     }
   } else {
+    const isProjected = String(event.key || '').startsWith('projected:');
+    const occurredMs = +new Date(event.occurredAt || Date.now());
     for (const step of rule.steps) {
       const dueAt = stepDueAt(step, event.occurredAt, effectiveBase);
-      if (dueAt) sends.push({ ...step, dueAt });
+      // Skip past before_due steps on real events (e.g. Month-1 unpaid buy when dueDate is today/tomorrow).
+      if (!dueAt) continue;
+      if (!isProjected && step.timingRef === 'before_due' && +dueAt < occurredMs) continue;
+      sends.push({ ...step, dueAt });
     }
   }
   if (!sends.length) return [];
@@ -311,9 +319,10 @@ const DIRECT_TEMPLATE_MIGRATED = new Set([
 async function handleEvent(event) {
   // Replace projected pre-renewal runs once the real plan_renewal invoice exists so reminders never double-send.
   if (event.action === 'invoice.created' && event.details?.invoiceType === 'plan_renewal' && event.orderId && event.details?.serviceCycleNumber) {
-    const projKey = `pkg-proj:${String(event.orderId)}:cycle:${Number(event.details.serviceCycleNumber)}`;
+    const oid = String(event.orderId);
+    const cyc = Number(event.details.serviceCycleNumber);
     await Run.updateMany(
-      { source: 'action', occurrenceKey: projKey, status: 'scheduled' },
+      { source: 'action', occurrenceKey: { $in: [`projected:${oid}:${cyc}`, `pkg-proj:${oid}:cycle:${cyc}`] }, status: 'scheduled' },
       { $set: { status: 'cancelled', reason: 'Replaced by real renewal invoice.' } },
     );
   }
@@ -851,6 +860,8 @@ async function dispatchRun(runId, now = new Date()) {
       deactivationDate,
       amount: (invoice || dueInst) ? `₹${invoiceAmount.toLocaleString('en-IN')}` : '',
       dueDate: day(invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate),
+      graceDays: order ? String(resolveDueDaysFromOrder(order)) : '0',
+      graceEndDate: day(resolveGraceCutoff({ order, invoice, dueDate: invoice?.dueDate || dueInst?.dueDate || order?.serviceNextBillingDate })),
       invoiceLink: invoice ? portalLink(`/invoice-detail/${invoice._id}`) : (order?._id ? portalLink(`/project-details/${order._id}`) : ''),
       projectLink: order?._id ? portalLink(`/project-details/${order._id}`) : '',
       planLink: order?._id ? portalLink(`/plan-details/${order._id}`) : '',
@@ -1000,19 +1011,18 @@ async function planProjectedMonthlyRuns() {
   const { packageReminderCandidate } = require('./packageReminderEligibility');
   const orders = await Order.find({
     isServicePlan: true,
-    'salesPackage.package.id': { $exists: true, $ne: null },
     paymentPolicy: null,
     orderVisibility: { $ne: 'cancelled' },
     servicePlanStatus: 'active',
     serviceAutoRenewalStoppedAt: null,
-  }).select('userId isServicePlan salesPackage servicePlanSnapshot orderItems servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber serviceTotalCycles serviceBillingTenureMonths serviceCyclePrice serviceStartNotifiedAt createdAt currentMonthUpdatesRemaining demoMode projectProgress installments expectedCompletionDate').lean();
+  }).select('userId productId isServicePlan salesPackage servicePlanSnapshot orderItems servicePlanStatus serviceAutoRenewalStoppedAt serviceNextBillingDate serviceBillingCycleMonths serviceCurrentCycleNumber serviceTotalCycles serviceBillingTenureMonths serviceCyclePrice serviceStartNotifiedAt createdAt currentMonthUpdatesRemaining demoMode projectProgress installments expectedCompletionDate').lean();
   if (!orders.length) return 0;
   const needsUploadCheck = rules.some(rule => rule.condition === 'upload_pending');
   const needsPendingCheck = rules.some(rule => ['unpaid', 'pending_approval', 'installment_due'].includes(rule.condition));
   const ruleIds = rules.map(rule => rule._id);
   let planned = 0;
   for (const order of orders) {
-    const candidate = packageReminderCandidate(order, null);
+    const candidate = packageReminderCandidate(order, null, { includeStandalonePlans: true });
     if (!candidate) continue;
     const packageSlug = packageSlugOf(order);
     const hasUploaded = needsUploadCheck ? await orderHasUpload(order) : false;
@@ -1022,7 +1032,8 @@ async function planProjectedMonthlyRuns() {
     const ctx = {
       invoice: null, order, isPaid: false, isPendingApproval, isInstallmentDue: false,
       progress, remainingLimit, isMonthly: true, packageSlug, hasUploaded, originSurface: '',
-      dueDate: candidate.due, expiryDate: candidate.due, deadlineDate: order.expectedCompletionDate || candidate.due,
+      dueDate: candidate.due, graceEndDate: candidate.graceEndDate || candidate.due,
+      expiryDate: candidate.due, deadlineDate: order.expectedCompletionDate || candidate.due,
     };
     const occurrenceKey = `projected:${order._id}:${candidate.cycle}`;
     const existingRows = await Run.find({ ruleId: { $in: ruleIds }, occurrenceKey }).select('ruleId ruleRevision step').lean();
@@ -1045,7 +1056,7 @@ async function planProjectedMonthlyRuns() {
         matchKeys: [`order:${order._id}`],
         details: { dueDate: candidate.due },
       };
-      for (const run of planRuns({ ...rule, steps: dueSteps }, fakeEvent, candidate.due)) {
+      for (const run of planRuns({ ...rule, steps: dueSteps }, fakeEvent, candidate.due, ctx)) {
         if (!startedAfterActivation && run.dueAt < activatedAt) continue;
         const stepKey = `${run.ruleId}:${run.ruleRevision}:${run.step}`;
         if (existingKeys.has(stepKey)) continue;
@@ -1063,7 +1074,9 @@ async function processActionRules(now = new Date(), { plan = true } = {}) {
   if (!enabled()) return { enabled: false };
   const events = await processEvents();
   const projected = plan ? await planProjectedMonthlyRuns() : 0;
-  await require('../cron/servicePlanRenewalCron').pauseOverdueServicePlans(now).catch(() => 0);
+  const renewalCron = require('../cron/servicePlanRenewalCron');
+  await renewalCron.pauseOverdueServicePlans(now).catch(() => 0);
+  await renewalCron.expireUnpaidOneTimeProjects(now).catch(() => 0);
   const dispatched = await dispatchDue(now);
   return { enabled: true, events, projected, dispatched };
 }

@@ -1,5 +1,5 @@
 const Rule = require('../models/communicationActionRuleModel');
-const { DAY } = require('./paymentDueDate');
+const { DAY, resolveGraceCutoff, resolveGraceEndAction } = require('./paymentDueDate');
 
 const DEFAULT_RIBBON_WINDOW_DAYS = 3;
 const OPEN_INVOICE_STATUSES = ['unpaid', 'partially_paid', 'overdue'];
@@ -115,6 +115,11 @@ function buildPaymentDueAlert({ order, invoice, rules = [], hasPendingPayment = 
     kind = 'due_today';
   }
 
+  const graceCutoff = resolveGraceCutoff({ order, invoice, dueDate: due, protectBackdated: !order.isServicePlan });
+  const graceDaysRemaining = (msDiff <= 0 && !isPaused && graceCutoff && graceCutoff.getTime() > nowMs)
+    ? Math.max(1, Math.ceil((graceCutoff.getTime() - nowMs) / DAY))
+    : 0;
+
   return {
     kind,
     orderId: String(order._id),
@@ -124,6 +129,9 @@ function buildPaymentDueAlert({ order, invoice, rules = [], hasPendingPayment = 
     installmentNumber: invoice.installmentNumber || null,
     amountDue,
     dueDate: due.toISOString(),
+    graceEndDate: graceCutoff ? graceCutoff.toISOString() : null,
+    graceDaysRemaining,
+    graceEndAction: resolveGraceEndAction(order),
     daysRemaining: Math.max(0, daysRemaining),
     daysOverdue: msDiff < 0 ? Math.max(1, Math.ceil(Math.abs(msDiff) / DAY)) : 0,
     ribbonWindowDays,

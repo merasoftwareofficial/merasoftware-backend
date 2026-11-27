@@ -14,10 +14,10 @@ const Event = require('../models/communicationActionEventModel');
 const Trail = require('../models/communicationTrailModel');
 const Rule = require('../models/communicationActionRuleModel');
 const Run = require('../models/communicationReminderRunModel');
-const { resolvePaymentDueDate, DAY } = require('../helpers/paymentDueDate');
+const { resolvePaymentDueDate, resolveGraceCutoff, DAY } = require('../helpers/paymentDueDate');
 const { quotePackage } = require('../helpers/salesPackages');
 const { planQuoteKey, quoteServicePlan } = require('../helpers/servicePlanPricing');
-const { processServicePlanRenewals, pauseOverdueServicePlans } = require('../cron/servicePlanRenewalCron');
+const { processServicePlanRenewals, pauseOverdueServicePlans, expireUnpaidOneTimeProjects } = require('../cron/servicePlanRenewalCron');
 const { settleServiceCycle } = require('../helpers/serviceCycleSettlement');
 const { list: listCommunicationActions } = require('../helpers/communicationActions');
 const { createTrail } = require('../helpers/communicationTrails');
@@ -49,7 +49,7 @@ beforeEach(async () => {
   ]);
 });
 
-test('1. resolvePaymentDueDate enforces 5-level SSOT priority & cycleScope fallback', () => {
+test('1. resolvePaymentDueDate keeps dueDate = billing/invoice date (never shifted by graceDays) & resolveGraceCutoff adds graceDays', () => {
   const base = new Date('2026-11-01T00:00:00.000Z');
   const explicit = new Date('2026-11-25T00:00:00.000Z');
   const instDue = new Date('2026-11-12T00:00:00.000Z');
@@ -74,42 +74,36 @@ test('1. resolvePaymentDueDate enforces 5-level SSOT priority & cycleScope fallb
     +resolvePaymentDueDate({ order: orderWithFirstPurchaseOffer, invoiceDate: base, cycleNumber: 1 }),
     +base + 15 * DAY,
   );
-  // 2b. Cycle 2 with first_purchase offer falls back cleanly to plan's paymentDueDays (7)
-  assert.equal(
-    +resolvePaymentDueDate({ order: orderWithFirstPurchaseOffer, invoiceDate: base, cycleNumber: 2 }),
-    +base + 7 * DAY,
-  );
+  // 2b. Cycle 2 with first_purchase offer keeps dueDate = Billing Cycle Date (base); graceCutoff adds 7 grace days
+  const cycle2Due = resolvePaymentDueDate({ order: orderWithFirstPurchaseOffer, invoiceDate: base, cycleNumber: 2 });
+  assert.equal(+cycle2Due, +base);
+  assert.equal(+resolveGraceCutoff({ order: orderWithFirstPurchaseOffer, dueDate: cycle2Due }), +base + 7 * DAY);
   // 2c. Cycle 2 with every_cycle offer keeps offer dueDays (15)
   assert.equal(
     +resolvePaymentDueDate({ order: orderWithEveryCycleOffer, invoiceDate: base, cycleNumber: 2 }),
     +base + 15 * DAY,
   );
-  // 3. Installment dueDate wins over package/plan dueDays when no offer policy
+  // 3. Installment dueDate wins when no explicit/offer dueDate
   assert.equal(
-    +resolvePaymentDueDate({ installmentDueDate: instDue, planOrPackageDueDays: 7, invoiceDate: base }),
+    +resolvePaymentDueDate({ installmentDueDate: instDue, invoiceDate: base }),
     +instDue,
   );
-  // 4. Plan/Package paymentDueDays when no explicit/offer/installment dueDate
-  assert.equal(
-    +resolvePaymentDueDate({ planOrPackageDueDays: 10, invoiceDate: base }),
-    +base + 10 * DAY,
-  );
-  // 5. Fallback = invoiceDate (0 days)
+  // 4. Fallback = invoiceDate (0 days)
   assert.equal(
     +resolvePaymentDueDate({ invoiceDate: base }),
     +base,
   );
 });
 
-test('2. Editing paymentDueDays never invalidates Sales Package quoteKey or Service Plan planQuoteKey', () => {
+test('2. Editing paymentDueDays or graceEndAction never invalidates Sales Package quoteKey or Service Plan planQuoteKey', () => {
   const pkg = {
     id: 'starter-pack', name: 'Starter Pack', description: 'Desc', category: 'standard_websites',
     status: 'published', regularPrice: 10000, discountedPrice: 8000, offerExtraPrice: 0,
     offerSlug: '', inclusions: ['5 pages'], terms: [], linkedPlanIds: [], order: 1, pages: [],
     billing: 'one_time', portalUploads: true, paymentOptions: ['full'],
   };
-  const q0 = quotePackage({ ...pkg, paymentDueDays: 0 }, []);
-  const q10 = quotePackage({ ...pkg, paymentDueDays: 10 }, []);
+  const q0 = quotePackage({ ...pkg, paymentDueDays: 0, graceEndAction: 'keep_open' }, []);
+  const q10 = quotePackage({ ...pkg, paymentDueDays: 10, graceEndAction: 'auto_cancel' }, []);
   assert.equal(q0.quoteKey, q10.quoteKey);
 
   const plan = {
@@ -167,17 +161,18 @@ test('3. Renewal stays active for paymentDueDays > 0, auto-pauses on overdue, an
 
   const inv7 = await Invoice.findOne({ orderId: activePlan._id, invoiceType: 'plan_renewal' }).lean();
   assert.ok(inv7);
-  assert.equal(+new Date(inv7.dueDate), +renewNow + 7 * DAY);
+  // Due date = exact billing cycle date (renewNow), never shifted by grace days
+  assert.equal(+new Date(inv7.dueDate), +renewNow);
 
-  // Day 5 (before due date): still active
+  // Day 5 (inside 7-day grace window): invoice marked overdue, plan stays active!
   await pauseOverdueServicePlans(new Date(+renewNow + 5 * DAY));
   assert.equal((await Order.findById(activePlan._id).lean()).servicePlanStatus, 'active');
+  assert.equal((await Invoice.findById(inv7._id).lean()).status, 'overdue');
 
-  // Day 8 (after due date): hard auto-pause + invoice marked overdue
+  // Day 8 (after 7-day grace cutoff): hard auto-pause
   const pausedCount = await pauseOverdueServicePlans(new Date(+renewNow + 8 * DAY));
   assert.equal(pausedCount, 1);
   assert.equal((await Order.findById(activePlan._id).lean()).servicePlanStatus, 'paused');
-  assert.equal((await Invoice.findById(inv7._id).lean()).status, 'overdue');
 
   // Client pays on Day 9 -> auto-resumes active and preserves Cycle 2 dates
   const paidInv = await Invoice.findByIdAndUpdate(
@@ -351,4 +346,51 @@ test('6. paymentDueRibbon derives window from active before_due Trail, shows ove
     }),
     null,
   );
+});
+
+test('7. Phase 5: One-time auto_cancel (zero-paid only), past before_due skip, and grace_end_date anchor', async () => {
+  const created = new Date('2026-11-01T00:00:00.000Z');
+  const zeroPaidOrder = await Order.create({
+    userId: customer._id, price: 5000, totalAmount: 5000, paidAmount: 0, orderVisibility: 'approved',
+    isServicePlan: false, createdAt: created,
+    orderItems: [{ id: 'ot1', name: 'One-Time Web', type: 'main', quantity: 1, originalPrice: 5000, finalPrice: 5000 }],
+    salesPackage: { package: { id: 'ot-web', name: 'One-Time Web', paymentDueDays: 5, graceEndAction: 'auto_cancel' } },
+  });
+  await Invoice.create({
+    userId: customer._id, orderId: zeroPaidOrder._id, invoiceNumber: 'INV-OT-0',
+    invoiceType: 'project', amount: 5000, amountPaid: 0, status: 'unpaid', invoiceDate: created, dueDate: created,
+  });
+
+  const partialPaidOrder = await Order.create({
+    userId: customer._id, price: 5000, totalAmount: 5000, paidAmount: 1000, orderVisibility: 'approved',
+    isServicePlan: false, createdAt: created,
+    orderItems: [{ id: 'ot2', name: 'One-Time Partial', type: 'main', quantity: 1, originalPrice: 5000, finalPrice: 5000 }],
+    salesPackage: { package: { id: 'ot-web', name: 'One-Time Partial', paymentDueDays: 5, graceEndAction: 'auto_cancel' } },
+  });
+  await Invoice.create({
+    userId: customer._id, orderId: partialPaidOrder._id, invoiceNumber: 'INV-OT-1',
+    invoiceType: 'project', amount: 5000, amountPaid: 1000, status: 'partially_paid', invoiceDate: created, dueDate: created,
+  });
+
+  // Day 3 (inside grace): neither cancelled
+  assert.equal(await expireUnpaidOneTimeProjects(new Date(+created + 3 * DAY)), 0);
+
+  // Day 6 (after 5d grace): zero-paid cancelled, partial-paid NEVER cancelled
+  assert.equal(await expireUnpaidOneTimeProjects(new Date(+created + 6 * DAY)), 1);
+  assert.equal((await Order.findById(zeroPaidOrder._id).lean()).orderVisibility, 'cancelled');
+  assert.equal((await Order.findById(partialPaidOrder._id).lean()).orderVisibility, 'approved');
+
+  // Past before_due auto-skip on Month-1 unpaid buy when dueDate = today
+  const now = new Date('2026-11-10T10:00:00.000Z');
+  const rule = {
+    _id: new mongoose.Types.ObjectId(), revision: 1, kind: 'reminder', baseDate: 'due_date',
+    steps: [
+      { timingRef: 'before_due', unit: 'days', days: 2, channel: 'whatsapp', text: '2d before' },
+      { timingRef: 'after_due', unit: 'days', days: 2, channel: 'whatsapp', text: '2d after' },
+    ],
+    repeat: { mode: 'off' }, stopOn: ['payment.received'],
+  };
+  const runs = worker.planRuns(rule, { key: 'inv:now', action: 'invoice.created', entityId: zeroPaidOrder._id, clientId: customer._id, occurredAt: now, matchKeys: [] }, now, null);
+  assert.equal(runs.length, 1, 'Past before_due step must be skipped on real event');
+  assert.equal(runs[0].text, '2d after');
 });

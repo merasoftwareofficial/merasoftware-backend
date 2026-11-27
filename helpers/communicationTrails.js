@@ -159,7 +159,7 @@ function normalizeReminderBlock(raw = {}, fallbackId = 1, defaultBaseDate = 'due
   const repeatPerDay = Number(r.repeatPerDay);
   const conditionValue = Number(r.conditionValue);
   const safeForDays = Number.isFinite(repeatForDays) ? Math.max(1, repeatForDays) : 7;
-  const countDaysFrom = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : defaultBaseDate;
+  const countDaysFrom = ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date', 'deadline_date'].includes(r.countDaysFrom) ? r.countDaysFrom : defaultBaseDate;
   const repeatMode = ['off', 'permanent', 'limited'].includes(r.repeatMode)
     ? r.repeatMode
     : (r.repeatMode === 'until_due' && countDaysFrom !== 'trigger_date' ? 'until_due' : 'off');
@@ -275,7 +275,7 @@ function compileReminders(reminders, parentActions, trailScopeMode, trailPackage
       : parentActions;
     const scopeObj = mapScope(trailScopeMode, trailPackages, startActions);
     const condFields = mapCondition(rem.condition, rem.conditionValue);
-    const baseDate = ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'].includes(rem.countDaysFrom) ? rem.countDaysFrom : 'due_date';
+    const baseDate = ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date', 'deadline_date'].includes(rem.countDaysFrom) ? rem.countDaysFrom : 'due_date';
     const stopOn = [...new Set((Array.isArray(rem.stopOn) ? rem.stopOn : []).filter(k => Boolean(ACTIONS[k])))];
     const repeatMode = ['off', 'permanent', 'limited'].includes(rem.repeatMode)
       ? rem.repeatMode

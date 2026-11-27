@@ -82,7 +82,7 @@ const startPlanForClient = handle('Failed to start the plan', async (req, res) =
       customerId: customer._id, orderId: order._id, amount: finalPrice,
       lineItems: [{ name: plan.serviceName, price: finalPrice }], serviceCycleNumber: 1,
       invoiceDate,
-      dueDate: require('../../helpers/paymentDueDate').resolvePaymentDueDate({ order, planOrPackageDueDays: servicePlan.paymentDueDays, invoiceDate, cycleNumber: 1 }),
+      dueDate: require('../../helpers/paymentDueDate').resolvePaymentDueDate({ order, invoiceDate, cycleNumber: 1 }),
       session,
     });
     let existingTransaction = null;

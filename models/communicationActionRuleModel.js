@@ -50,7 +50,7 @@ const rule = new Schema({
   maxProgress: { type: Number, min: 0, max: 100, default: null },
   minRemainingLimit: { type: Number, min: 0, max: 1000, default: null },
   maxRemainingLimit: { type: Number, min: 0, max: 1000, default: null },
-  baseDate: { type: String, enum: ['trigger_date', 'due_date', 'expiry_date', 'deadline_date'], default: 'due_date' },
+  baseDate: { type: String, enum: ['trigger_date', 'due_date', 'grace_end_date', 'expiry_date', 'deadline_date'], default: 'due_date' },
   timeoutAfterDays: { type: Number, min: 0, max: 365, default: 0 },
   anchorStep: { type: anchorStepSchema, default: null },
   systemActions: { type: [systemActionStep], default: [] },
