@@ -483,4 +483,53 @@ async function unlinkPackagePage(slug) {
   if (Object.keys(changes).length) await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
   return Object.keys(changes).length;
 }
-module.exports = { money, fail, readPackages, reservedPackageIds, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, INSTALLMENT_COUNT };
+// Permanently deletes an add-on from the product catalogue AND strips it (price, inclusion line, auto-terms)
+// from every saved package that uses it. Validates all affected packages and purchase history before writing.
+async function removeAddOnFromPackages(addOnId, offers = []) {
+  if (typeof addOnId !== 'string' || !/^[a-f\d]{24}$/i.test(addOnId)) fail('Choose a valid add-on');
+  const product = await Product.findOne({ _id: addOnId, category: 'feature_upgrades' }).select('_id serviceName').lean();
+  if (!product) fail('Add-on not found', 404);
+  const Order = require('../models/orderProductModel');
+  const purchaseCount = await Order.countDocuments({ productId: addOnId });
+  if (purchaseCount > 0) {
+    fail(`This add-on has ${purchaseCount} purchase${purchaseCount === 1 ? '' : 's'} and cannot be deleted. Hide it instead.`);
+  }
+  const packages = await readPackages();
+  const changes = {};
+  const updatedPackages = [];
+  const now = new Date();
+  for (const item of packages) {
+    const services = item.pricing?.services;
+    if (!Array.isArray(services) || !services.some(row => row.featureId === addOnId)) continue;
+    const removed = services.find(row => row.featureId === addOnId);
+    const remaining = services.filter(row => row.featureId !== addOnId);
+    const newRegularPrice = money(item.pricing.categoryBasePrice + remaining.reduce((sum, row) => sum + money(row.unitPrice * row.quantity), 0));
+    if (newRegularPrice <= 0) fail(`Package "${item.name}" would have ₹0 price without "${removed.name}". Edit that package first.`);
+    const newDiscountedPrice = Math.min(item.discountedPrice, newRegularPrice);
+    const newInclusions = (item.inclusions || []).filter(line => !isAddOnLine(line, removed.name));
+    if (!newInclusions.length) fail(`Package "${item.name}" has no other included work besides "${removed.name}". Edit that package first.`);
+    const newPricing = { ...item.pricing, services: remaining };
+    const typedTerms = (item.terms || []).filter(line => !automaticTerms(item.pricing).includes(line));
+    const newTerms = [...new Set([...typedTerms, ...automaticTerms(newPricing)])];
+    const nextItem = {
+      ...item,
+      regularPrice: newRegularPrice,
+      discountedPrice: newDiscountedPrice,
+      inclusions: newInclusions,
+      terms: newTerms,
+      pricing: newPricing,
+      updatedAt: now,
+    };
+    if (nextItem.offerSlug && nextItem.status !== 'archived') {
+      checkOfferFits(nextItem, offers.find(row => row.slug === nextItem.offerSlug));
+    }
+    changes[`packages.${item.id}`] = nextItem;
+    updatedPackages.push(item.name);
+  }
+  if (Object.keys(changes).length) {
+    await Catalogue.updateOne({ _id: 'packages' }, { $set: changes });
+  }
+  await Product.findByIdAndDelete(addOnId);
+  return { id: addOnId, updatedPackages };
+}
+module.exports = { money, fail, readPackages, reservedPackageIds, monthlyPlanShape, validatePackage, validateDesign, packageIdBase, offerEligible, calculateBenefit, quotePackage, quoteChoice, quotePackageChoice, catalogueWithQuotes, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, removeAddOnFromPackages, INSTALLMENT_COUNT };

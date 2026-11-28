@@ -217,6 +217,7 @@ router.patch('/admin/sales-packages/order', authToken, require('../controller/or
 router.patch('/admin/sales-packages/drafts', authToken, require('../controller/order/salesPackagesController').adminDraft);
 router.patch('/admin/sales-packages/offer-links', authToken, require('../controller/order/salesPackagesController').adminLinkOffer);
 router.patch('/admin/sales-packages/page-unlink', authToken, require('../controller/order/salesPackagesController').adminUnlinkPage);
+router.patch('/admin/sales-packages/addon-remove', authToken, require('../controller/order/salesPackagesController').adminRemoveAddOn);
 router.patch('/admin/sales-packages/quote', authToken, require('../controller/order/salesPackagesController').adminQuote);
 router.get('/integration/sales-packages', require('../controller/order/salesPackagesController').integrationRead);
 router.patch('/integration/sales-packages/quote', require('../controller/order/salesPackagesController').integrationQuote);

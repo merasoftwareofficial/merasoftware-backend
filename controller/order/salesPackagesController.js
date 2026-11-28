@@ -2,7 +2,7 @@ const User = require('../../models/userModel');
 const { requireIntegration } = require('../../helpers/integrationAuth');
 const Product = require('../../models/productModel');
 const { fetchWebsiteCatalogue } = require('../../helpers/websiteOffers');
-const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, fail } = require('../../helpers/salesPackages');
+const { catalogueWithQuotes, readPackages, quotePackageChoice, savePackage, deletePackage, transitionPackageStatus, updatePackageOrder, linkOfferPackages, unlinkPackagePage, removeAddOnFromPackages, fail } = require('../../helpers/salesPackages');
 const { listProjectCategories, categoryUsage } = require('../../helpers/projectCategories');
 const { FEATURE_UPGRADE_CATEGORY } = require('../../helpers/featureCatalogue');
 const drafts = require('../../helpers/packageDrafts');
@@ -30,10 +30,12 @@ const adminRead = handle(async (req, res) => {
   // The add-on services a package can be priced from (the same catalogue a custom project takes its add-ons from).
   // The website narrows them to the chosen category; the save checks again with featureCatalogue.js.
   const addOns = (await Product.find({ category: FEATURE_UPGRADE_CATEGORY, retiredAt: null, archivedAt: null }).sort({ createdAt: -1 })
-    .select('_id serviceName price sellingPrice isHidden isQuantityBased formattedDescriptions compatibleWith terms').lean())
+    .select('_id serviceName price sellingPrice isHidden isQuantityBased formattedDescriptions compatibleWith terms createdAt updatedAt').lean())
     .map(row => ({ id: String(row._id), name: row.serviceName, unitPrice: row.sellingPrice ?? row.price ?? 0, description: row.formattedDescriptions?.[0]?.content || '',
       isHidden: !!row.isHidden, isQuantityBased: !!row.isQuantityBased, compatibleWith: Array.isArray(row.compatibleWith) ? row.compatibleWith : [],
-      terms: Array.isArray(row.terms) ? row.terms : [] }));
+      terms: Array.isArray(row.terms) ? row.terms : [],
+      ...(row.createdAt ? { createdAt: new Date(row.createdAt).toISOString() } : {}),
+      ...(row.updatedAt ? { updatedAt: new Date(row.updatedAt).toISOString() } : {}) }));
   res.set('Cache-Control', 'no-store').json({ success: true, data: { packages: await catalogueWithQuotes(offers, true), offers, packagePages, plans, categories, addOns, drafts: await drafts.listDrafts() } });
 });
 // Package working copies (helpers/packageDrafts.js): save, delete after publish or discard, forget an ended offer.
@@ -129,4 +131,10 @@ const adminQuote = handle(async (req, res) => {
   if (item.billing === 'monthly' || (item.billing && req.body?.choice?.paymentOption)) data.quote = quoteChoice(item, quoted, req.body?.choice || {});
   res.set('Cache-Control', 'no-store').json({ success: true, data });
 });
-module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminOrder, adminDraft, adminLinkOffer, adminUnlinkPage, adminQuote, integrationRead, integrationQuote };
+const adminRemoveAddOn = handle(async (req, res) => {
+  await requireAdmin(req);
+  const { offers } = await fetchWebsiteCatalogue();
+  const result = await removeAddOnFromPackages(req.body?.addOnId, offers);
+  res.json({ success: true, data: result });
+});
+module.exports = { adminRead, adminSave, adminDelete, adminLifecycle, adminOrder, adminDraft, adminLinkOffer, adminUnlinkPage, adminRemoveAddOn, adminQuote, integrationRead, integrationQuote };

@@ -255,7 +255,10 @@ test('adminRead gives the form the base prices, add-ons and category usage; the 
   assert.equal(standard.basePrice, 10000);
   assert.equal(standard.usage.packages, 1);
   assert.ok(read.body.data.addOns.some(row => row.name === 'Hidden add-on' && row.isHidden === true));
-  assert.deepEqual(read.body.data.addOns.find(row => row.name === 'Extra page'), { id: String(pages._id), name: 'Extra page', unitPrice: 500, description: '', isHidden: false, isQuantityBased: true, compatibleWith: [], terms: [] });
+  const extra = read.body.data.addOns.find(row => row.name === 'Extra page');
+  assert.ok(Number.isFinite(Date.parse(extra.createdAt)) && Number.isFinite(Date.parse(extra.updatedAt)));
+  const { createdAt: _c, updatedAt: _u, ...extraRest } = extra;
+  assert.deepEqual(extraRest, { id: String(pages._id), name: 'Extra page', unitPrice: 500, description: '', isHidden: false, isQuantityBased: true, compatibleWith: [], terms: [] });
   assert.ok(read.body.data.packages.find(row => row.id === saved.id).pricing, 'the admin sees the frozen pricing');
   const publicRead = await call(integrationRead);
   assert.equal(publicRead.statusCode, 200, JSON.stringify(publicRead.body));
@@ -276,4 +279,18 @@ test('a project made from a priced package freezes its parts, and its invoice li
   const { buildInvoiceRows } = require('../helpers/generateInvoiceDocumentPdf');
   const rows = buildInvoiceRows({ invoice: { amount: order.totalAmount }, order, targetTotal: order.totalAmount });
   assert.deepEqual(rows.map(row => [row.name, row.price]), [['Business Starter', undefined], ['Standard Website base price', 10000], ['SEO setup', 3000], ['Package discount', -1000]]);
+});
+
+test('removeAddOnFromPackages strips the add-on, its price, inclusion line and terms from saved packages and deletes the product', async () => {
+  const { removeAddOnFromPackages } = require('../helpers/salesPackages');
+  const saved = await savePackage({ ...base, name: 'Two Add-ons', regularPrice: 13500, discountedPrice: 12000, inclusions: ['5 pages', 'SEO setup', '1 × Extra page'], services: [{ featureId: String(seo._id), quantity: 1 }, { featureId: String(pages._id), quantity: 1 }] }, true, []);
+  const res = await removeAddOnFromPackages(String(seo._id), []);
+  assert.deepEqual(res.updatedPackages, ['Two Add-ons']);
+  assert.equal(await Product.findById(seo._id), null);
+  const updated = (await readPackages()).find(row => row.id === saved.id);
+  assert.equal(updated.regularPrice, 10500);
+  assert.equal(updated.discountedPrice, 10500);
+  assert.deepEqual(updated.inclusions, ['5 pages', '1 × Extra page']);
+  assert.equal(updated.pricing.services.length, 1);
+  assert.equal(updated.terms.includes('SEO submission once.'), false);
 });
