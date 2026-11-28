@@ -147,7 +147,7 @@ function validatePackage(raw) {
   const paymentDueDays = parsePaymentDueDays(raw.paymentDueDays);
   const graceEndAction = parseGraceEndAction(raw.graceEndAction);
   return {
-    id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 500, 'description'),
+    id: raw.id, name: cleanText(raw.name, 120, 'package name'), description: cleanText(raw.description, 3000, 'description'),
     category: raw.category, status: raw.status, regularPrice, discountedPrice,
     offerExtraPrice: amount(raw.offerExtraPrice, 'offer extras price'), offerSlug: raw.offerSlug || '',
     inclusions: lines(raw.inclusions, 50, true), terms: lines(raw.terms, 50, false),
