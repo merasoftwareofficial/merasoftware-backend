@@ -173,27 +173,41 @@ test('a new category re-prices everything', async () => {
   assert.equal(withOnly.regularPrice, 20700);
 });
 
-test('a saved package keeps the way its price was set: neither way switches; typed one-time and monthly packages stay typed', async () => {
+test('a saved package can switch between manual (typed) and automatic (category + add-ons) for both one-time and monthly', async () => {
   const { billing, portalUploads, paymentOptions, ...old } = base;
   await Catalogue.updateOne({ _id: 'packages' }, { $set: { 'packages.legacy': { ...old, id: 'legacy', regularPrice: 15000, discountedPrice: 9999 } } }, { upsert: true });
   const typed = await savePackage({ ...old, id: 'legacy', regularPrice: 15000, discountedPrice: 9999 }, false, []);
   assert.equal(typed.regularPrice, 15000);
   assert.equal('pricing' in typed, false);
-  // A typed package cannot be switched to the category-and-add-ons price, with or without its purchase settings.
-  await assert.rejects(savePackage({ ...old, ...PURCHASE, id: 'legacy', regularPrice: 13000, discountedPrice: 9999, services: sel([seo]) }, false, []), /priced by hand and keeps it/);
+  // A legacy typed package switched to automatic with purchase settings gains a frozen pricing snapshot.
+  const legacySwitched = await savePackage({ ...old, ...PURCHASE, id: 'legacy', regularPrice: 13000, discountedPrice: 9999, services: sel([seo]) }, false, []);
+  assert.equal(legacySwitched.pricing.services.length, 1);
+  assert.equal(legacySwitched.regularPrice, 13000);
+
+  // A one-time typed package can be edited as typed or switched to automatic.
   await Catalogue.updateOne({ _id: 'packages' }, { $set: { 'packages.typedone': { ...base, id: 'typedone', regularPrice: 4000, discountedPrice: 3500 } } });
-  await assert.rejects(savePackage({ ...base, id: 'typedone', regularPrice: 13000, discountedPrice: 9999, services: sel([seo]) }, false, []), /priced by hand and keeps it/);
   assert.equal((await savePackage({ ...base, id: 'typedone', regularPrice: 4500, discountedPrice: 3500 }, false, [])).regularPrice, 4500, 'it stays typed and can be edited');
-  // The other way: a priced package cannot be turned into a typed one either (its parts would be lost unnoticed).
+  const typedToAuto = await savePackage({ ...base, id: 'typedone', regularPrice: 13000, discountedPrice: 9999, services: sel([seo]) }, false, []);
+  assert.equal(typedToAuto.pricing.categoryBasePrice, 10000);
+  assert.equal(typedToAuto.pricing.services.length, 1);
+
+  // An automatic package can be switched back to manual (typed), dropping the frozen pricing snapshot.
   const priced = await make({ name: 'Parts one' });
-  await assert.rejects(savePackage({ ...base, id: priced.id, regularPrice: 13000, discountedPrice: 12000 }, false, []), /Send its services, or duplicate it/);
-  // A new package takes either way (a copy of a typed one may be priced from its parts, and the reverse).
+  const autoToTyped = await savePackage({ ...base, id: priced.id, regularPrice: 14500, discountedPrice: 12000 }, false, []);
+  assert.equal('pricing' in autoToTyped, false);
+  assert.equal(autoToTyped.regularPrice, 14500);
+
+  // A new package still takes either way.
   const typedNew = await savePackage({ ...base, id: '', name: 'Typed new', regularPrice: 4000, discountedPrice: 3500 }, true, []);
   assert.equal('pricing' in typedNew, false);
   const partsNew = await savePackage({ ...base, id: '', name: 'Parts new', regularPrice: 13000, discountedPrice: 12000, services: sel([seo]) }, true, []);
   assert.equal(partsNew.pricing.services.length, 1);
-  // Monthly follows the same rule: a priced package made monthly keeps its parts (they must be sent), never a typed price.
-  await assert.rejects(savePackage({ ...base, id: priced.id, billing: 'monthly', paymentOptions: undefined, regularPrice: 13000, discountedPrice: 9999, monthly: { billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12 } }, false, []), /Send its services, or duplicate it/);
+
+  // Monthly follows the same rule: an automatic package switched to monthly without services becomes typed monthly.
+  const priced2 = await make({ name: 'Parts two' });
+  const autoToMonthlyTyped = await savePackage({ ...base, id: priced2.id, billing: 'monthly', paymentOptions: undefined, regularPrice: 13000, discountedPrice: 9999, monthly: { billingOptions: [{ billingCycle: 'monthly', discountPercent: 0 }], maxTenureMonths: 12 } }, false, []);
+  assert.equal('pricing' in autoToMonthlyTyped, false);
+  assert.equal(autoToMonthlyTyped.billing, 'monthly');
 });
 
 test('the quote key follows the frozen pricing, never the live catalogue; packages without it keep their key', async () => {

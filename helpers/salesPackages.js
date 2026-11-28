@@ -339,14 +339,12 @@ async function savePackage(raw, creating, offers, packagePages = []) {
   const category = await getProjectCategory(item.category);
   if (!category || (category.status !== 'active' && item.status !== 'archived')) fail('Choose an active project category');
   // A package is priced either from its category and add-ons (above) or by hand (typed main and discount price),
-  // chosen when it is made. A saved package keeps the way its price was set (owner decision 10 Nov 2026): neither way can
-  // be switched on a saved package; a copy (Duplicate) can be made the other way. A monthly package works the same way
+  // and may be switched between the two on edit as well. A monthly package works the same way
   // (owner decision 11 Nov 2026): its category + add-ons price is the price of one month.
   const selection = parseServiceSelection(raw);
   const previous = creating ? undefined : existing.find(row => row.id === item.id);
   if (selection !== undefined) {
     if (!item.billing) fail('Choose how this package is billed before pricing it from its category and add-ons');
-    if (previous && !previous.pricing) fail('This package was priced by hand and keeps it. Duplicate it to price a copy from its category and add-ons.');
     const priced = await priceFromCatalogue({ category, selection, previous, refresh: raw.repriceFromCurrent === true });
     if (money(item.regularPrice) !== priced.total) fail('The main price changed. Review the current category and add-on prices.', 409);
     // The admin's own lines are kept; lines this package got automatically last time are dropped first, so an add-on
@@ -356,8 +354,6 @@ async function savePackage(raw, creating, offers, packagePages = []) {
     item.terms = [...new Set([...typed, ...automaticTerms(item.pricing)])];
     item.inclusions = withAddOnNumbers(item.inclusions, item.pricing.services);
     if (item.terms.length > 50) fail('The package terms are more than 50 lines. Shorten them or remove an add-on.');
-  } else if (previous?.pricing) {
-    fail('This package is priced from its category and add-ons and keeps it. Send its services, or duplicate it to make a copy with typed prices.');
   }
   if (item.linkedPlanIds.length) {
     const count = await Product.countDocuments({ _id: { $in: item.linkedPlanIds }, category: 'service_plan', isServicePlan: true, isHidden: false, retiredAt: null, archivedAt: null });
